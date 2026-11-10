@@ -53,6 +53,7 @@ A session is a throwaway `logosctl` session wired to the devnet, for an app or a
 ```bash
 logos-devnet session new alice                          # lez_core and a funded wallet
 logos-devnet session new bob --module chat_module       # plus any module from the catalog
+logos-devnet session new carol --amount 5000000         # fund it with less than 10B lepta
 source <(logos-devnet session env alice)                # LOGOSCTL_CONFIG_DIR and the wallet
 ```
 
@@ -65,7 +66,9 @@ Each session runs its own daemon in `~/.logos-devnet/sessions/<name>`, with `lez
 | `LOGOS_DEVNET_WALLET_STORAGE` | the wallet's `storage.json` |
 | `LOGOS_DEVNET_ACCOUNT` | its funded account, `Public/<id>` |
 
-Sessions follow the chain. `down` stops their daemons, `up` starts them again and loads their modules, and `reset` funds their accounts again on the new chain. `session rm` deletes a session and its wallet.
+Sessions follow the chain. `down` stops their daemons. `up` starts them again, loads their modules and opens their wallets, also after a `--port` change. `reset` funds each account again with what it was created with. `session rm` deletes a session and its wallet.
+
+The catalog's `lez_core` is built for the LEZ release the testnet runs, so sessions match the default `--lez` tag.
 
 ## What runs
 
