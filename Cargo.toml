@@ -7,6 +7,8 @@ description = "A local LEZ chain for Logos development: one command to start it,
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/drptbl/logos-devnet"
 readme = "README.md"
+# The binary embeds docker/Dockerfile, so the package keeps it; CI config stays out.
+exclude = [".github/"]
 keywords = ["logos", "lez", "devnet", "blockchain", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 
