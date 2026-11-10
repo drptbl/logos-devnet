@@ -1,6 +1,6 @@
 # logos-devnet
 
-A local LEZ chain for Logos development. One command starts a sequencer on your machine with 1 second blocks and a funded faucet. Two more fund your accounts and deploy your programs. A transfer lands in about 2 seconds and a program deploy in about 10, and you never run out of testnet funds.
+A local LEZ chain for Logos development. One command starts a sequencer on your machine with 1 second blocks and a funded faucet, and a project file in your repo says what else it needs: programs, a hundred funded test accounts, `logosctl` sessions. A transfer lands in about 2 seconds and a program deploy in about 10, and you never run out of testnet funds.
 
 Keep the public testnet for final checks. Messaging (chat, discovery) isn't part of this: it stays on the Logos fleets.
 
@@ -13,7 +13,7 @@ cargo install --locked logos-devnet
 Or take a binary from the [latest release](https://github.com/drptbl/logos-devnet/releases/latest), built for macOS (`aarch64-apple-darwin`, `x86_64-apple-darwin`) and Linux (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, static, so any distribution), and check it against its `.sha256`:
 
 ```bash
-v=v0.1.0 t=aarch64-apple-darwin
+v=v0.2.0 t=aarch64-apple-darwin
 curl -fsSL --remote-name-all https://github.com/drptbl/logos-devnet/releases/download/$v/logos-devnet-$v-$t.tar.gz{,.sha256}
 shasum -a 256 -c logos-devnet-$v-$t.tar.gz.sha256 \
   && tar -xzf logos-devnet-$v-$t.tar.gz \
@@ -36,10 +36,11 @@ source ~/.logos-devnet/env                         # LOGOS_DEVNET_SEQUENCER, LOG
 
 | Command | What it does |
 | --- | --- |
-| `up` | Starts the devnet, or resumes it. Takes `--docker` or `--native`, `--lez <tag>`, `--port` and `--block-time`, and remembers them. `--rebuild` builds the image or binaries again. |
+| `up` | Starts the devnet, or resumes it, and makes it match your `logos-devnet.toml`. Takes `--docker` or `--native`, `--lez <tag>`, `--port`, `--block-time` and `--max-txs-per-block`, and remembers them. `--rebuild` builds the image or binaries again. |
 | `down` | Stops it. The chain is kept. |
-| `reset` | Deletes the chain and starts a new one. Takes the same options as `up`. |
-| `status` | What runs, the chain head, the faucet and deployed programs. |
+| `reset` | Deletes the chain and starts a new one, every account group funded at genesis. Takes the same options as `up`. |
+| `status` | What runs, the chain head, the faucet, programs, account groups and sessions. |
+| `doctor` | Checks Docker, the image, the port, the faucet and `logosctl`, and says how to fix what fails. |
 | `fund <account> [amount]` | Sends lepta from the faucet to a public account, 10B by default. |
 | `deploy <name> <elf>` | Deploys a program and adds `LOGOS_PROGRAM_<NAME>` and `LOGOS_PROGRAM_<NAME>_HEX` to the env file. Names are lower-case letters, digits and `-`. |
 | `wallet-config <dir>` | Writes a `wallet_config.json` pointing at the devnet into a new wallet directory. |
@@ -47,8 +48,65 @@ source ~/.logos-devnet/env                         # LOGOS_DEVNET_SEQUENCER, LOG
 | `logs [-f]` | Prints the sequencer's log. |
 | `session new <name> [--module <m>]` | Makes a `logosctl` session with a funded devnet wallet, see below. |
 | `session ls`, `session env <name>`, `session rm <name>` | Lists sessions, prints one's env to `source`, deletes one. |
+| `accounts new <name> --count <n> [--amount <a>]` | Makes a group of funded accounts, see below. |
+| `accounts ls` | Lists account groups. |
 
-A bad option changes nothing: `up` and `reset` check it, and build what they need, before they stop the running chain.
+Every command takes `--json` for scripts and agents, `--config <file>` for a project file elsewhere, and `--home <dir>`. A bad option changes nothing: `up` and `reset` check it, and build what they need, before they stop the running chain.
+
+## Set up a project
+
+Commit a `logos-devnet.toml` at your project's root, and `logos-devnet up` anywhere below it makes the devnet match:
+
+```toml
+[devnet]                 # optional, the same settings as up's flags
+block_time = "1s"
+max_txs_per_block = 100
+
+[programs]               # name = guest binary, relative to this file
+counter = "target/riscv32im-risc0-zkvm-elf/docker/counter.bin"
+
+[accounts.users]         # a group of funded accounts
+count = 100
+amount = 5_000_000_000   # lepta each, 10B when left out
+
+[sessions.alice]         # a logosctl session, as session new
+modules = ["chat_module"]
+```
+
+`up` deploys missing programs, makes and funds missing accounts and sessions, and changes nothing the second time (0.6 s). A program whose binary changed since it was deployed stays as it is, with a note: deployed programs are immutable, so `reset` deploys the new build. `up` checks the whole file before it touches the devnet.
+
+Projects share one devnet, `~/.logos-devnet` on port 3040, unless the file sets `home`, e.g. `home = ".logos-devnet"`, for a devnet of the project's own (give it its own `[devnet] port` too, if another one runs). On a shared devnet, a `[devnet]` section that disagrees with the running chain is refused rather than restarting the chain under the other projects: `down` and `up` apply it.
+
+## Many accounts
+
+An account group is any number of funded accounts for tests with many users: a hundred parties calling one program, say. Declare it in the project file or make one by hand:
+
+```bash
+logos-devnet accounts new users --count 100 --amount 5000000000
+```
+
+Its keys live in one LEZ wallet, `~/.logos-devnet/accounts/users/wallet`, which `lez_core` and the LEZ CLI wallet can both use. Its `accounts.json` lists every account, and `LOGOS_DEVNET_ACCOUNTS_USERS` in the env file points at it:
+
+```json
+{
+  "amount": 5000000000,
+  "accounts": [
+    { "index": 0, "id": "CfcghzvosNM114Akg71vuQyDApHPYpPVC9p4uPFQygye", "hex": "ad54f9c3…" }
+  ]
+}
+```
+
+A group that exists when a chain starts is funded at genesis, so a hundred accounts, or a thousand, are ready at once. One added to a running chain is funded one transfer at a time, about 2.4 s each (100 accounts took 237 s), so declare groups before the first `up`, or `reset`.
+
+How many transactions fit is set by `max_txs_per_block`. Upstream allows 20 per block, so at 1 s blocks about 20 per second. Measured with every account of a group sending one transfer at the same moment:
+
+| `max_txs_per_block` | Burst | Landed |
+| --- | --- | --- |
+| 20 | 100 transfers | 5 blocks of 20, 5.5 s |
+| 100 | 100 transfers | 1 block, 1.6 s |
+| 200 | 200 transfers | 197 in 1 block. 3 were refused by the RPC, which takes 100 connections at a time |
+
+Up to 1000 is accepted. Above 100 clients at the same instant, the RPC answers 429 to the rest, so retry or spread them.
 
 ## Point your project at it
 
@@ -111,8 +169,38 @@ Everything is in `~/.logos-devnet` (or `LOGOS_DEVNET_HOME`):
 | `compose.yaml` | the Docker runtime's compose file |
 | `native/` | the native runtime's LEZ checkout, build, log and pid file |
 | `sessions/` | one directory per session: its `logosctl` home, wallet and `session.json` |
+| `accounts/` | one directory per account group: its wallet and `accounts.json` |
+| `programs.json` | the binary hash each program was deployed from |
 
 The RPC listens on `127.0.0.1` only. It has no authentication, so don't publish the port.
+
+## JSON
+
+With `--json`, a command prints one JSON document and nothing else on stdout. Notes go to stderr. The fields:
+
+| Command | Fields |
+| --- | --- |
+| `up`, `reset`, `status` | `lez`, `runtime`, `sequencer` (`url`, `running`, `block`, `max_txs_per_block`, `block_time`), `faucet` (`account`, `balance`), `programs`, `account_groups`, `sessions`, `env_file` |
+| `deploy` | `name`, `id`, `hex`, `var`, `deployed_now` |
+| `fund` | `account`, `balance` |
+| `accounts new`, `accounts ls` | `name`, `accounts`, `amount`, `file`, `wallet`, `var` (a list for `ls`) |
+| `session new` | `name`, `modules`, `vars` |
+| `session ls` | a list of `name`, `running`, `account`, `balance`, `error` |
+| `env`, `session env` | an object of variable to value |
+| `doctor` | `ok`, `checks` (`name`, `ok`, `detail`, `fix`) |
+
+## In CI
+
+The repo is a GitHub Action. On a Linux runner it installs `logos-devnet`, starts the devnet from your project file and exports the env into the job:
+
+```yaml
+- uses: drptbl/logos-devnet@v0.2.0
+  with:
+    args: --max-txs-per-block 100     # optional, more options for up
+- run: cargo test                     # LOGOS_DEVNET_SEQUENCER, LOGOS_PROGRAM_*, LOGOS_DEVNET_ACCOUNTS_* are set
+```
+
+Inputs: `version` (default: the tag you use the action at), `config`, `working-directory`, `args`, and `start: "false"` to only install. Output: `sequencer`. macOS runners have no Docker, so it refuses them.
 
 ## The image
 
