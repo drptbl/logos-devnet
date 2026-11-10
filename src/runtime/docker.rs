@@ -141,7 +141,7 @@ impl Runtime for Docker {
 
     /// Deletes through a container rather than on the host. OrbStack shows a host-side delete
     /// inside its VM late, and a sequencer started within that window found the old chain's
-    /// key still listed but unreadable ("No such file or directory"): one reset in three.
+    /// key still listed but unreadable ("No such file or directory"): one reset in five.
     fn wipe_chain(&self) -> Result<()> {
         let chain = self.home.chain_dir();
         if !chain.exists() {
