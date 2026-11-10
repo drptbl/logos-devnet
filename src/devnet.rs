@@ -203,7 +203,9 @@ impl Devnet {
                 settings.lez
             );
         }
-        self.check_project_needs()?;
+        // The devnet as it will run: its runtime is the one that has to read the binaries.
+        let mut next = Self::with(self.home.clone(), settings.clone(), self.project.clone());
+        next.check_project_needs()?;
         // Nothing to restart, unless the settings file is gone and needs writing again.
         let unchanged = settings == self.settings && self.home.settings_file().exists();
         if !wipe && unchanged && !opts.rebuild && running {
@@ -219,7 +221,6 @@ impl Devnet {
             port_free(settings.port)?;
         }
 
-        let mut next = Self::with(self.home.clone(), settings, self.project.clone());
         next.runtime.prepare(opts.rebuild)?;
         let faucet = next.dev_faucet()?;
         if continuing && funds_another_faucet(self.settings.faucet.as_ref(), &faucet) {
@@ -289,6 +290,9 @@ impl Devnet {
             return Ok(());
         };
         project.check_binaries()?;
+        for binary in project.programs.values() {
+            self.runtime.check_wallet_file(binary)?;
+        }
         let new_session = project
             .sessions
             .keys()
@@ -1048,6 +1052,25 @@ mod tests {
     use super::*;
 
     const ID: &str = "HpavNGFYxjyhLsy171aXsvv146yUeXmRWiho22uvT43d";
+
+    #[test]
+    fn refuses_a_binary_docker_cant_mount_before_touching_the_devnet() {
+        let dir = tempfile::tempdir().unwrap();
+        let build = dir.path().join("build:debug");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(build.join("counter.bin"), b"elf").unwrap();
+        std::fs::write(
+            dir.path().join(crate::project::FILE_NAME),
+            "[programs]\ncounter = \"build:debug/counter.bin\"\n",
+        )
+        .unwrap();
+        let project = Project::load(&dir.path().join(crate::project::FILE_NAME)).unwrap();
+        let home = Home::locate(Some(dir.path().join("home"))).unwrap();
+        let devnet = Devnet::open(home, Some(project)).unwrap();
+        assert_eq!(devnet.settings().runtime, RuntimeKind::Docker);
+        let err = devnet.check_project_needs().unwrap_err();
+        assert!(format!("{err:#}").contains("holds a `:`"), "{err:#}");
+    }
 
     #[test]
     fn makes_distinct_64_hex_keys() {

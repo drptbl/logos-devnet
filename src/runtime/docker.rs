@@ -223,6 +223,10 @@ impl Runtime for Docker {
             .map_err(redacted)
     }
 
+    fn check_wallet_file(&self, path: &Path) -> Result<()> {
+        mountable(path).map(drop)
+    }
+
     fn wallet_batch(&self, home: &Path, runs: &[Vec<String>]) -> Result<Vec<String>> {
         let mut cmd = self.wallet_run(home)?;
         cmd.args(["--entrypoint", "sh", "wallet", "-c"])

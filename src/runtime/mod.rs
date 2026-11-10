@@ -66,6 +66,10 @@ pub trait Runtime {
     /// writes some results to stdout and some to stderr), recovery phrase hidden. Fails when
     /// the wallet does. `home` must hold a `wallet_config.json` pointing at the devnet.
     fn wallet(&self, home: &Path, args: Vec<WalletArg>) -> Result<String>;
+    /// Fails when `wallet` couldn't read `path` as a `WalletArg::File`, e.g. a program binary.
+    fn check_wallet_file(&self, _path: &Path) -> Result<()> {
+        Ok(())
+    }
     /// Runs several wallet commands with text arguments on the wallet in `home` in one go (one
     /// container under Docker), and returns each one's output in order, recovery phrase hidden.
     fn wallet_batch(&self, home: &Path, runs: &[Vec<String>]) -> Result<Vec<String>>;
