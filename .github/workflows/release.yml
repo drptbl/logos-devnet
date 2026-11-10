@@ -3,7 +3,8 @@ name: release
 # On a `v*` tag on main: checks it like CI does, builds the CLI for macOS (arm64, x86_64) and
 # Linux (amd64, arm64; static musl binaries, so any glibc works), attaches the archives and their
 # SHA-256 sums to a GitHub Release, then publishes the crate to crates.io. crates.io goes last: a
-# version published there can only be yanked, never replaced.
+# version published there can only be yanked, never replaced. Publishing uses crates.io trusted
+# publishing: a token minted for this run from GitHub's OIDC identity, revoked when the job ends.
 
 on:
   push:
@@ -114,6 +115,9 @@ jobs:
   crates-io:
     needs: github-release
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -121,6 +125,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
         with:
           toolchain: stable
+      - id: auth
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
       - run: cargo publish --locked
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
