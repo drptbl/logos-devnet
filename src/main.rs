@@ -124,6 +124,22 @@ enum SessionCommand {
     Rm { name: String },
 }
 
+impl Command {
+    /// Whether it changes the devnet, and so takes its turn on the home.
+    fn changes_devnet(&self) -> bool {
+        !matches!(
+            self,
+            Command::Status
+                | Command::Doctor
+                | Command::WalletConfig { .. }
+                | Command::Env
+                | Command::Logs { .. }
+                | Command::Accounts(AccountsCommand::Ls)
+                | Command::Session(SessionCommand::Ls | SessionCommand::Env { .. })
+        )
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let json = cli.json;
@@ -145,7 +161,13 @@ fn main() -> Result<()> {
     let home = cli
         .home
         .or_else(|| project.as_ref().and_then(|p| p.home.clone()));
-    let devnet = Devnet::open(Home::locate(home)?, project)?;
+    let home = Home::locate(home)?;
+    let _lock = cli
+        .command
+        .changes_devnet()
+        .then(|| home.lock())
+        .transpose()?;
+    let devnet = Devnet::open(home, project)?;
     match cli.command {
         Command::Up(opts) => emit(&devnet.up(&opts)?, json),
         Command::Down => emit(&devnet.down()?, json),

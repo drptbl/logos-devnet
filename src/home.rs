@@ -11,6 +11,7 @@
 //! sessions/       throwaway logosctl sessions with devnet wallets (see session)
 //! accounts/       account groups: many funded keys for tests (see groups)
 //! programs.json   the binary hash each program was deployed from
+//! lock            held by the command changing the home, so two take turns
 //! ```
 
 use std::path::{Component, Path, PathBuf};
@@ -100,6 +101,33 @@ impl Home {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Holds the home for one command that changes it, until dropped. A second such command,
+    /// e.g. from another project sharing the home, waits, so starting, wiping and making
+    /// accounts never interleave.
+    pub fn lock(&self) -> Result<std::fs::File> {
+        std::fs::create_dir_all(&self.root)?;
+        let path = self.root.join("lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) => eprintln!(
+                "Waiting for another logos-devnet command using {}...",
+                self.root.display()
+            ),
+            Err(std::fs::TryLockError::Error(e)) => {
+                return Err(e).with_context(|| format!("locking {}", path.display()));
+            }
+        }
+        file.lock()
+            .with_context(|| format!("locking {}", path.display()))?;
+        Ok(file)
     }
 
     pub fn is_default(&self) -> bool {
@@ -243,6 +271,20 @@ pub fn write_json(path: &Path, value: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_command_at_a_time_holds_the_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Home::locate(Some(dir.path().to_path_buf())).unwrap();
+        let held = home.lock().unwrap();
+        let other = std::fs::File::open(home.root().join("lock")).unwrap();
+        assert!(matches!(
+            other.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(held);
+        assert!(other.try_lock().is_ok());
+    }
 
     #[test]
     fn a_fresh_home_has_default_settings() {
