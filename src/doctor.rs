@@ -4,9 +4,10 @@ use std::process::{Command, Stdio};
 
 use serde::Serialize;
 
-use crate::devnet::Devnet;
+use crate::devnet::{Devnet, port_free};
 use crate::home::RuntimeKind;
 use crate::report::Report;
+use crate::runtime::{docker_reachable, image_present};
 use crate::session;
 
 #[derive(Debug, Serialize)]
@@ -60,34 +61,27 @@ pub fn run(devnet: &Devnet, project_error: Option<&anyhow::Error>) -> Doctor {
 
     match settings.runtime {
         RuntimeKind::Docker => {
-            checks.push(
-                if command_ok("docker", &["info", "--format", "{{.ServerVersion}}"]) {
-                    pass("docker", "the daemon answers")
-                } else {
-                    fail(
-                        "docker",
-                        "no Docker daemon answers",
-                        "start Docker (OrbStack, Docker Desktop or Colima), or use `up --native`",
-                    )
-                },
-            );
-            let image = settings.image();
-            checks.push(
-                if command_ok(
+            checks.push(if docker_reachable() {
+                pass("docker", "the daemon answers")
+            } else {
+                fail(
                     "docker",
-                    &["image", "inspect", "--format", "{{.Id}}", &image],
-                ) {
-                    pass("image", format!("{image} is here"))
-                } else if command_ok("docker", &["manifest", "inspect", &image]) {
-                    pass("image", format!("{image} will be pulled on `up`"))
-                } else {
-                    fail(
-                        "image",
-                        format!("{image} is neither here nor pullable"),
-                        "`up` builds it locally (this takes a while), or check your network",
-                    )
-                },
-            );
+                    "no Docker daemon answers",
+                    "start Docker (OrbStack, Docker Desktop or Colima), or use `up --native`",
+                )
+            });
+            let image = settings.image();
+            checks.push(if image_present(&image) {
+                pass("image", format!("{image} is here"))
+            } else if command_ok("docker", &["manifest", "inspect", &image]) {
+                pass("image", format!("{image} will be pulled on `up`"))
+            } else {
+                fail(
+                    "image",
+                    format!("{image} is neither here nor pullable"),
+                    "`up` builds it locally (this takes a while), or check your network",
+                )
+            });
         }
         RuntimeKind::Native => {
             for tool in ["git", "cargo"] {
@@ -110,7 +104,7 @@ pub fn run(devnet: &Devnet, project_error: Option<&anyhow::Error>) -> Doctor {
             "port",
             format!("{} serves the devnet", settings.sequencer_url()),
         )
-    } else if std::net::TcpListener::bind(("127.0.0.1", settings.port)).is_ok() {
+    } else if port_free(settings.port).is_ok() {
         pass("port", format!("{} is free", settings.port))
     } else {
         fail(

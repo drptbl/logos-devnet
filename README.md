@@ -40,7 +40,7 @@ source ~/.logos-devnet/env                         # LOGOS_DEVNET_SEQUENCER, LOG
 | `down` | Stops it. The chain is kept. |
 | `reset` | Deletes the chain and starts a new one, every account group funded at genesis. Takes the same options as `up`. |
 | `status` | What runs, the chain head, the faucet, programs, account groups and sessions. |
-| `doctor` | Checks Docker, the image, the port, the faucet and `logosctl`, and says how to fix what fails. |
+| `doctor` | Checks the project file, Docker and the image (or git and cargo with `--native`), the port, the faucet and, when sessions need it, `logosctl`, and says how to fix what fails. |
 | `fund <account> [amount]` | Sends lepta from the faucet to a public account, 10B by default. |
 | `deploy <name> <elf>` | Deploys a program and adds `LOGOS_PROGRAM_<NAME>` and `LOGOS_PROGRAM_<NAME>_HEX` to the env file. Names are lower-case letters, digits and `-`. |
 | `wallet-config <dir>` | Writes a `wallet_config.json` pointing at the devnet into a new wallet directory. |
@@ -75,7 +75,7 @@ modules = ["chat_module"]
 
 `up` deploys missing programs, makes and funds missing accounts and sessions, and changes nothing the second time (0.6 s). A program whose binary changed since it was deployed stays as it is, with a note: deployed programs are immutable, so `reset` deploys the new build. `up` checks the whole file before it touches the devnet.
 
-Projects share one devnet, `~/.logos-devnet` on port 3040, unless the file sets `home`, e.g. `home = ".logos-devnet"`, for a devnet of the project's own (give it its own `[devnet] port` too, if another one runs). On a shared devnet, a `[devnet]` section that disagrees with the running chain is refused rather than restarting the chain under the other projects: `down` and `up` apply it.
+Projects share one devnet, `~/.logos-devnet` on port 3040, unless the file sets `home`, e.g. `home = ".logos-devnet"`, for a devnet of the project's own (give it its own `[devnet] port` too, if another one runs). On a shared devnet, a `[devnet]` section that disagrees with the running chain is refused rather than restarting the chain under the other projects: `down` and `up` apply it. A `reset` there funds every project's account groups again, and each project's next `up` deploys its programs on the new chain.
 
 ## Many accounts
 
@@ -96,7 +96,7 @@ Its keys live in one LEZ wallet, `~/.logos-devnet/accounts/users/wallet`, which 
 }
 ```
 
-A group that exists when a chain starts is funded at genesis, so a hundred accounts, or a thousand, are ready at once. One added to a running chain is funded one transfer at a time, about 2.4 s each (100 accounts took 237 s), so declare groups before the first `up`, or `reset`.
+A group that exists when a chain starts is funded at genesis, so a hundred accounts, or a thousand, are ready at once. One added to a running chain is funded one transfer at a time, about 2.4 s each (100 accounts took 237 s), so declare groups before the first `up`, or `reset`. A group never shrinks: a lower `count` keeps the accounts it has. A new `amount` applies to new accounts, and to every account after `reset`. Making the keys is quick, 500 in under 3 s. Accounts that send need more than they move: every call holds about 1.6M lepta of fees up front, so give a sending group at least a few million each (the default is 10B).
 
 How many transactions fit is set by `max_txs_per_block`. Upstream allows 20 per block, so at 1 s blocks about 20 per second. Measured with every account of a group sending one transfer at the same moment:
 
@@ -187,6 +187,8 @@ With `--json`, a command prints one JSON document and nothing else on stdout. No
 | `session new` | `name`, `modules`, `vars` |
 | `session ls` | a list of `name`, `running`, `account`, `balance`, `error` |
 | `env`, `session env` | an object of variable to value |
+| `wallet-config` | `path` |
+| `down`, `session rm` | `message` |
 | `doctor` | `ok`, `checks` (`name`, `ok`, `detail`, `fix`) |
 
 ## In CI
@@ -200,7 +202,7 @@ The repo is a GitHub Action. On a Linux runner it installs `logos-devnet`, start
 - run: cargo test                     # LOGOS_DEVNET_SEQUENCER, LOGOS_PROGRAM_*, LOGOS_DEVNET_ACCOUNTS_* are set
 ```
 
-Inputs: `version` (default: the tag you use the action at), `config`, `working-directory`, `args`, and `start: "false"` to only install. Output: `sequencer`. macOS runners have no Docker, so it refuses them.
+Inputs: `version` (default: the release tag you use the action at, so set it when you pin a commit SHA), `config`, `working-directory`, `args` (space-separated, without shell quoting), and `start: "false"` to only install. Output: `sequencer`. macOS runners have no Docker, so it refuses them.
 
 ## The image
 

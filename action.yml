@@ -94,9 +94,15 @@ runs:
         if [ -n "$CONFIG" ]; then
           config=(--config "$CONFIG")
         fi
+        # Space-separated options, without shell quoting.
         read -r -a args <<< "$ARGS"
         logos-devnet "${config[@]}" up "${args[@]}"
-        logos-devnet "${config[@]}" env --json \
-          | jq -r 'to_entries[] | "\(.key)=\(.value)"' >> "$GITHUB_ENV"
-        echo "sequencer=$(logos-devnet "${config[@]}" env --json | jq -r .LOGOS_DEVNET_SEQUENCER)" \
-          >> "$GITHUB_OUTPUT"
+        env_json=$(logos-devnet "${config[@]}" env --json)
+        # A value with a newline could add variables of its own to the job.
+        if ! jq -e 'all(.[]; contains("\n") | not)' <<< "$env_json" >/dev/null; then
+          echo "::error::a devnet env value holds a newline; use paths without one"
+          exit 1
+        fi
+        jq -r 'to_entries[] | "\(.key)=\(.value)"' <<< "$env_json" >> "$GITHUB_ENV"
+        sequencer=$(jq -r .LOGOS_DEVNET_SEQUENCER <<< "$env_json")
+        echo "sequencer=$sequencer" >> "$GITHUB_OUTPUT"

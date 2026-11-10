@@ -170,17 +170,7 @@ pub fn logosctl_on_path() -> bool {
 /// Session names are lower-case letters, digits and `-`, starting with a letter: they become
 /// directory names.
 pub fn check_session_name(name: &str) -> Result<()> {
-    let ok = name.len() <= 32
-        && name.chars().next().is_some_and(|c| c.is_ascii_lowercase())
-        && name
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
-    if !ok {
-        bail!(
-            "session names are up to 32 lower-case letters, digits and -, starting with a letter: {name}"
-        );
-    }
-    Ok(())
+    crate::envfile::check_name("session", name)
 }
 
 /// The Logos Core CLI for one session directory.
@@ -495,7 +485,7 @@ esac"#,
     fn checks_session_names() {
         assert!(check_session_name("alice").is_ok());
         assert!(check_session_name("agent-2").is_ok());
-        for bad in ["", "Alice", "2nd", "a b", "../x", "a/b", &"a".repeat(33)] {
+        for bad in ["", "Alice", "2nd", "a b", "../x", "a/b", &"a".repeat(49)] {
             assert!(check_session_name(bad).is_err(), "{bad:?}");
         }
     }

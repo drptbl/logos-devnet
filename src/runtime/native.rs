@@ -14,7 +14,7 @@ use serde_json::Value;
 
 use super::{
     LEZ_REPO, Runtime, SEQUENCER_FEATURES, SEQUENCER_LOG, WalletArg, all_output_of, batch_script,
-    redact_recovery_phrase, redacted, run_attached, split_batch, stdout_of,
+    redact_recovery_phrase, redacted, run_attached, run_building, split_batch, stdout_of,
 };
 use crate::home::{Home, Settings};
 
@@ -76,7 +76,7 @@ impl Native {
         }
         std::fs::create_dir_all(self.tag_dir())?;
         eprintln!("Cloning LEZ {}...", self.settings.lez);
-        run_attached(
+        run_building(
             Command::new("git")
                 .args([
                     "clone",
@@ -115,12 +115,12 @@ impl Runtime for Native {
         };
         // Two builds: in one, `prove` would reach the wallet too, which then links the prover
         // kernels that RISC0_SKIP_BUILD_KERNELS leaves out.
-        run_attached(
+        run_building(
             cargo("sequencer_service")
                 .env("RISC0_SKIP_BUILD_KERNELS", "1")
                 .args(["--features", SEQUENCER_FEATURES]),
         )?;
-        run_attached(&mut cargo("wallet"))
+        run_building(&mut cargo("wallet"))
     }
 
     fn upstream_config(&self) -> Result<Value> {

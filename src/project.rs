@@ -26,8 +26,9 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::chain_config;
+use crate::devnet::{DEFAULT_FUND, UpOptions};
 use crate::envfile::{check_name, check_program_name};
-use crate::groups::MAX_ACCOUNTS;
+use crate::groups;
 use crate::home::{RuntimeKind, Settings};
 use crate::session::{check_session_name, modules_with};
 
@@ -59,24 +60,18 @@ pub struct DevnetSection {
 }
 
 impl DevnetSection {
-    /// `settings` with every key this section sets.
-    pub fn applied_to(&self, mut settings: Settings) -> Settings {
-        if let Some(lez) = &self.lez {
-            settings.lez.clone_from(lez);
+    /// `settings` with every key this section sets, the way `up`'s flags apply.
+    pub fn applied_to(&self, settings: Settings) -> Settings {
+        UpOptions {
+            docker: self.runtime == Some(RuntimeKind::Docker),
+            native: self.runtime == Some(RuntimeKind::Native),
+            lez: self.lez.clone(),
+            port: self.port,
+            block_time: self.block_time.clone(),
+            max_txs_per_block: self.max_txs_per_block,
+            rebuild: false,
         }
-        if let Some(runtime) = self.runtime {
-            settings.runtime = runtime;
-        }
-        if let Some(port) = self.port {
-            settings.port = port;
-        }
-        if let Some(block_time) = &self.block_time {
-            settings.block_time.clone_from(block_time);
-        }
-        if let Some(max) = self.max_txs_per_block {
-            settings.max_txs_per_block = max;
-        }
-        settings
+        .apply(settings)
     }
 
     /// The keys this section sets, with `settings`' values for them: `block_time = "1s"`.
@@ -142,6 +137,20 @@ pub fn find(start: &Path) -> Option<PathBuf> {
 }
 
 impl Project {
+    /// Every program binary exists. Checked by `up` and `reset` only, so other commands work
+    /// while a build is missing.
+    pub fn check_binaries(&self) -> Result<()> {
+        for (name, binary) in &self.programs {
+            if !binary.is_file() {
+                bail!(
+                    "[programs] {name}: {} doesn't exist. Build it first",
+                    binary.display()
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Reads and checks the file: everything `up` would trip over later is refused here,
     /// before the devnet is touched.
     pub fn load(path: &Path) -> Result<Self> {
@@ -160,10 +169,8 @@ impl Project {
         if let Some(block_time) = &devnet.block_time {
             chain_config::block_time_secs(block_time)?;
         }
-        if let Some(max) = devnet.max_txs_per_block
-            && !chain_config::MAX_TXS_PER_BLOCK.contains(&max)
-        {
-            bail!("[devnet] max_txs_per_block must be 1 to 1000");
+        if let Some(max) = devnet.max_txs_per_block {
+            chain_config::check_max_txs_per_block(max).context("[devnet]")?;
         }
         if devnet.port == Some(0) {
             bail!("[devnet] port can't be 0");
@@ -171,23 +178,12 @@ impl Project {
         let mut programs = BTreeMap::new();
         for (name, binary) in file.programs {
             check_program_name(&name)?;
-            let binary = dir.join(binary);
-            if !binary.is_file() {
-                bail!(
-                    "[programs] {name}: {} doesn't exist. Build it first",
-                    binary.display()
-                );
-            }
-            programs.insert(name, binary);
+            programs.insert(name, dir.join(binary));
         }
         for (name, group) in &file.accounts {
             check_name("account group", name)?;
-            if group.count == 0 || group.count > MAX_ACCOUNTS {
-                bail!("[accounts.{name}] count must be 1 to {MAX_ACCOUNTS}");
-            }
-            if group.amount == Some(0) {
-                bail!("[accounts.{name}] amount can't be 0");
-            }
+            groups::check_spec(group.count, group.amount.unwrap_or(DEFAULT_FUND))
+                .with_context(|| format!("[accounts.{name}]"))?;
         }
         for (name, session) in &file.sessions {
             check_session_name(name)?;
@@ -284,8 +280,12 @@ modules = ["chat_module"]
     #[test]
     fn refuses_what_up_would_trip_over() {
         let dir = tempfile::tempdir().unwrap();
+        let missing = project_in(dir.path(), "[programs]\ncounter = \"missing.bin\"").unwrap();
+        assert!(
+            missing.check_binaries().is_err(),
+            "loads, but up refuses it"
+        );
         for bad in [
-            "[programs]\ncounter = \"missing.bin\"",
             "[programs]\nCounter = \"x\"",
             "[accounts.users]\ncount = 0",
             "[accounts.users]\ncount = 10001",

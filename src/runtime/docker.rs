@@ -64,23 +64,11 @@ impl Docker {
     fn wallet_run(&self, home: &Path) -> Result<Command> {
         self.write_compose_file()?;
         std::fs::create_dir_all(home)?;
-        let home = home
-            .canonicalize()
-            .with_context(|| format!("{} does not exist", home.display()))?;
+        let home = mountable(home)?;
         let mut cmd = self.compose();
         cmd.args(["run", "--rm", "--no-deps", "-T", "--volume"])
             .arg(format!("{}:{WALLET_MOUNT}", home.display()));
         Ok(cmd)
-    }
-
-    fn image_exists(&self) -> bool {
-        Command::new("docker")
-            .args(["image", "inspect", "--format", "{{.Id}}"])
-            .arg(self.settings.image())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
     }
 
     fn build_image(&self) -> Result<()> {
@@ -96,6 +84,7 @@ impl Docker {
             .arg(self.settings.image())
             .arg("-")
             .stdin(Stdio::piped())
+            .stdout(std::io::stderr())
             .spawn()
             .context("could not run docker")?;
         child
@@ -120,13 +109,15 @@ impl Runtime for Docker {
         if rebuild {
             return self.build_image();
         }
-        if self.image_exists() {
+        if image_present(&self.settings.image()) {
             return Ok(());
         }
         eprintln!("Pulling {}...", self.settings.image());
         let pulled = Command::new("docker")
             .arg("pull")
             .arg(self.settings.image())
+            // Progress goes to stderr: stdout is for results, JSON with --json.
+            .stdout(std::io::stderr())
             .status()
             .is_ok_and(|s| s.success());
         if pulled {
@@ -218,9 +209,7 @@ impl Runtime for Docker {
                 WalletArg::Text(text) => wallet_args.push(text),
                 WalletArg::File(path) => {
                     // Mount just the file, read-only.
-                    let path = path
-                        .canonicalize()
-                        .with_context(|| format!("{} does not exist", path.display()))?;
+                    let path = mountable(&path)?;
                     let mount = format!("{FILES_MOUNT}/{i}");
                     cmd.arg("--volume")
                         .arg(format!("{}:{mount}:ro", path.display()));
@@ -264,7 +253,31 @@ fn compose_project(home: &Home) -> String {
 }
 
 /// Whether the Docker daemon answers. With it down, no container of ours runs.
-fn docker_reachable() -> bool {
+/// `path`, absolute, as `--volume` can mount it: its short syntax splits on `:`.
+fn mountable(path: &Path) -> Result<std::path::PathBuf> {
+    let path = path
+        .canonicalize()
+        .with_context(|| format!("{} does not exist", path.display()))?;
+    if path.to_string_lossy().contains(':') {
+        bail!(
+            "Docker can't mount {}: the path holds a `:`. Use one without, or `up --native`",
+            path.display()
+        );
+    }
+    Ok(path)
+}
+
+/// Whether `image` is in the local Docker image store.
+pub(crate) fn image_present(image: &str) -> bool {
+    Command::new("docker")
+        .args(["image", "inspect", "--format", "{{.Id}}", image])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+pub(crate) fn docker_reachable() -> bool {
     Command::new("docker")
         .args(["info", "--format", "{{.ServerVersion}}"])
         .stdout(Stdio::null())
@@ -322,7 +335,12 @@ fn compose_spec(i: &ComposeInputs) -> Value {
                     "--port", CONTAINER_PORT.to_string()
                 ],
                 "ports": [format!("127.0.0.1:{}:{CONTAINER_PORT}", i.port)],
-                "volumes": [format!("{}:{CHAIN_MOUNT}", compose_literal(i.chain_dir))],
+                // The long form takes any path, `:` included.
+                "volumes": [{
+                    "type": "bind",
+                    "source": compose_literal(i.chain_dir),
+                    "target": CHAIN_MOUNT
+                }],
                 "environment": { "RUST_LOG": SEQUENCER_LOG },
                 "stop_grace_period": "30s"
             },
@@ -370,7 +388,11 @@ mod tests {
         assert_eq!(seq["user"], "501:20");
         assert_eq!(
             seq["volumes"],
-            json!(["/Users/me/My Devnet/chain:/devnet/chain"])
+            json!([{
+                "type": "bind",
+                "source": "/Users/me/My Devnet/chain",
+                "target": "/devnet/chain"
+            }])
         );
         assert_eq!(seq["command"][1], "/devnet/chain/sequencer_config.json");
         let wallet = &spec["services"]["wallet"];
@@ -401,9 +423,18 @@ mod tests {
             ..inputs()
         });
         assert_eq!(
-            spec["services"]["sequencer"]["volumes"][0],
-            "/tmp/dev$$HOME/chain:/devnet/chain"
+            spec["services"]["sequencer"]["volumes"][0]["source"],
+            "/tmp/dev$$HOME/chain"
         );
+    }
+
+    #[test]
+    fn refuses_to_mount_a_path_with_a_colon() {
+        let dir = tempfile::tempdir().unwrap();
+        let odd = dir.path().join("a:b");
+        std::fs::create_dir(&odd).unwrap();
+        assert!(mountable(&odd).is_err());
+        assert!(mountable(dir.path()).is_ok());
     }
 
     #[test]

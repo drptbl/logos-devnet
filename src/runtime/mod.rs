@@ -11,6 +11,7 @@ mod docker;
 mod native;
 
 pub use docker::Docker;
+pub(crate) use docker::{docker_reachable, image_present};
 pub use native::Native;
 
 /// The cargo features the sequencer is built with: no Bedrock (`standalone`), and guests run
@@ -100,6 +101,11 @@ fn run(cmd: &mut Command) -> Result<Output> {
     Ok(output)
 }
 
+/// Runs a long build with its output on stderr: stdout is for results, JSON with --json.
+pub(crate) fn run_building(cmd: &mut Command) -> Result<()> {
+    run_attached(cmd.stdout(std::io::stderr()))
+}
+
 /// Runs `cmd` with the terminal attached, for long builds and logs.
 pub(crate) fn run_attached(cmd: &mut Command) -> Result<()> {
     let status = cmd
@@ -120,14 +126,19 @@ pub(crate) fn batch_script(wallet: &str, runs: &[Vec<String>]) -> String {
     let mut script = String::new();
     for run in runs {
         let args: Vec<String> = run.iter().map(|a| sh_quote(a)).collect();
+        // Each marker starts on a line of its own, even after output without a final newline.
         script += &format!(
-            "printf '%s\\n' '{RUN_MARK}'; {} {} </dev/null 2>&1 || printf '%s\\n' '{FAIL_MARK}'\n",
+            "printf '\\n%s\\n' '{RUN_MARK}'; {} {} </dev/null 2>&1 || printf '\\n%s\\n' '{FAIL_MARK}'\n",
             sh_quote(wallet),
             args.join(" ")
         );
     }
     script
 }
+
+/// How many wallet runs go into one batch script: it travels as a single `sh -c` argument,
+/// which Linux caps at 128 KiB, and a run takes about 150 bytes.
+pub(crate) const BATCH_CHUNK: usize = 200;
 
 /// Splits a batch's output into one output per run, recovery phrase hidden. Fails naming the
 /// first run that failed.
@@ -154,21 +165,41 @@ pub(crate) fn split_batch(output: &str, runs: usize) -> Result<Vec<String>> {
     if outputs.len() != runs {
         bail!("the wallet batch ran {} of {runs} commands", outputs.len());
     }
-    Ok(outputs.iter().map(|o| redact_recovery_phrase(o)).collect())
+    // Each marker is printed after a newline of its own, so drop the blank line it leaves.
+    Ok(outputs
+        .iter()
+        .map(|o| {
+            let o = o.trim_end_matches('\n');
+            redact_recovery_phrase(&if o.is_empty() {
+                String::new()
+            } else {
+                format!("{o}\n")
+            })
+        })
+        .collect())
 }
 
 /// `text` with the wallet's recovery phrase hidden: the wallet prints it once, the first time
 /// it creates a wallet, on the line after "Recovery phrase:".
 pub(crate) fn redact_recovery_phrase(text: &str) -> String {
+    const MARK: &str = "Recovery phrase:";
     let mut out = String::with_capacity(text.len());
-    let mut hide_next = false;
+    // After the marker, every line up to the next blank one is the phrase.
+    let mut hiding = false;
     for line in text.split_inclusive('\n') {
-        if hide_next && !line.trim().is_empty() {
-            out.push_str("  <recovery phrase hidden>\n");
-            hide_next = false;
+        if hiding {
+            if line.trim().is_empty() {
+                hiding = false;
+                out.push_str(line);
+            }
             continue;
         }
-        hide_next |= line.contains("Recovery phrase:");
+        if let Some(at) = line.find(MARK) {
+            out.push_str(&line[..at + MARK.len()]);
+            out.push_str(" <hidden>\n");
+            hiding = true;
+            continue;
+        }
         out.push_str(line);
     }
     out
@@ -216,6 +247,17 @@ mod tests {
         let hidden = redact_recovery_phrase(out);
         assert!(!hidden.contains("amused"), "{hidden}");
         assert!(hidden.contains("Generated new account with account_id Public/X"));
+        // On the marker's own line, or over several lines.
+        for out in [
+            "Recovery phrase: amused river fossil\n",
+            "Recovery phrase:\n  amused river\n  fossil words\n\nnext\n",
+        ] {
+            let hidden = redact_recovery_phrase(out);
+            assert!(
+                !hidden.contains("amused") && !hidden.contains("fossil"),
+                "{hidden}"
+            );
+        }
         assert_eq!(
             redact_recovery_phrase("nothing secret\n"),
             "nothing secret\n"
@@ -233,6 +275,25 @@ mod tests {
         let out = stdout_of(Command::new("sh").arg("-c").arg(&script)).unwrap();
         let outputs = split_batch(&out, 2).unwrap();
         assert_eq!(outputs, ["account new public\n", "it's\n"]);
+    }
+
+    #[test]
+    fn a_run_without_a_final_newline_doesnt_hide_the_next_marker() {
+        // `printf x` ends without a newline, then fails.
+        let runs = [
+            vec!["-c".to_owned(), "printf x; exit 1".to_owned()],
+            vec!["-c".to_owned(), "printf y".to_owned()],
+        ];
+        let out = stdout_of(Command::new("sh").arg("-c").arg(batch_script("sh", &runs))).unwrap();
+        let err = split_batch(&out, 2).unwrap_err().to_string();
+        assert!(err.contains("command 1 of 2"), "{err}");
+    }
+
+    #[test]
+    fn a_full_chunk_fits_one_linux_argument() {
+        let run = vec!["account".to_owned(), "new".to_owned(), "public".to_owned()];
+        let script = batch_script("/a/long/path/to/the/wallet/binary", &vec![run; BATCH_CHUNK]);
+        assert!(script.len() < 128 * 1024 / 2, "{} bytes", script.len());
     }
 
     #[test]

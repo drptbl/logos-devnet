@@ -22,6 +22,17 @@ use crate::home::{read_dir_if_present, write_json};
 /// The most accounts one group holds. Genesis takes every one of them.
 pub const MAX_ACCOUNTS: usize = 10_000;
 
+/// A group's size and per-account amount, as `accounts new` and the project file take them.
+pub fn check_spec(count: usize, amount: u64) -> anyhow::Result<()> {
+    if count == 0 || count > MAX_ACCOUNTS {
+        anyhow::bail!("an account group's count must be 1 to {MAX_ACCOUNTS}");
+    }
+    if amount == 0 {
+        anyhow::bail!("an account group's amount can't be 0");
+    }
+    Ok(())
+}
+
 /// What `accounts.json` holds.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GroupInfo {

@@ -99,23 +99,42 @@ pub struct Sessions(pub Vec<SessionRow>);
 #[derive(Debug, Serialize)]
 pub struct Groups(pub Vec<GroupSummary>);
 
-/// The env file's variables, in its order.
-#[derive(Debug, Serialize)]
-pub struct EnvVars(pub serde_json::Map<String, serde_json::Value>);
+/// The env file's variables, in its order. Serialized as one JSON object.
+#[derive(Debug)]
+pub struct EnvVars(Vec<(String, String)>);
 
 impl EnvVars {
     pub fn new(vars: Vec<(String, String)>) -> Self {
-        Self(
-            vars.into_iter()
-                .map(|(k, v)| (k, serde_json::Value::String(v)))
-                .collect(),
-        )
+        Self(vars)
+    }
+}
+
+impl Serialize for EnvVars {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(self.0.len()))?;
+        for (var, value) in &self.0 {
+            map.serialize_entry(var, value)?;
+        }
+        map.end()
     }
 }
 
 #[derive(Debug, Serialize)]
 pub struct Done {
     pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WalletConfig {
+    /// The `wallet_config.json` written.
+    pub path: PathBuf,
+}
+
+impl Report for WalletConfig {
+    fn human(&self) -> String {
+        format!("{}\n", self.path.display())
+    }
 }
 
 impl Report for Status {
@@ -229,10 +248,9 @@ impl Report for Groups {
 
 impl Report for EnvVars {
     fn human(&self) -> String {
-        let mut out = String::from("# Written by logos-devnet. Load it with: source <this file>\n");
+        let mut out = String::from(crate::envfile::HEADER);
         for (var, value) in &self.0 {
-            let value = value.as_str().unwrap_or_default();
-            out += &format!("export {var}={}\n", crate::runtime::sh_quote(value));
+            out += &crate::envfile::export_line(var, value);
         }
         out
     }
@@ -291,8 +309,8 @@ mod tests {
     #[test]
     fn env_vars_keep_their_order_and_quote_for_the_shell() {
         let env = EnvVars::new(vec![("B".into(), "it's".into()), ("A".into(), "x".into())]);
-        let keys: Vec<_> = env.0.keys().cloned().collect();
-        assert_eq!(keys, ["B", "A"]);
+        let json = serde_json::to_string(&env).unwrap();
+        assert_eq!(json, r#"{"B":"it's","A":"x"}"#, "in order, not sorted");
         assert_eq!(
             env.human(),
             "# Written by logos-devnet. Load it with: source <this file>\nexport B='it'\\''s'\nexport A='x'\n"

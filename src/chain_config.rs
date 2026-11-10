@@ -26,6 +26,17 @@ pub struct ChainOptions<'a> {
 /// The bounds `max_txs_per_block` must fall in: upstream's mempool holds 1000 transactions.
 pub const MAX_TXS_PER_BLOCK: std::ops::RangeInclusive<u32> = 1..=1000;
 
+pub fn check_max_txs_per_block(max: u32) -> Result<()> {
+    if !MAX_TXS_PER_BLOCK.contains(&max) {
+        bail!(
+            "max_txs_per_block must be {} to {}",
+            MAX_TXS_PER_BLOCK.start(),
+            MAX_TXS_PER_BLOCK.end()
+        );
+    }
+    Ok(())
+}
+
 /// Returns `debug` with `opts` applied. The faucet is the only funded account: upstream's
 /// supply accounts have published keys.
 pub fn patch(mut debug: Value, opts: &ChainOptions) -> Result<Value> {
@@ -34,13 +45,7 @@ pub fn patch(mut debug: Value, opts: &ChainOptions) -> Result<Value> {
         .context("the upstream sequencer config is not a JSON object")?;
     config.insert("home".into(), json!(opts.home));
     config.insert("block_create_timeout".into(), json!(opts.block_time));
-    if !MAX_TXS_PER_BLOCK.contains(&opts.max_txs_per_block) {
-        bail!(
-            "max_txs_per_block must be {} to {}",
-            MAX_TXS_PER_BLOCK.start(),
-            MAX_TXS_PER_BLOCK.end()
-        );
-    }
+    check_max_txs_per_block(opts.max_txs_per_block)?;
     config.insert("max_num_tx_in_block".into(), json!(opts.max_txs_per_block));
     // Both would listen on every interface: metrics on 9000 and gossip on a UDP port. A single
     // devnet sequencer needs neither.

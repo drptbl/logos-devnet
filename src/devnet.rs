@@ -18,10 +18,10 @@ use crate::home::{Home, RuntimeKind, Settings, write_json};
 use crate::project::Project;
 use crate::report::{
     self, Balance, Done, EnvVars, GroupSummary, Groups, Program, Report, SessionMade, SessionRow,
-    Sessions, Status,
+    Sessions, Status, WalletConfig,
 };
 use crate::rpc::Rpc;
-use crate::runtime::{Docker, Native, Runtime, WalletArg};
+use crate::runtime::{BATCH_CHUNK, Docker, Native, Runtime, WalletArg};
 use crate::session::{self, Session, SessionInfo};
 
 /// The faucet's genesis balance in lepta: enough that a devnet never runs dry.
@@ -65,7 +65,7 @@ pub struct UpOptions {
 }
 
 impl UpOptions {
-    fn apply(&self, mut settings: Settings) -> Settings {
+    pub(crate) fn apply(&self, mut settings: Settings) -> Settings {
         if self.docker {
             settings.runtime = RuntimeKind::Docker;
         }
@@ -194,6 +194,7 @@ impl Devnet {
         let running = self.runtime.running();
         let settings = opts.apply(self.with_project_settings(opts, running && !wipe)?);
         chain_config::block_time_secs(&settings.block_time)?;
+        chain_config::check_max_txs_per_block(settings.max_txs_per_block)?;
         let continuing = !wipe && self.home.has_chain();
         if continuing && settings.lez != self.settings.lez {
             bail!(
@@ -208,9 +209,9 @@ impl Devnet {
         if !wipe && unchanged && !opts.rebuild && running {
             eprintln!("Already running.");
             self.make_project_groups()?;
+            self.write_env(&self.read_env().unwrap_or_default())?;
             let applied = self.apply_project();
             let resumed = self.resume_sessions(false);
-            self.write_env(&self.read_env().unwrap_or_default())?;
             return with_status(self.status(), applied.and(resumed));
         }
         // The running sequencer holds its own port, and gives it up when it stops.
@@ -264,15 +265,16 @@ impl Devnet {
             return Ok(self.settings.clone());
         };
         let wanted = project.devnet.applied_to(self.settings.clone());
-        if refuse_changes && opts.apply(wanted.clone()) != opts.apply(self.settings.clone()) {
-            let own_home = if project.home.is_some() {
-                ""
-            } else {
-                ", or give this project its own devnet with `home = \".logos-devnet\"` in the file"
-            };
+        // A project with its own home is the only one on its devnet: its file just applies.
+        let shared = project.home.is_none();
+        if refuse_changes
+            && shared
+            && opts.apply(wanted.clone()) != opts.apply(self.settings.clone())
+        {
             bail!(
-                "the devnet runs with {}, but {} asks for {}. `logos-devnet down` and `up` apply \
-                 it, restarting the chain for everything on it{own_home}",
+                "the shared devnet runs with {}, but {} asks for {}. `logos-devnet down` and `up` \
+                 apply it, restarting the chain for everything on it, or give this project its \
+                 own devnet with `home = \".logos-devnet\"` in the file",
                 project.devnet.describe(&self.settings),
                 project.path.display(),
                 project.devnet.describe(&wanted)
@@ -286,6 +288,7 @@ impl Devnet {
         let Some(project) = &self.project else {
             return Ok(());
         };
+        project.check_binaries()?;
         let new_session = project
             .sessions
             .keys()
@@ -330,8 +333,7 @@ impl Devnet {
         }
         if let Some(project) = &self.project {
             for (name, spec) in &project.sessions {
-                let session = Session::new(&self.home.sessions_dir(), name)?;
-                if session.exists() {
+                if Session::new(&self.home.sessions_dir(), name).is_ok_and(|s| s.exists()) {
                     continue;
                 }
                 let amount = spec.amount.unwrap_or(DEFAULT_FUND);
@@ -356,10 +358,42 @@ impl Devnet {
         // The group's wallet is for the project to use from this machine: it points at the
         // devnet's local URL. Making keys needs no network.
         self.point_wallet_at(&wallet, &self.settings.sequencer_url())?;
+        if !info.accounts.is_empty() && info.amount != amount {
+            eprintln!(
+                "group {name}: new accounts get {amount} lepta; the ones funded already keep {} \
+                 until `logos-devnet reset`",
+                info.amount
+            );
+        }
+        if count < info.accounts.len() {
+            eprintln!(
+                "group {name} keeps its {} accounts: groups never shrink",
+                info.accounts.len()
+            );
+        }
         if info.accounts.len() < count {
-            let missing = count - info.accounts.len();
-            eprintln!("Making {missing} accounts in group {name}...");
-            let runs = vec![vec!["account".into(), "new".into(), "public".into()]; missing];
+            eprintln!(
+                "Making {} accounts in group {name}...",
+                count - info.accounts.len()
+            );
+        }
+        info.amount = amount;
+        // Keys are made here and imported: the wallet's own `account new` slows down as a
+        // wallet grows (300 keys took minutes), while importing 400 takes under 2 s. In
+        // chunks, saving after each: a batch is one shell argument, and a long one fails.
+        while info.accounts.len() < count {
+            let missing = (count - info.accounts.len()).min(BATCH_CHUNK);
+            let runs = (0..missing)
+                .map(|_| {
+                    Ok(vec![
+                        "account".into(),
+                        "import".into(),
+                        "public".into(),
+                        "--private-key".into(),
+                        random_key()?,
+                    ])
+                })
+                .collect::<Result<Vec<Vec<String>>>>()?;
             let ids = self
                 .runtime
                 .wallet_batch(&wallet, &runs)?
@@ -367,8 +401,8 @@ impl Devnet {
                 .map(|out| first_public_id(out).context("the wallet made no account"))
                 .collect::<Result<Vec<_>>>()?;
             info = Group::extended(info, ids);
+            group.save_info(&info)?;
         }
-        info.amount = amount;
         group.save_info(&info)?;
         Ok(info)
     }
@@ -617,19 +651,17 @@ impl Devnet {
     /// Makes account group `name` with `count` accounts (at least: a group never shrinks),
     /// each funded with `amount`, now when the devnet runs, else when it starts.
     pub fn accounts_new(&self, name: &str, count: usize, amount: u64) -> Result<GroupSummary> {
-        if count == 0 || count > groups::MAX_ACCOUNTS {
-            bail!("count must be 1 to {}", groups::MAX_ACCOUNTS);
-        }
-        if amount == 0 {
-            bail!("amount can't be 0");
-        }
+        groups::check_spec(count, amount)?;
         self.runtime.prepare(false)?;
         self.make_group(name, count, amount)?;
         if self.runtime.running() {
             self.fund_groups(Some(name))?;
             self.write_env(&self.read_env().unwrap_or_default())?;
         } else {
-            eprintln!("The devnet isn't running: `logos-devnet up` funds the group at genesis.");
+            eprintln!(
+                "The devnet isn't running. `logos-devnet up` funds the group, by transfer on the \
+                 chain it resumes, and `reset` funds it at genesis on a new one."
+            );
         }
         self.group_summaries()?
             .into_iter()
@@ -894,7 +926,7 @@ impl Devnet {
     /// Writes `<dir>/wallet_config.json` for a project's own wallet (`lez_core` or the LEZ
     /// CLI). Refuses a directory that already holds a wallet or a config: repointing a testnet
     /// wallet at the devnet would mix up its sync state.
-    pub fn write_project_wallet_config(&self, dir: &Path) -> Result<Done> {
+    pub fn write_project_wallet_config(&self, dir: &Path) -> Result<WalletConfig> {
         let path = dir.join("wallet_config.json");
         for existing in [&path, &dir.join("storage.json")] {
             if existing.exists() {
@@ -906,9 +938,7 @@ impl Devnet {
         }
         std::fs::create_dir_all(dir)?;
         write_json(&path, &wallet_config(&self.settings.sequencer_url()))?;
-        Ok(Done {
-            message: path.display().to_string(),
-        })
+        Ok(WalletConfig { path })
     }
 }
 
@@ -934,6 +964,16 @@ fn program_report(name: &str, id: &PublicId, deployed_now: bool) -> Program {
     }
 }
 
+/// A fresh private key: 32 random bytes as hex, the form `account import` takes.
+fn random_key() -> Result<String> {
+    use std::io::Read;
+    let mut bytes = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut bytes))
+        .context("reading /dev/urandom")?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 /// Lower-case hex SHA-256 of `bytes`.
 fn hex_digest(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
@@ -943,7 +983,7 @@ fn hex_digest(bytes: &[u8]) -> String {
 }
 
 /// The env file after `up`: a chain that carries on keeps its programs, a new one has none.
-fn port_free(port: u16) -> Result<()> {
+pub(crate) fn port_free(port: u16) -> Result<()> {
     std::net::TcpListener::bind(("127.0.0.1", port))
         .map(drop)
         .with_context(|| format!("port {port} on 127.0.0.1 is taken. Pick another with --port"))
@@ -1008,6 +1048,15 @@ mod tests {
     use super::*;
 
     const ID: &str = "HpavNGFYxjyhLsy171aXsvv146yUeXmRWiho22uvT43d";
+
+    #[test]
+    fn makes_distinct_64_hex_keys() {
+        let a = random_key().unwrap();
+        let b = random_key().unwrap();
+        assert_eq!(a.len(), 64);
+        assert!(a.bytes().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b);
+    }
 
     #[test]
     fn counts_segments() {
@@ -1143,9 +1192,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let devnet = devnet_in(&dir.path().join("home"));
         let target = dir.path().join("new/buyer");
-        let done = devnet.write_project_wallet_config(&target).unwrap();
+        let written = devnet.write_project_wallet_config(&target).unwrap();
         let config: Value =
-            serde_json::from_str(&std::fs::read_to_string(&done.message).unwrap()).unwrap();
+            serde_json::from_str(&std::fs::read_to_string(&written.path).unwrap()).unwrap();
         assert_eq!(config["sequencer_addr"], "http://127.0.0.1:3040");
         assert!(devnet.write_project_wallet_config(&target).is_err());
     }

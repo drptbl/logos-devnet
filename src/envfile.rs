@@ -12,6 +12,7 @@ use crate::account::PublicId;
 use crate::runtime::sh_quote;
 
 pub const SEQUENCER_VAR: &str = "LOGOS_DEVNET_SEQUENCER";
+pub const HEADER: &str = "# Written by logos-devnet. Load it with: source <this file>\n";
 const PROGRAM_PREFIX: &str = "LOGOS_PROGRAM_";
 const GROUP_PREFIX: &str = "LOGOS_DEVNET_ACCOUNTS_";
 
@@ -82,22 +83,20 @@ impl Env {
         vars
     }
 
+    /// The env file: `vars`' export lines, with a comment naming each program and group so
+    /// `parse` reads their names back.
     pub fn render(&self) -> String {
-        let mut out = String::from("# Written by logos-devnet. Load it with: source <this file>\n");
-        out += &format!("export {SEQUENCER_VAR}={}\n", self.sequencer);
+        let mut out = String::from(HEADER);
+        out += &export_line(SEQUENCER_VAR, &self.sequencer);
         for (name, id) in &self.programs {
             let var = program_var(name);
             out += &format!("# program {name}\n");
-            out += &format!("export {var}={}\n", id.as_str());
-            out += &format!("export {var}_HEX={}\n", id.hex());
+            out += &export_line(&var, id.as_str());
+            out += &export_line(&format!("{var}_HEX"), &id.hex());
         }
         for (name, path) in &self.groups {
             out += &format!("# accounts {name}\n");
-            out += &format!(
-                "export {}={}\n",
-                group_var(name),
-                sh_quote(&path.to_string_lossy())
-            );
+            out += &export_line(&group_var(name), &path.to_string_lossy());
         }
         out
     }
@@ -117,12 +116,18 @@ impl Env {
                 let Some((var, value)) = assignment.split_once('=') else {
                     continue;
                 };
+                // v0.1.0 wrote values unquoted.
+                let value = if value.starts_with('\'') {
+                    sh_unquote(value)?
+                } else {
+                    value.to_owned()
+                };
                 if var == SEQUENCER_VAR {
-                    env.sequencer = value.to_owned();
+                    env.sequencer = value;
                 } else if let Some(name) = pending.take_if(|n| program_var(n) == var) {
-                    env.programs.insert(name, PublicId::parse(value)?);
+                    env.programs.insert(name, PublicId::parse(&value)?);
                 } else if let Some(name) = pending_group.take_if(|n| group_var(n) == var) {
-                    env.groups.insert(name, PathBuf::from(sh_unquote(value)?));
+                    env.groups.insert(name, PathBuf::from(value));
                 }
             }
         }
@@ -131,6 +136,11 @@ impl Env {
         }
         Ok(env)
     }
+}
+
+/// `export VAR='value'`: every value single-quoted, so any path survives `source`.
+pub fn export_line(var: &str, value: &str) -> String {
+    format!("export {var}={}\n", sh_quote(value))
 }
 
 /// The inverse of `runtime::sh_quote`.
@@ -174,10 +184,10 @@ mod tests {
         env.programs
             .insert("counter".into(), PublicId::parse(ID).unwrap());
         let text = env.render();
-        assert!(text.contains("export LOGOS_DEVNET_SEQUENCER=http://127.0.0.1:3040\n"));
-        assert!(text.contains(&format!("export LOGOS_PROGRAM_COUNTER={ID}\n")));
+        assert!(text.contains("export LOGOS_DEVNET_SEQUENCER='http://127.0.0.1:3040'\n"));
+        assert!(text.contains(&format!("export LOGOS_PROGRAM_COUNTER='{ID}'\n")));
         assert!(text.contains(
-            "export LOGOS_PROGRAM_COUNTER_HEX=f9eba477278c918fadafbcb4a6463e947d0fd8de344b5431ee0aa3cd41d7e3a4\n"
+            "export LOGOS_PROGRAM_COUNTER_HEX='f9eba477278c918fadafbcb4a6463e947d0fd8de344b5431ee0aa3cd41d7e3a4'\n"
         ));
     }
 
@@ -194,6 +204,20 @@ mod tests {
             "/h/it's here/accounts/users/accounts.json".into(),
         );
         assert_eq!(Env::parse(&env.render()).unwrap(), env);
+    }
+
+    #[test]
+    fn reads_a_v0_1_0_env_file() {
+        // As v0.1.0 wrote it: unquoted values.
+        let text = format!(
+            "# Written by logos-devnet. Load it with: source <this file>\n\
+             export LOGOS_DEVNET_SEQUENCER=http://127.0.0.1:3040\n\
+             # program escrow\n\
+             export LOGOS_PROGRAM_ESCROW={ID}\n"
+        );
+        let env = Env::parse(&text).unwrap();
+        assert_eq!(env.sequencer, "http://127.0.0.1:3040");
+        assert_eq!(env.programs["escrow"].as_str(), ID);
     }
 
     #[test]
