@@ -190,10 +190,8 @@ fn normalize(path: &Path) -> PathBuf {
 
 /// Deletes everything in `dir` but keeps the directory itself.
 pub fn empty_dir(dir: &Path) -> Result<()> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+    let Some(entries) = read_dir_if_present(dir)? else {
+        return Ok(());
     };
     for entry in entries {
         let path = entry?.path();
@@ -205,6 +203,15 @@ pub fn empty_dir(dir: &Path) -> Result<()> {
         removed.with_context(|| format!("deleting {}", path.display()))?;
     }
     Ok(())
+}
+
+/// `dir`'s entries, or `None` when it doesn't exist.
+pub fn read_dir_if_present(dir: &Path) -> Result<Option<std::fs::ReadDir>> {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => Ok(Some(entries)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("reading {}", dir.display())),
+    }
 }
 
 /// Writes `value` as pretty JSON with a trailing newline.

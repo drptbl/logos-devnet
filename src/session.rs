@@ -4,24 +4,27 @@
 //! ```text
 //! sessions/<name>/logosctl/      the session's LOGOSCTL_CONFIG_DIR: its daemon, modules, data
 //! sessions/<name>/wallet/        wallet_config.json pointing at the devnet, and storage.json
-//! sessions/<name>/session.json   the modules to load and the funded account
+//! sessions/<name>/session.json   the modules to load, the account and what it was funded with
 //! ```
 //!
-//! Modules come from the official catalog. `lez_core` is always installed, and `create_new`
-//! leaves the session's wallet open in its daemon.
+//! Modules come from the official catalog. `lez_core` is always installed, and the session's
+//! wallet is open in its daemon whenever the daemon runs.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::account::PublicId;
-use crate::home::write_json;
+use crate::home::{read_dir_if_present, write_json};
 use crate::runtime::stdout_of;
 
 const LEZ_CORE: &str = "lez_core";
+/// How long `stop` waits for a daemon to exit.
+const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// What a session remembers about itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,6 +33,8 @@ pub struct SessionInfo {
     pub modules: Vec<String>,
     /// The wallet's public account, funded from the faucet.
     pub account: PublicId,
+    /// What the account was funded with; `reset` funds it with this again.
+    pub funded: u128,
 }
 
 /// One session's directory.
@@ -71,11 +76,15 @@ impl Session {
         self.dir.exists()
     }
 
+    /// The stored info. Module names are checked again, since they reach logosctl's argv.
     pub fn info(&self) -> Result<SessionInfo> {
-        let text = std::fs::read_to_string(self.info_file())
+        let path = self.info_file();
+        let text = std::fs::read_to_string(&path)
             .with_context(|| format!("session {} is incomplete: no session.json", self.name))?;
-        serde_json::from_str(&text)
-            .with_context(|| format!("reading {}", self.info_file().display()))
+        let info: SessionInfo =
+            serde_json::from_str(&text).with_context(|| format!("reading {}", path.display()))?;
+        info.modules.iter().try_for_each(|m| check_module(m))?;
+        Ok(info)
     }
 
     pub fn save_info(&self, info: &SessionInfo) -> Result<()> {
@@ -83,43 +92,42 @@ impl Session {
     }
 
     pub fn logosctl(&self) -> Logosctl {
-        Logosctl {
-            dir: self.logosctl_dir(),
-        }
+        Logosctl::new(self.logosctl_dir())
     }
 
     /// The session's export lines, values single-quoted so any path survives `source`.
     pub fn env_lines(&self, info: &SessionInfo) -> String {
+        self.vars(info)
+            .iter()
+            .map(|(var, value)| format!("export {var}={}\n", sh_quote(value)))
+            .collect()
+    }
+
+    /// What an app needs from the session, by variable name.
+    pub fn vars(&self, info: &SessionInfo) -> [(&'static str, String); 4] {
         [
-            (
-                "LOGOSCTL_CONFIG_DIR",
-                self.logosctl_dir().to_string_lossy().into_owned(),
-            ),
+            ("LOGOSCTL_CONFIG_DIR", path_text(&self.logosctl_dir())),
             (
                 "LOGOS_DEVNET_WALLET_CONFIG",
-                self.wallet_config().to_string_lossy().into_owned(),
+                path_text(&self.wallet_config()),
             ),
             (
                 "LOGOS_DEVNET_WALLET_STORAGE",
-                self.wallet_storage().to_string_lossy().into_owned(),
+                path_text(&self.wallet_storage()),
             ),
             ("LOGOS_DEVNET_ACCOUNT", info.account.wallet_form()),
         ]
-        .iter()
-        .map(|(var, value)| format!("export {var}={}\n", sh_quote(value)))
-        .collect()
     }
+}
+
+fn path_text(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
 }
 
 /// The sessions under `dir`, by name.
 pub fn list(dir: &Path) -> Result<Vec<Session>> {
     let mut sessions = Vec::new();
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(sessions),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
-    };
-    for entry in entries.flatten() {
+    for entry in read_dir_if_present(dir)?.into_iter().flatten().flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         if entry.path().is_dir() && check_session_name(&name).is_ok() {
             sessions.push(Session::new(dir, &name)?);
@@ -133,22 +141,28 @@ pub fn list(dir: &Path) -> Result<Vec<Session>> {
 pub fn modules_with(extra: &[String]) -> Result<Vec<String>> {
     let mut modules = vec![LEZ_CORE.to_owned()];
     for module in extra {
-        // Starting with a letter or digit, so a name can't reach logosctl as a flag.
-        let ok = module
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphanumeric())
-            && module
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
-        if !ok {
-            bail!("not a module name: {module:?}");
-        }
+        check_module(module)?;
         if !modules.contains(module) {
             modules.push(module.clone());
         }
     }
     Ok(modules)
+}
+
+/// A catalog module name: letters, digits, `_` and `-`, starting with a letter or digit, so a
+/// name can't reach logosctl as a flag.
+fn check_module(name: &str) -> Result<()> {
+    let ok = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if !ok {
+        bail!("not a module name: {name:?}");
+    }
+    Ok(())
 }
 
 /// Session names are lower-case letters, digits and `-`, starting with a letter: they become
@@ -169,12 +183,20 @@ pub fn check_session_name(name: &str) -> Result<()> {
 
 /// The Logos Core CLI for one session directory.
 pub struct Logosctl {
+    program: PathBuf,
     dir: PathBuf,
 }
 
 impl Logosctl {
+    pub fn new(dir: PathBuf) -> Self {
+        Self {
+            program: "logosctl".into(),
+            dir,
+        }
+    }
+
     fn cmd(&self) -> Command {
-        let mut cmd = Command::new("logosctl");
+        let mut cmd = Command::new(&self.program);
         cmd.env("LOGOSCTL_CONFIG_DIR", &self.dir).arg("--json");
         cmd
     }
@@ -182,7 +204,11 @@ impl Logosctl {
     /// Runs logosctl and returns its stdout. Fails when it exits non-zero.
     fn output(&self, args: &[&str]) -> Result<String> {
         stdout_of(self.cmd().args(args)).map_err(|e| {
-            if e.to_string().contains("could not run") {
+            let missing = e
+                .root_cause()
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound);
+            if missing {
                 e.context("sessions need logosctl, the Logos Core CLI, on your PATH")
             } else {
                 e
@@ -205,9 +231,21 @@ impl Logosctl {
         Ok(())
     }
 
+    /// Stops the session's daemon and waits for it to exit.
     pub fn stop(&self) -> Result<()> {
-        if self.running() {
-            self.output(&["daemon", "stop"])?;
+        if !self.running() {
+            return Ok(());
+        }
+        self.output(&["daemon", "stop"])?;
+        let deadline = Instant::now() + STOP_TIMEOUT;
+        while self.running() {
+            if Instant::now() > deadline {
+                bail!(
+                    "the session's daemon did not stop within {}s",
+                    STOP_TIMEOUT.as_secs()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(200));
         }
         Ok(())
     }
@@ -218,8 +256,8 @@ impl Logosctl {
             && self
                 .cmd()
                 .args(["daemon", "status"])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .status()
                 .is_ok_and(|s| s.success())
     }
@@ -234,8 +272,16 @@ impl Logosctl {
         Ok(())
     }
 
+    /// Loads the `modules` that aren't loaded yet.
     pub fn load(&self, modules: &[String]) -> Result<()> {
-        for module in modules {
+        let listed = self.run(&["module", "ls"])?;
+        let loaded = |name: &str| {
+            listed.as_array().is_some_and(|all| {
+                all.iter()
+                    .any(|m| m["name"] == name && m["status"] == "loaded")
+            })
+        };
+        for module in modules.iter().filter(|m| !loaded(m)) {
             self.run(&["module", "load", module])
                 .with_context(|| format!("loading {module}"))?;
         }
@@ -243,12 +289,51 @@ impl Logosctl {
     }
 
     /// Calls `method` on `module` with string arguments and returns its result.
-    pub fn call(&self, module: &str, method: &str, args: &[String]) -> Result<Value> {
-        let mut argv = vec!["call", module, method];
+    pub fn call(&self, module: &str, method: &str, args: &[&str]) -> Result<Value> {
         let args: Vec<String> = args.iter().map(|a| format!("str:{a}")).collect();
+        let mut argv = vec!["call", module, method];
         argv.extend(args.iter().map(String::as_str));
         call_result(self.run(&argv)?, &format!("{module}.{method}"))
     }
+
+    /// Creates the wallet with an empty password. `create_new` answers with the recovery
+    /// phrase, so nothing it printed is passed on, not even on failure.
+    pub fn create_wallet(&self, config: &Path, storage: &Path) -> Result<()> {
+        let (config, storage) = (path_text(config), path_text(storage));
+        self.call(LEZ_CORE, "create_new", &[&config, &storage, ""])
+            .map(drop)
+            .map_err(|_| {
+                anyhow!(
+                    "lez_core.create_new failed. Its output is left out: it can hold the \
+                     wallet's recovery phrase"
+                )
+            })
+    }
+
+    /// Makes sure `lez_core` has the session's wallet open on `sequencer`. `open` fails
+    /// while a wallet is open, so one open on another sequencer (an old port) is closed by
+    /// reloading `lez_core` first.
+    pub fn ensure_wallet(&self, config: &Path, storage: &Path, sequencer: &str) -> Result<()> {
+        let current = self.call(LEZ_CORE, "get_sequencer_addr", &[])?;
+        let current = current.as_str().unwrap_or_default();
+        if !current.is_empty() {
+            if same_url(current, sequencer) {
+                return Ok(());
+            }
+            self.run(&["module", "reload", LEZ_CORE])?;
+        }
+        let (config, storage) = (path_text(config), path_text(storage));
+        let code = self.call(LEZ_CORE, "open", &[&config, &storage])?;
+        if code != 0 {
+            bail!("lez_core could not open the session's wallet (code {code})");
+        }
+        Ok(())
+    }
+}
+
+/// URLs equal but for a trailing `/`: lez_core reports `http://127.0.0.1:3040/`.
+fn same_url(a: &str, b: &str) -> bool {
+    a.trim_end_matches('/') == b.trim_end_matches('/')
 }
 
 /// The last line of `out` that parses as JSON: logosctl may print notices before it.
@@ -280,8 +365,134 @@ fn sh_quote(value: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::os::unix::fs::PermissionsExt;
 
     const ID: &str = "HpavNGFYxjyhLsy171aXsvv146yUeXmRWiho22uvT43d";
+    const PHRASE: &str = "amused river fossil";
+
+    /// A logosctl stand-in: records its arguments, one call per line, and answers per `script`.
+    fn fake_logosctl(dir: &Path, script: &str) -> Logosctl {
+        let program = dir.join("logosctl");
+        let log = dir.join("calls.log");
+        std::fs::write(
+            &program,
+            format!("#!/bin/sh\necho \"$@\" >> '{}'\n{script}\n", log.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Logosctl {
+            program,
+            dir: dir.join("session"),
+        }
+    }
+
+    fn calls(dir: &Path) -> String {
+        std::fs::read_to_string(dir.join("calls.log")).unwrap_or_default()
+    }
+
+    /// A logosctl whose lez_core has a wallet open on `addr` ("" for none).
+    fn lez_core_on(dir: &Path, addr: &str) -> Logosctl {
+        fake_logosctl(
+            dir,
+            &format!(
+                r#"case "$4" in
+  get_sequencer_addr) echo '{{"result":"{addr}","status":"ok"}}' ;;
+  open) echo '{{"result":0,"status":"ok"}}' ;;
+  *) echo '{{"status":"ok"}}' ;;
+esac"#
+            ),
+        )
+    }
+
+    fn ensure(ctl: &Logosctl) {
+        ctl.ensure_wallet(
+            Path::new("/w/c.json"),
+            Path::new("/w/s.json"),
+            "http://127.0.0.1:3055",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn opens_a_closed_wallet_with_string_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure(&lez_core_on(dir.path(), ""));
+        assert_eq!(
+            calls(dir.path()),
+            "--json call lez_core get_sequencer_addr\n\
+             --json call lez_core open str:/w/c.json str:/w/s.json\n"
+        );
+    }
+
+    #[test]
+    fn leaves_a_wallet_open_on_the_right_sequencer() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure(&lez_core_on(dir.path(), "http://127.0.0.1:3055/"));
+        assert_eq!(
+            calls(dir.path()),
+            "--json call lez_core get_sequencer_addr\n"
+        );
+    }
+
+    #[test]
+    fn reopens_a_wallet_left_on_an_old_port() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure(&lez_core_on(dir.path(), "http://127.0.0.1:3040/"));
+        assert_eq!(
+            calls(dir.path()),
+            "--json call lez_core get_sequencer_addr\n\
+             --json module reload lez_core\n\
+             --json call lez_core open str:/w/c.json str:/w/s.json\n"
+        );
+    }
+
+    #[test]
+    fn a_failed_wallet_creation_never_shows_the_recovery_phrase() {
+        let dir = tempfile::tempdir().unwrap();
+        // Prints the phrase, then fails.
+        let ctl = fake_logosctl(dir.path(), &format!("echo '{PHRASE}'\nexit 3"));
+        let err = ctl
+            .create_wallet(Path::new("/w/c.json"), Path::new("/w/s.json"))
+            .unwrap_err();
+        assert!(!format!("{err:#}").contains(PHRASE), "{err:#}");
+        // Answers with the phrase in a non-ok reply.
+        let ctl = fake_logosctl(
+            dir.path(),
+            &format!(r#"echo '{{"status":"error","message":"{PHRASE}"}}'"#),
+        );
+        let err = ctl
+            .create_wallet(Path::new("/w/c.json"), Path::new("/w/s.json"))
+            .unwrap_err();
+        assert!(!format!("{err:#}").contains(PHRASE), "{err:#}");
+    }
+
+    #[test]
+    fn loads_only_modules_that_are_not_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctl = fake_logosctl(
+            dir.path(),
+            r#"case "$2 $3" in
+  "module ls") echo '[{"name":"lez_core","status":"loaded"},{"name":"chat_module","status":"not_loaded"}]' ;;
+  *) echo '{"status":"ok"}' ;;
+esac"#,
+        );
+        ctl.load(&["lez_core".into(), "chat_module".into()])
+            .unwrap();
+        assert_eq!(
+            calls(dir.path()),
+            "--json module ls\n--json module load chat_module\n"
+        );
+    }
+
+    #[test]
+    fn says_when_logosctl_is_missing() {
+        let ctl = Logosctl {
+            program: "/nonexistent/logosctl".into(),
+            dir: "/tmp/x".into(),
+        };
+        let err = ctl.run(&["module", "ls"]).unwrap_err();
+        assert!(format!("{err:#}").contains("need logosctl"), "{err:#}");
+    }
 
     #[test]
     fn checks_session_names() {
@@ -303,6 +514,16 @@ mod tests {
         assert_eq!(modules, ["lez_core", "chat_module"]);
         assert!(modules_with(&["bad name".into()]).is_err());
         assert!(modules_with(&["--yes".into()]).is_err(), "never a flag");
+    }
+
+    #[test]
+    fn refuses_a_flag_smuggled_into_session_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session::new(dir.path(), "alice").unwrap();
+        std::fs::create_dir_all(session.dir()).unwrap();
+        let text = format!(r#"{{"modules":["lez_core","--force"],"account":"{ID}","funded":1}}"#);
+        std::fs::write(session.info_file(), text).unwrap();
+        assert!(session.info().is_err());
     }
 
     #[test]
@@ -332,6 +553,7 @@ mod tests {
         let info = SessionInfo {
             modules: vec!["lez_core".into()],
             account: PublicId::parse(ID).unwrap(),
+            funded: 1,
         };
         let lines = session.env_lines(&info);
         assert!(
@@ -365,6 +587,7 @@ mod tests {
         let info = SessionInfo {
             modules: vec!["lez_core".into(), "chat_module".into()],
             account: PublicId::parse(ID).unwrap(),
+            funded: 5_000_000,
         };
         session.save_info(&info).unwrap();
         assert_eq!(session.info().unwrap(), info);

@@ -153,7 +153,9 @@ impl Devnet {
         let unchanged = settings == self.settings && self.home.settings_file().exists();
         if !wipe && unchanged && !opts.rebuild && self.runtime.running() {
             println!("Already running.");
-            return self.status();
+            let resumed = self.resume_sessions(false);
+            self.status()?;
+            return resumed;
         }
         // The running sequencer holds its own port, and gives it up when it stops.
         if !(self.runtime.running() && settings.port == self.settings.port) {
@@ -191,32 +193,67 @@ impl Devnet {
         )?;
         next.write_env(&env)?;
         // A new chain starts every session's account at zero.
-        next.resume_sessions(!continuing);
-        next.status()
+        let resumed = next.resume_sessions(!continuing);
+        next.status()?;
+        resumed
     }
 
-    /// Restarts each session's daemon and loads its modules, and funds its account again when
-    /// `refund`. A session that fails is reported and skipped: the chain itself is up.
-    fn resume_sessions(&self, refund: bool) {
-        let Ok(sessions) = session::list(&self.home.sessions_dir()) else {
-            return;
-        };
-        for session in sessions {
+    /// Brings each session up to date with the chain: its wallet config names the current
+    /// port, its daemon runs with its modules loaded and its wallet open, and on a new chain
+    /// (`refund`) its account is funded again. Every session is tried; failures are reported
+    /// together after, with the chain already up.
+    fn resume_sessions(&self, refund: bool) -> Result<()> {
+        let mut failed = Vec::new();
+        for session in self.sessions() {
             let resumed = session.info().and_then(|info| {
+                // Funding only needs the dev wallet: a daemon that won't start doesn't cost the
+                // account its funds.
+                let funded = if refund {
+                    self.send(&info.account, info.funded).map(drop)
+                } else {
+                    Ok(())
+                };
+                self.write_session_wallet_config(&session)?;
                 let ctl = session.logosctl();
-                if !ctl.running() {
-                    ctl.start()?;
-                    ctl.load(&info.modules)?;
-                }
-                if refund {
-                    self.send(&info.account, DEFAULT_FUND)?;
-                }
-                Ok(())
+                ctl.start()?;
+                ctl.load(&info.modules)?;
+                ctl.ensure_wallet(
+                    &session.wallet_config(),
+                    &session.wallet_storage(),
+                    &self.settings.sequencer_url(),
+                )?;
+                funded
             });
             if let Err(e) = resumed {
                 eprintln!("session {}: {e:#}", session.name);
+                failed.push(session.name);
             }
         }
+        if !failed.is_empty() {
+            bail!(
+                "the devnet is up, but sessions {} failed. If one keeps failing, \
+                 `logos-devnet session rm <name>` and make it again",
+                failed.join(", ")
+            );
+        }
+        Ok(())
+    }
+
+    /// The sessions, or none (with a note) when their directory can't be read.
+    fn sessions(&self) -> Vec<Session> {
+        session::list(&self.home.sessions_dir()).unwrap_or_else(|e| {
+            eprintln!("sessions: {e:#}");
+            Vec::new()
+        })
+    }
+
+    /// Points the session's wallet at the devnet's current RPC URL.
+    fn write_session_wallet_config(&self, session: &Session) -> Result<()> {
+        std::fs::create_dir_all(session.wallet_dir())?;
+        write_json(
+            &session.wallet_config(),
+            &wallet_config(&self.settings.sequencer_url()),
+        )
     }
 
     /// Sends `amount` lepta from the faucet to `to` and returns its new balance.
@@ -288,7 +325,7 @@ impl Devnet {
 
     /// Stops the sessions' daemons, then the sequencer. The chain and sessions are kept.
     pub fn down(&self) -> Result<()> {
-        for session in session::list(&self.home.sessions_dir())? {
+        for session in self.sessions() {
             if let Err(e) = session.logosctl().stop() {
                 eprintln!("session {}: {e:#}", session.name);
             }
@@ -323,7 +360,7 @@ impl Devnet {
             }
             println!("env        {}", self.home.env_file().display());
         }
-        let sessions = session::list(&self.home.sessions_dir()).unwrap_or_default();
+        let sessions = self.sessions();
         if !sessions.is_empty() {
             let names: Vec<_> = sessions.iter().map(|s| s.name.as_str()).collect();
             println!("sessions   {}", names.join(", "));
@@ -333,6 +370,7 @@ impl Devnet {
 
     pub fn fund(&self, account: &str, amount: u128) -> Result<()> {
         let to = PublicId::parse(account)?;
+        // Fails before any work when there is no faucet yet.
         self.faucet()?;
         self.require_running()?;
         let balance = self.send(&to, amount)?;
@@ -349,18 +387,28 @@ impl Devnet {
             bail!("session {name} exists. `logos-devnet session rm {name}` first");
         }
         let modules = session::modules_with(extra)?;
+        // Fails before any work when there is no faucet yet.
         self.faucet()?;
         self.require_running()?;
         let made = self.make_session(&session, modules, amount);
         if made.is_err() {
-            let _ = session.logosctl().stop();
-            let _ = std::fs::remove_dir_all(session.dir());
+            // Deleting the directory under a daemon that still runs would orphan it.
+            match session.logosctl().stop() {
+                Ok(()) => {
+                    let _ = std::fs::remove_dir_all(session.dir());
+                }
+                Err(e) => eprintln!(
+                    "session {name}: its daemon didn't stop ({e:#}), so {} stays",
+                    session.dir().display()
+                ),
+            }
         }
         let info = made?;
-        println!("session    {name}  ready");
-        println!("account    {}", info.account.wallet_form());
-        println!("modules    {}", info.modules.join(", "));
-        println!("load it    source <(logos-devnet session env {name})");
+        println!("session {name} ready, with {}", info.modules.join(", "));
+        for (var, value) in session.vars(&info) {
+            println!("  {var}={value}");
+        }
+        println!("Load it with: source <(logos-devnet session env {name})");
         Ok(())
     }
 
@@ -370,11 +418,7 @@ impl Devnet {
         modules: Vec<String>,
         amount: u128,
     ) -> Result<SessionInfo> {
-        std::fs::create_dir_all(session.wallet_dir())?;
-        write_json(
-            &session.wallet_config(),
-            &wallet_config(&self.settings.sequencer_url()),
-        )?;
+        self.write_session_wallet_config(session)?;
         let ctl = session.logosctl();
         eprintln!(
             "Starting session {} and installing {}...",
@@ -384,22 +428,16 @@ impl Devnet {
         ctl.start()?;
         ctl.install(&modules)?;
         ctl.load(&modules)?;
-        let path = |p: PathBuf| p.to_string_lossy().into_owned();
-        // create_new returns the wallet's recovery phrase. It is never printed.
-        ctl.call(
-            "lez_core",
-            "create_new",
-            &[
-                path(session.wallet_config()),
-                path(session.wallet_storage()),
-                String::new(),
-            ],
-        )?;
+        ctl.create_wallet(&session.wallet_config(), &session.wallet_storage())?;
         let account = ctl.call("lez_core", "create_account_public", &[])?;
         let account =
             PublicId::from_hex(account.as_str().context("lez_core returned no account")?)?;
         ctl.call("lez_core", "save", &[])?;
-        let info = SessionInfo { modules, account };
+        let info = SessionInfo {
+            modules,
+            account,
+            funded: amount,
+        };
         session.save_info(&info)?;
         self.send(&info.account, amount)?;
         Ok(info)
@@ -439,7 +477,12 @@ impl Devnet {
     pub fn session_env(&self, name: &str) -> Result<()> {
         let session = self.existing_session(name)?;
         let info = session.info()?;
-        print!("{}{}", self.read_env()?.render(), session.env_lines(&info));
+        // Without the devnet's env the session's variables still load.
+        let devnet = self.read_env().map(|env| env.render()).unwrap_or_else(|e| {
+            eprintln!("{e:#}");
+            String::new()
+        });
+        print!("{devnet}{}", session.env_lines(&info));
         Ok(())
     }
 
