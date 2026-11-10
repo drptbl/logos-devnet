@@ -17,7 +17,14 @@ pub struct ChainOptions<'a> {
     pub faucet: &'a PublicId,
     /// The faucet's genesis balance in lepta.
     pub faucet_balance: u64,
+    /// The most user transactions a block takes.
+    pub max_txs_per_block: u32,
+    /// More accounts to fund at genesis, with their balances.
+    pub genesis_accounts: &'a [(PublicId, u64)],
 }
+
+/// The bounds `max_txs_per_block` must fall in: upstream's mempool holds 1000 transactions.
+pub const MAX_TXS_PER_BLOCK: std::ops::RangeInclusive<u32> = 1..=1000;
 
 /// Returns `debug` with `opts` applied. The faucet is the only funded account: upstream's
 /// supply accounts have published keys.
@@ -27,6 +34,14 @@ pub fn patch(mut debug: Value, opts: &ChainOptions) -> Result<Value> {
         .context("the upstream sequencer config is not a JSON object")?;
     config.insert("home".into(), json!(opts.home));
     config.insert("block_create_timeout".into(), json!(opts.block_time));
+    if !MAX_TXS_PER_BLOCK.contains(&opts.max_txs_per_block) {
+        bail!(
+            "max_txs_per_block must be {} to {}",
+            MAX_TXS_PER_BLOCK.start(),
+            MAX_TXS_PER_BLOCK.end()
+        );
+    }
+    config.insert("max_num_tx_in_block".into(), json!(opts.max_txs_per_block));
     // Both would listen on every interface: metrics on 9000 and gossip on a UDP port. A single
     // devnet sequencer needs neither.
     config.insert("metrics_address".into(), Value::Null);
@@ -41,6 +56,11 @@ pub fn patch(mut debug: Value, opts: &ChainOptions) -> Result<Value> {
     genesis.push(json!({
         "supply_account": { "account_id": opts.faucet.as_str(), "balance": opts.faucet_balance }
     }));
+    for (account, balance) in opts.genesis_accounts {
+        genesis.push(json!({
+            "supply_account": { "account_id": account.as_str(), "balance": balance }
+        }));
+    }
 
     let block_secs = block_time_secs(opts.block_time)?;
     if let Some(timeout) = config
@@ -97,8 +117,11 @@ mod tests {
 
     const FAUCET: &str = "HpavNGFYxjyhLsy171aXsvv146yUeXmRWiho22uvT43d";
 
-    fn patched(block_time: &str) -> Result<Value> {
+    const USER: &str = "6YvesSEDWW25kpi8SSki2c8o5m3uACsigvGnNQ6wMruh";
+
+    fn patched_with(block_time: &str, max_txs_per_block: u32) -> Result<Value> {
         let faucet = PublicId::parse(FAUCET).unwrap();
+        let users = [(PublicId::parse(USER).unwrap(), 7)];
         patch(
             upstream(),
             &ChainOptions {
@@ -106,8 +129,14 @@ mod tests {
                 block_time,
                 faucet: &faucet,
                 faucet_balance: 1_000,
+                max_txs_per_block,
+                genesis_accounts: &users,
             },
         )
+    }
+
+    fn patched(block_time: &str) -> Result<Value> {
+        patched_with(block_time, 20)
     }
 
     #[test]
@@ -121,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    fn funds_only_the_faucet() {
+    fn funds_only_the_faucet_and_the_named_accounts() {
         let out = patched("1s").unwrap();
         let genesis = out["genesis"].as_array().unwrap();
         assert_eq!(
@@ -129,8 +158,16 @@ mod tests {
             &vec![
                 json!({ "stake_sequencer": { "sequencer_key": "k" } }),
                 json!({ "supply_account": { "account_id": FAUCET, "balance": 1000 } }),
+                json!({ "supply_account": { "account_id": USER, "balance": 7 } }),
             ]
         );
+    }
+
+    #[test]
+    fn sets_and_bounds_the_transactions_per_block() {
+        assert_eq!(patched_with("1s", 200).unwrap()["max_num_tx_in_block"], 200);
+        assert!(patched_with("1s", 0).is_err());
+        assert!(patched_with("1s", 1001).is_err());
     }
 
     #[test]

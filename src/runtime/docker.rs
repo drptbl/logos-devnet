@@ -3,12 +3,16 @@
 //! owned by the host user, so `reset` and inspection work the same as natively.
 
 use std::io::Write;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
-use super::{Runtime, SEQUENCER_LOG, WalletArg, all_output_of, run_attached, stdout_of};
+use super::{
+    Runtime, SEQUENCER_LOG, WalletArg, all_output_of, batch_script, redact_recovery_phrase,
+    redacted, run_attached, split_batch, stdout_of,
+};
 use crate::home::{Home, Settings, write_json};
 
 /// The image's build recipe. Built from stdin, it needs no context: it clones LEZ itself.
@@ -43,20 +47,30 @@ impl Docker {
     }
 
     fn write_compose_file(&self) -> Result<()> {
-        // The chain and wallet directories must exist before Docker mounts them, or it creates
-        // them as root.
+        // The chain directory must exist before Docker mounts it, or it creates it as root.
         std::fs::create_dir_all(self.home.chain_dir())?;
-        std::fs::create_dir_all(self.home.wallet_dir())?;
         let spec = compose_spec(&ComposeInputs {
             project: &compose_project(&self.home),
             image: &self.settings.image(),
             port: self.settings.port,
             user: &current_user()?,
             chain_dir: &self.home.chain_dir().to_string_lossy(),
-            wallet_dir: &self.home.wallet_dir().to_string_lossy(),
         });
         // JSON is YAML, and serde quotes every path correctly.
         write_json(&self.home.compose_file(), &spec)
+    }
+
+    /// `compose run` of the wallet service with the wallet in `home` mounted as its home.
+    fn wallet_run(&self, home: &Path) -> Result<Command> {
+        self.write_compose_file()?;
+        std::fs::create_dir_all(home)?;
+        let home = home
+            .canonicalize()
+            .with_context(|| format!("{} does not exist", home.display()))?;
+        let mut cmd = self.compose();
+        cmd.args(["run", "--rm", "--no-deps", "-T", "--volume"])
+            .arg(format!("{}:{WALLET_MOUNT}", home.display()));
+        Ok(cmd)
     }
 
     fn image_exists(&self) -> bool {
@@ -196,10 +210,8 @@ impl Runtime for Docker {
             .is_ok_and(|ids| !ids.trim().is_empty())
     }
 
-    fn wallet(&self, args: Vec<WalletArg>) -> Result<String> {
-        self.write_compose_file()?;
-        let mut cmd = self.compose();
-        cmd.args(["run", "--rm", "--no-deps", "-T"]);
+    fn wallet(&self, home: &Path, args: Vec<WalletArg>) -> Result<String> {
+        let mut cmd = self.wallet_run(home)?;
         let mut wallet_args = Vec::new();
         for (i, arg) in args.into_iter().enumerate() {
             match arg {
@@ -218,6 +230,16 @@ impl Runtime for Docker {
         }
         cmd.arg("wallet").args(wallet_args);
         all_output_of(&mut cmd)
+            .map(|out| redact_recovery_phrase(&out))
+            .map_err(redacted)
+    }
+
+    fn wallet_batch(&self, home: &Path, runs: &[Vec<String>]) -> Result<Vec<String>> {
+        let mut cmd = self.wallet_run(home)?;
+        cmd.args(["--entrypoint", "sh", "wallet", "-c"])
+            .arg(batch_script("wallet", runs));
+        let out = all_output_of(&mut cmd).map_err(redacted)?;
+        split_batch(&out, runs.len())
     }
 
     fn logs(&self, follow: bool) -> Result<()> {
@@ -284,7 +306,6 @@ struct ComposeInputs<'a> {
     port: u16,
     user: &'a str,
     chain_dir: &'a str,
-    wallet_dir: &'a str,
 }
 
 /// The compose file. The RPC is published on loopback only: it has no caller auth.
@@ -310,7 +331,6 @@ fn compose_spec(i: &ComposeInputs) -> Value {
                 "user": i.user,
                 "profiles": ["tools"],
                 "entrypoint": ["wallet"],
-                "volumes": [format!("{}:{WALLET_MOUNT}", compose_literal(i.wallet_dir))],
                 "environment": { "LEE_WALLET_HOME_DIR": WALLET_MOUNT }
             }
         }
@@ -328,7 +348,6 @@ mod tests {
             port: 3040,
             user: "501:20",
             chain_dir: "/Users/me/My Devnet/chain",
-            wallet_dir: "/Users/me/My Devnet/wallet",
         }
     }
 
@@ -360,6 +379,10 @@ mod tests {
             wallet["environment"]["LEE_WALLET_HOME_DIR"],
             "/devnet/wallet"
         );
+        assert!(
+            wallet.get("volumes").is_none(),
+            "each run mounts the wallet it works on"
+        );
     }
 
     #[test]
@@ -375,16 +398,11 @@ mod tests {
     fn a_dollar_in_a_home_path_stays_literal() {
         let spec = compose_spec(&ComposeInputs {
             chain_dir: "/tmp/dev$HOME/chain",
-            wallet_dir: "/tmp/dev$HOME/wallet",
             ..inputs()
         });
         assert_eq!(
             spec["services"]["sequencer"]["volumes"][0],
             "/tmp/dev$$HOME/chain:/devnet/chain"
-        );
-        assert_eq!(
-            spec["services"]["wallet"]["volumes"][0],
-            "/tmp/dev$$HOME/wallet:/devnet/wallet"
         );
     }
 

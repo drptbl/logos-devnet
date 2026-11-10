@@ -95,14 +95,6 @@ impl Session {
         Logosctl::new(self.logosctl_dir())
     }
 
-    /// The session's export lines, values single-quoted so any path survives `source`.
-    pub fn env_lines(&self, info: &SessionInfo) -> String {
-        self.vars(info)
-            .iter()
-            .map(|(var, value)| format!("export {var}={}\n", sh_quote(value)))
-            .collect()
-    }
-
     /// What an app needs from the session, by variable name.
     pub fn vars(&self, info: &SessionInfo) -> [(&'static str, String); 4] {
         [
@@ -163,6 +155,16 @@ fn check_module(name: &str) -> Result<()> {
         bail!("not a module name: {name:?}");
     }
     Ok(())
+}
+
+/// Whether `logosctl` runs from the PATH.
+pub fn logosctl_on_path() -> bool {
+    Command::new("logosctl")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 /// Session names are lower-case letters, digits and `-`, starting with a letter: they become
@@ -356,11 +358,6 @@ fn call_result(reply: Value, what: &str) -> Result<Value> {
         .with_context(|| format!("{what} returned no result"))
 }
 
-/// `value` in single quotes for a POSIX shell.
-fn sh_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', r"'\''"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,19 +545,23 @@ esac"#,
     }
 
     #[test]
-    fn env_lines_quote_paths() {
+    fn vars_name_what_an_app_needs() {
         let session = Session::new(Path::new("/h/it's here/sessions"), "alice").unwrap();
         let info = SessionInfo {
             modules: vec!["lez_core".into()],
             account: PublicId::parse(ID).unwrap(),
             funded: 1,
         };
-        let lines = session.env_lines(&info);
-        assert!(
-            lines.contains(r"export LOGOSCTL_CONFIG_DIR='/h/it'\''s here/sessions/alice/logosctl'")
+        let vars = session.vars(&info);
+        assert_eq!(
+            vars[0],
+            (
+                "LOGOSCTL_CONFIG_DIR",
+                "/h/it's here/sessions/alice/logosctl".into()
+            )
         );
-        assert!(lines.contains(&format!("export LOGOS_DEVNET_ACCOUNT='Public/{ID}'")));
-        assert!(lines.contains("wallet/storage.json'"));
+        assert_eq!(vars[3], ("LOGOS_DEVNET_ACCOUNT", format!("Public/{ID}")));
+        assert!(vars[2].1.ends_with("wallet/storage.json"));
     }
 
     #[test]

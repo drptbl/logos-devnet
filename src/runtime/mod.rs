@@ -1,7 +1,7 @@
 //! Where the sequencer and the LEZ `wallet` run: in Docker (the default, from our image) or
 //! natively (built from the pinned LEZ tag). The rest of the CLI only talks to `Runtime`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use anyhow::{Context, Result, bail};
@@ -61,9 +61,13 @@ pub trait Runtime {
     fn running(&self) -> bool;
     /// Deletes the chain's data, keeping the chain directory. Only while stopped.
     fn wipe_chain(&self) -> Result<()>;
-    /// Runs the LEZ `wallet` on the dev wallet and returns everything it printed: it writes
-    /// some results to stdout and some to stderr. Fails when the wallet does.
-    fn wallet(&self, args: Vec<WalletArg>) -> Result<String>;
+    /// Runs the LEZ `wallet` on the wallet in `home` and returns everything it printed (it
+    /// writes some results to stdout and some to stderr), recovery phrase hidden. Fails when
+    /// the wallet does. `home` must hold a `wallet_config.json` pointing at the devnet.
+    fn wallet(&self, home: &Path, args: Vec<WalletArg>) -> Result<String>;
+    /// Runs several wallet commands with text arguments on the wallet in `home` in one go (one
+    /// container under Docker), and returns each one's output in order, recovery phrase hidden.
+    fn wallet_batch(&self, home: &Path, runs: &[Vec<String>]) -> Result<Vec<String>>;
     /// Prints the sequencer's log.
     fn logs(&self, follow: bool) -> Result<()>;
 }
@@ -107,6 +111,79 @@ pub(crate) fn run_attached(cmd: &mut Command) -> Result<()> {
     Ok(())
 }
 
+const RUN_MARK: &str = "@@logos-devnet-wallet-run@@";
+const FAIL_MARK: &str = "@@logos-devnet-wallet-failed@@";
+
+/// A POSIX shell script that runs `wallet` (a command or path) once per run, each run's
+/// output after a marker line, and a failure marker after a run that fails.
+pub(crate) fn batch_script(wallet: &str, runs: &[Vec<String>]) -> String {
+    let mut script = String::new();
+    for run in runs {
+        let args: Vec<String> = run.iter().map(|a| sh_quote(a)).collect();
+        script += &format!(
+            "printf '%s\\n' '{RUN_MARK}'; {} {} </dev/null 2>&1 || printf '%s\\n' '{FAIL_MARK}'\n",
+            sh_quote(wallet),
+            args.join(" ")
+        );
+    }
+    script
+}
+
+/// Splits a batch's output into one output per run, recovery phrase hidden. Fails naming the
+/// first run that failed.
+pub(crate) fn split_batch(output: &str, runs: usize) -> Result<Vec<String>> {
+    let mut outputs: Vec<String> = Vec::new();
+    for line in output.lines() {
+        if line == RUN_MARK {
+            outputs.push(String::new());
+        } else if let Some(current) = outputs.last_mut() {
+            current.push_str(line);
+            current.push('\n');
+        }
+    }
+    if let Some(i) = outputs
+        .iter()
+        .position(|o| o.lines().any(|l| l == FAIL_MARK))
+    {
+        bail!(
+            "wallet command {} of {runs} failed:\n{}",
+            i + 1,
+            redact_recovery_phrase(outputs[i].trim_end())
+        );
+    }
+    if outputs.len() != runs {
+        bail!("the wallet batch ran {} of {runs} commands", outputs.len());
+    }
+    Ok(outputs.iter().map(|o| redact_recovery_phrase(o)).collect())
+}
+
+/// `text` with the wallet's recovery phrase hidden: the wallet prints it once, the first time
+/// it creates a wallet, on the line after "Recovery phrase:".
+pub(crate) fn redact_recovery_phrase(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut hide_next = false;
+    for line in text.split_inclusive('\n') {
+        if hide_next && !line.trim().is_empty() {
+            out.push_str("  <recovery phrase hidden>\n");
+            hide_next = false;
+            continue;
+        }
+        hide_next |= line.contains("Recovery phrase:");
+        out.push_str(line);
+    }
+    out
+}
+
+/// A wallet error with the recovery phrase hidden from the output it carries.
+pub(crate) fn redacted(e: anyhow::Error) -> anyhow::Error {
+    anyhow::anyhow!(redact_recovery_phrase(&format!("{e:#}")))
+}
+
+/// `value` in single quotes for a POSIX shell.
+pub(crate) fn sh_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
 fn combined(output: &Output) -> String {
     let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&output.stderr));
@@ -131,6 +208,48 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("out") && err.contains("err"), "{err}");
+    }
+
+    #[test]
+    fn hides_the_recovery_phrase() {
+        let out = "Persistent storage not found\nRecovery phrase:\n  amused river fossil\n\nGenerated new account with account_id Public/X\n";
+        let hidden = redact_recovery_phrase(out);
+        assert!(!hidden.contains("amused"), "{hidden}");
+        assert!(hidden.contains("Generated new account with account_id Public/X"));
+        assert_eq!(
+            redact_recovery_phrase("nothing secret\n"),
+            "nothing secret\n"
+        );
+    }
+
+    #[test]
+    fn runs_a_batch_and_splits_its_output() {
+        let runs = vec![
+            vec!["account".to_owned(), "new".to_owned(), "public".to_owned()],
+            vec!["it's".to_owned()],
+        ];
+        // `echo` stands in for the wallet: each run prints its arguments.
+        let script = batch_script("echo", &runs);
+        let out = stdout_of(Command::new("sh").arg("-c").arg(&script)).unwrap();
+        let outputs = split_batch(&out, 2).unwrap();
+        assert_eq!(outputs, ["account new public\n", "it's\n"]);
+    }
+
+    #[test]
+    fn a_failed_batch_run_is_named_and_redacted() {
+        // `sh -c` stands in for the wallet: the second run prints a phrase and fails.
+        let runs = [
+            vec!["-c".to_owned(), "true".to_owned()],
+            vec![
+                "-c".to_owned(),
+                "echo 'Recovery phrase:'; echo secret words; exit 3".to_owned(),
+            ],
+        ];
+        let script = batch_script("sh", &runs);
+        let out = stdout_of(Command::new("sh").arg("-c").arg(&script)).unwrap();
+        let err = split_batch(&out, runs.len()).unwrap_err().to_string();
+        assert!(err.contains("command 2 of 2"), "{err}");
+        assert!(!err.contains("secret words"), "{err}");
     }
 
     #[test]
