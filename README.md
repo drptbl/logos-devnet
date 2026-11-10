@@ -10,16 +10,16 @@ Keep the public testnet for final checks. Messaging (chat, discovery) isn't part
 cargo install --locked logos-devnet
 ```
 
-Or take a binary from the [latest release](https://github.com/drptbl/logos-devnet/releases/latest), built for macOS (`aarch64-apple-darwin`, `x86_64-apple-darwin`) and Linux (`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`), and check it against its `.sha256`:
+Or take a binary from the [latest release](https://github.com/drptbl/logos-devnet/releases/latest), built for macOS (`aarch64-apple-darwin`, `x86_64-apple-darwin`) and Linux (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, static, so any distribution), and check it against its `.sha256`:
 
 ```bash
 v=v0.1.0 t=aarch64-apple-darwin
 curl -fsSL --remote-name-all https://github.com/drptbl/logos-devnet/releases/download/$v/logos-devnet-$v-$t.tar.gz{,.sha256}
 shasum -a 256 -c logos-devnet-$v-$t.tar.gz.sha256
-tar -xzf logos-devnet-$v-$t.tar.gz && install logos-devnet-$v-$t/logos-devnet ~/.local/bin/
+tar -xzf logos-devnet-$v-$t.tar.gz && mkdir -p ~/.local/bin && install logos-devnet-$v-$t/logos-devnet ~/.local/bin/
 ```
 
-`cargo install --locked --git https://github.com/drptbl/logos-devnet` builds the latest `main`.
+Put `~/.local/bin` on your `PATH` if it isn't. `cargo install --locked --git https://github.com/drptbl/logos-devnet` builds the latest `main`.
 
 You need Docker (OrbStack, Docker Desktop or Colima). With `--native` you need git, a Rust toolchain and LEZ's build dependencies instead: clang, pkg-config and OpenSSL (`brew install pkg-config openssl` on macOS), plus `libpcsclite-dev` on Linux. The first native build takes a few minutes.
 

@@ -1,8 +1,9 @@
 name: release
 
-# On a `v*` tag: builds the CLI for macOS (arm64, x86_64) and Linux (amd64, arm64), attaches the
-# archives and their SHA-256 sums to a GitHub Release, then publishes the crate to crates.io.
-# crates.io goes last: a version published there can only be yanked, never replaced.
+# On a `v*` tag on main: checks it like CI does, builds the CLI for macOS (arm64, x86_64) and
+# Linux (amd64, arm64; static musl binaries, so any glibc works), attaches the archives and their
+# SHA-256 sums to a GitHub Release, then publishes the crate to crates.io. crates.io goes last: a
+# version published there can only be yanked, never replaced.
 
 on:
   push:
@@ -18,13 +19,12 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - id: version
+          fetch-depth: 0
+      - name: The tag names main's code and Cargo.toml's version
         env:
           TAG: ${{ github.ref_name }}
         run: |
@@ -33,7 +33,17 @@ jobs:
             echo "tag $TAG doesn't match Cargo.toml version $version" >&2
             exit 1
           fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "tag $TAG is not on main" >&2
+            exit 1
+          fi
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
 
   build:
     needs: check
@@ -45,9 +55,9 @@ jobs:
             runner: macos-latest
           - target: x86_64-apple-darwin
             runner: macos-latest
-          - target: x86_64-unknown-linux-gnu
+          - target: x86_64-unknown-linux-musl
             runner: ubuntu-24.04
-          - target: aarch64-unknown-linux-gnu
+          - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
@@ -63,6 +73,8 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
           TAG: ${{ github.ref_name }}
+          # Keeps macOS tar from adding ._ files for extended attributes.
+          COPYFILE_DISABLE: "1"
         run: |
           name="logos-devnet-$TAG-$TARGET"
           mkdir "$name"
@@ -76,7 +88,7 @@ jobs:
           if-no-files-found: error
 
   github-release:
-    needs: [check, build]
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -94,7 +106,7 @@ jobs:
             --title "$TAG" --generate-notes dist/*
 
   crates-io:
-    needs: [check, github-release]
+    needs: github-release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
