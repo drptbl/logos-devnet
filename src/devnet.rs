@@ -173,8 +173,7 @@ impl Devnet {
 
         self.runtime.stop()?;
         if wipe {
-            remove_if_present(&self.home.chain_dir(), |p| std::fs::remove_dir_all(p))
-                .context("deleting the chain")?;
+            next.runtime.wipe_chain()?;
             remove_if_present(&self.home.env_file(), |p| std::fs::remove_file(p))?;
         }
         next.home.save_settings(&next.settings)?;

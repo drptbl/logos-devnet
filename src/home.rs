@@ -184,6 +184,25 @@ fn normalize(path: &Path) -> PathBuf {
     out
 }
 
+/// Deletes everything in `dir` but keeps the directory itself.
+pub fn empty_dir(dir: &Path) -> Result<()> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+    };
+    for entry in entries {
+        let path = entry?.path();
+        let removed = if path.is_dir() && !path.is_symlink() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        removed.with_context(|| format!("deleting {}", path.display()))?;
+    }
+    Ok(())
+}
+
 /// Writes `value` as pretty JSON with a trailing newline.
 pub fn write_json(path: &Path, value: &Value) -> Result<()> {
     let text = serde_json::to_string_pretty(value)? + "\n";
@@ -256,6 +275,18 @@ mod tests {
         let via_link = Home::locate(Some(link.join("devnet"))).unwrap();
         assert_eq!(via_real.root(), via_link.root());
         assert!(!via_real.root().exists(), "locating creates nothing");
+    }
+
+    #[test]
+    fn emptying_a_directory_keeps_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain = dir.path().join("chain");
+        std::fs::create_dir_all(chain.join("rocksdb-0101/sub")).unwrap();
+        std::fs::write(chain.join("bedrock_signing_key"), [0u8; 32]).unwrap();
+        empty_dir(&chain).unwrap();
+        assert!(chain.is_dir());
+        assert_eq!(std::fs::read_dir(&chain).unwrap().count(), 0);
+        empty_dir(&dir.path().join("missing")).unwrap();
     }
 
     #[test]

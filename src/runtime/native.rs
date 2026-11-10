@@ -135,6 +135,10 @@ impl Runtime for Native {
         self.home.chain_dir().to_string_lossy().into_owned()
     }
 
+    fn wipe_chain(&self) -> Result<()> {
+        crate::home::empty_dir(&self.home.chain_dir()).context("deleting the chain")
+    }
+
     fn wallet_sequencer_url(&self) -> String {
         self.settings.sequencer_url()
     }
