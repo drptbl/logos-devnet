@@ -139,6 +139,33 @@ impl Runtime for Docker {
         CHAIN_MOUNT.into()
     }
 
+    /// Deletes through a container rather than on the host. OrbStack shows a host-side delete
+    /// inside its VM late, and a sequencer started within that window found the old chain's
+    /// key still listed but unreadable ("No such file or directory"): one reset in five.
+    fn wipe_chain(&self) -> Result<()> {
+        let chain = self.home.chain_dir();
+        if !chain.exists() {
+            return Ok(());
+        }
+        stdout_of(
+            Command::new("docker")
+                .args([
+                    "run",
+                    "--rm",
+                    "--user",
+                    &current_user()?,
+                    "--entrypoint",
+                    "find",
+                ])
+                .arg("--volume")
+                .arg(format!("{}:{CHAIN_MOUNT}", chain.display()))
+                .arg(self.settings.image())
+                .args([CHAIN_MOUNT, "-mindepth", "1", "-delete"]),
+        )
+        .map(drop)
+        .context("deleting the chain")
+    }
+
     fn wallet_sequencer_url(&self) -> String {
         format!("http://sequencer:{CONTAINER_PORT}")
     }

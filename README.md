@@ -33,6 +33,8 @@ source ~/.logos-devnet/env                         # LOGOS_DEVNET_SEQUENCER, LOG
 | `wallet-config <dir>` | Writes a `wallet_config.json` pointing at the devnet into a new wallet directory. |
 | `env` | Prints the env file. |
 | `logs [-f]` | Prints the sequencer's log. |
+| `session new <name> [--module <m>]` | Makes a `logosctl` session with a funded devnet wallet, see below. |
+| `session ls`, `session env <name>`, `session rm <name>` | Lists sessions, prints one's env to `source`, deletes one. |
 
 A bad option changes nothing: `up` and `reset` check it, and build what they need, before they stop the running chain.
 
@@ -43,6 +45,30 @@ The env file is the contract. A project reads `LOGOS_DEVNET_SEQUENCER` for the R
 Program ids stay the same. `deploy my-program` always deploys from the dev wallet's `program-my-program` header key, and a program id is that key's account id, so `reset` and redeploy give you the same `LOGOS_PROGRAM_MY_PROGRAM`. A second `deploy` of the same name on the same chain does nothing: `reset` first to deploy a new build.
 
 For a wallet, give it its own directory. `wallet-config` refuses a directory that already holds a wallet, because repointing a testnet wallet at the devnet mixes up its sync state. Then create the wallet the usual way, e.g. `logosctl call lez_core create_new str:<dir>/wallet_config.json str:<dir>/storage.json str:`, and fund its public account.
+
+## Sessions
+
+A session is a throwaway `logosctl` session wired to the devnet, for an app or an agent that talks to Logos through `logosctl`. You need `logosctl` on your `PATH`.
+
+```bash
+logos-devnet session new alice                          # lez_core and a funded wallet
+logos-devnet session new bob --module chat_module       # plus any module from the catalog
+logos-devnet session new carol --amount 5000000         # fund it with less than 10B lepta
+source <(logos-devnet session env alice)                # LOGOSCTL_CONFIG_DIR and the wallet
+```
+
+Each session runs its own daemon in `~/.logos-devnet/sessions/<name>`, with `lez_core` and any `--module` installed from the official catalog. Its wallet points at the devnet, is open in that daemon, and holds a public account the faucet funded. `session env` prints the devnet's env plus:
+
+| Variable | |
+| --- | --- |
+| `LOGOSCTL_CONFIG_DIR` | the session, so `logosctl` and anything built on it talk to its daemon |
+| `LOGOS_DEVNET_WALLET_CONFIG` | the wallet's `wallet_config.json` |
+| `LOGOS_DEVNET_WALLET_STORAGE` | the wallet's `storage.json` |
+| `LOGOS_DEVNET_ACCOUNT` | its funded account, `Public/<id>` |
+
+Sessions follow the chain. `down` stops their daemons. `up` starts them again, loads their modules and opens their wallets, also after a `--port` change. `reset` funds each account again with what it was created with. `session rm` deletes a session and its wallet.
+
+The catalog's `lez_core` is built for the LEZ release the testnet runs, so sessions match the default `--lez` tag.
 
 ## What runs
 
@@ -72,6 +98,7 @@ Everything is in `~/.logos-devnet` (or `LOGOS_DEVNET_HOME`):
 | `wallet/` | the dev wallet: the faucet and each program's header key. Kept across resets. |
 | `compose.yaml` | the Docker runtime's compose file |
 | `native/` | the native runtime's LEZ checkout, build, log and pid file |
+| `sessions/` | one directory per session: its `logosctl` home, wallet and `session.json` |
 
 The RPC listens on `127.0.0.1` only. It has no authentication, so don't publish the port.
 

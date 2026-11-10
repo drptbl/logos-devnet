@@ -12,6 +12,7 @@ mod envfile;
 mod home;
 mod rpc;
 mod runtime;
+mod session;
 
 use devnet::{DEFAULT_FUND, Devnet, UpOptions};
 use home::Home;
@@ -62,6 +63,29 @@ enum Command {
         #[arg(short, long)]
         follow: bool,
     },
+    /// Throwaway logosctl sessions with a funded devnet wallet, for apps and agents.
+    #[command(subcommand)]
+    Session(SessionCommand),
+}
+
+#[derive(Subcommand)]
+enum SessionCommand {
+    /// Make a session: its own logosctl daemon with lez_core and a funded devnet wallet.
+    New {
+        name: String,
+        /// Another module to install from the catalog, e.g. `chat_module`. Repeatable.
+        #[arg(long = "module")]
+        modules: Vec<String>,
+        /// Lepta to fund the session's account with.
+        #[arg(long, default_value_t = DEFAULT_FUND)]
+        amount: u128,
+    },
+    /// List sessions, whether their daemons run, and their accounts.
+    Ls,
+    /// Print the devnet's env and the session's: `source <(logos-devnet session env <name>)`.
+    Env { name: String },
+    /// Stop a session's daemon and delete it, wallet and all.
+    Rm { name: String },
 }
 
 fn main() -> Result<()> {
@@ -81,5 +105,15 @@ fn main() -> Result<()> {
         }
         Command::Env => devnet.print_env(),
         Command::Logs { follow } => devnet.logs(follow),
+        Command::Session(command) => match command {
+            SessionCommand::New {
+                name,
+                modules,
+                amount,
+            } => devnet.session_new(&name, &modules, amount),
+            SessionCommand::Ls => devnet.session_list(),
+            SessionCommand::Env { name } => devnet.session_env(&name),
+            SessionCommand::Rm { name } => devnet.session_rm(&name),
+        },
     }
 }

@@ -8,6 +8,7 @@
 //! wallet/         the dev wallet: the faucet and each program's header key. Kept across resets.
 //! compose.yaml    the Docker runtime's compose file
 //! native/         the native runtime's checkout, build, log and pid file
+//! sessions/       throwaway logosctl sessions with devnet wallets (see session)
 //! ```
 
 use std::path::{Component, Path, PathBuf};
@@ -113,6 +114,9 @@ impl Home {
     pub fn native_dir(&self) -> PathBuf {
         self.root.join("native")
     }
+    pub fn sessions_dir(&self) -> PathBuf {
+        self.root.join("sessions")
+    }
 
     /// Whether a chain has been started here: the sequencer's database exists.
     pub fn has_chain(&self) -> bool {
@@ -182,6 +186,32 @@ fn normalize(path: &Path) -> PathBuf {
         }
     }
     out
+}
+
+/// Deletes everything in `dir` but keeps the directory itself.
+pub fn empty_dir(dir: &Path) -> Result<()> {
+    let Some(entries) = read_dir_if_present(dir)? else {
+        return Ok(());
+    };
+    for entry in entries {
+        let path = entry?.path();
+        let removed = if path.is_dir() && !path.is_symlink() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        removed.with_context(|| format!("deleting {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// `dir`'s entries, or `None` when it doesn't exist.
+pub fn read_dir_if_present(dir: &Path) -> Result<Option<std::fs::ReadDir>> {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => Ok(Some(entries)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("reading {}", dir.display())),
+    }
 }
 
 /// Writes `value` as pretty JSON with a trailing newline.
@@ -256,6 +286,18 @@ mod tests {
         let via_link = Home::locate(Some(link.join("devnet"))).unwrap();
         assert_eq!(via_real.root(), via_link.root());
         assert!(!via_real.root().exists(), "locating creates nothing");
+    }
+
+    #[test]
+    fn emptying_a_directory_keeps_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain = dir.path().join("chain");
+        std::fs::create_dir_all(chain.join("rocksdb-0101/sub")).unwrap();
+        std::fs::write(chain.join("bedrock_signing_key"), [0u8; 32]).unwrap();
+        empty_dir(&chain).unwrap();
+        assert!(chain.is_dir());
+        assert_eq!(std::fs::read_dir(&chain).unwrap().count(), 0);
+        empty_dir(&dir.path().join("missing")).unwrap();
     }
 
     #[test]
