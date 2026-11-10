@@ -8,6 +8,7 @@
 //! wallet/         the dev wallet: the faucet and each program's header key. Kept across resets.
 //! compose.yaml    the Docker runtime's compose file
 //! native/         the native runtime's checkout, build, log and pid file
+//! sessions/       throwaway logosctl sessions with devnet wallets (see session)
 //! ```
 
 use std::path::{Component, Path, PathBuf};
@@ -112,6 +113,9 @@ impl Home {
     }
     pub fn native_dir(&self) -> PathBuf {
         self.root.join("native")
+    }
+    pub fn sessions_dir(&self) -> PathBuf {
+        self.root.join("sessions")
     }
 
     /// Whether a chain has been started here: the sequencer's database exists.
