@@ -171,6 +171,7 @@ Everything is in `~/.logos-devnet` (or `LOGOS_DEVNET_HOME`):
 | `sessions/` | one directory per session: its `logosctl` home, wallet and `session.json` |
 | `accounts/` | one directory per account group: its wallet and `accounts.json` |
 | `programs.json` | the binary hash each program was deployed from |
+| `lock` | held while a command changes the devnet, so two projects sharing the home take turns |
 
 The RPC listens on `127.0.0.1` only. It has no authentication, so don't publish the port.
 
@@ -202,7 +203,7 @@ The repo is a GitHub Action. On a Linux runner it installs `logos-devnet`, start
 - run: cargo test                     # LOGOS_DEVNET_SEQUENCER, LOGOS_PROGRAM_*, LOGOS_DEVNET_ACCOUNTS_* are set
 ```
 
-Inputs: `version` (default: the release tag you use the action at, so set it when you pin a commit SHA), `config`, `working-directory`, `args` (space-separated, without shell quoting), and `start: "false"` to only install. Output: `sequencer`. macOS runners have no Docker, so it refuses them.
+Inputs: `version` (default: the release tag you use the action at, so set it when you pin a commit SHA), `config`, `working-directory`, `args` (space-separated, without shell quoting. Set the home with `LOGOS_DEVNET_HOME`, not `--home`), and `start: "false"` to only install. Output: `sequencer`. macOS runners have no Docker, so it refuses them.
 
 ## The image
 
