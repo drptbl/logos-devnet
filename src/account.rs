@@ -38,6 +38,23 @@ impl PublicId {
         }
     }
 
+    /// From 64 hex characters, the form `lez_core` returns.
+    pub fn from_hex(hex: &str) -> Result<Self> {
+        let bytes = (0..hex.len())
+            .step_by(2)
+            .map(|i| {
+                hex.get(i..i + 2)
+                    .and_then(|b| u8::from_str_radix(b, 16).ok())
+            })
+            .collect::<Option<Vec<u8>>>();
+        match bytes {
+            Some(bytes) if bytes.len() == 32 && hex.len() == 64 => {
+                Ok(Self(bs58::encode(bytes).into_string()))
+            }
+            _ => bail!("{hex} is not an account id (64 hex characters)"),
+        }
+    }
+
     /// The bare base58 id.
     pub fn as_str(&self) -> &str {
         &self.0
@@ -83,8 +100,18 @@ mod tests {
     }
 
     #[test]
-    fn converts_to_hex() {
+    fn converts_to_and_from_hex() {
         assert_eq!(PublicId::parse(SAMPLE_ID).unwrap().hex(), SAMPLE_HEX);
+        assert_eq!(PublicId::from_hex(SAMPLE_HEX).unwrap().as_str(), SAMPLE_ID);
+        for bad in [
+            "",
+            "f9",
+            &SAMPLE_HEX[..63],
+            &format!("{SAMPLE_HEX}00"),
+            &"zz".repeat(32),
+        ] {
+            assert!(PublicId::from_hex(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

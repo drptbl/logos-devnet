@@ -59,6 +59,8 @@ pub trait Runtime {
     fn stop(&self) -> Result<()>;
     /// Whether the sequencer runs. False when the runtime can't be asked (Docker is down).
     fn running(&self) -> bool;
+    /// Deletes the chain's data, keeping the chain directory. Only while stopped.
+    fn wipe_chain(&self) -> Result<()>;
     /// Runs the LEZ `wallet` on the dev wallet and returns everything it printed: it writes
     /// some results to stdout and some to stderr. Fails when the wallet does.
     fn wallet(&self, args: Vec<WalletArg>) -> Result<String>;
