@@ -205,7 +205,7 @@ impl Devnet {
         }
         // The devnet as it will run: its runtime is the one that has to read the binaries.
         let mut next = Self::with(self.home.clone(), settings.clone(), self.project.clone());
-        next.check_project_needs()?;
+        next.check_needs(session::logosctl_on_path)?;
         // Nothing to restart, unless the settings file is gone and needs writing again.
         let unchanged = settings == self.settings && self.home.settings_file().exists();
         if !wipe && unchanged && !opts.rebuild && running {
@@ -284,23 +284,21 @@ impl Devnet {
         Ok(wanted)
     }
 
-    /// What the project needs that `up` can't make by itself, checked before anything changes.
-    fn check_project_needs(&self) -> Result<()> {
-        let Some(project) = &self.project else {
-            return Ok(());
-        };
-        project.check_binaries()?;
-        for binary in project.programs.values() {
-            self.runtime.check_wallet_file(binary)?;
+    /// What `up` can't make by itself, checked before anything changes: the project's program
+    /// binaries, and logosctl when sessions exist or the project declares some, since `up`
+    /// resumes or makes each one.
+    fn check_needs(&self, logosctl_on_path: impl FnOnce() -> bool) -> Result<()> {
+        if let Some(project) = &self.project {
+            project.check_binaries()?;
+            for binary in project.programs.values() {
+                self.runtime.check_wallet_file(binary)?;
+            }
         }
-        let new_session = project
-            .sessions
-            .keys()
-            .any(|name| Session::new(&self.home.sessions_dir(), name).is_ok_and(|s| !s.exists()));
-        if new_session && !session::logosctl_on_path() {
+        if self.needs_logosctl() && !logosctl_on_path() {
             bail!(
-                "{} declares sessions, which need logosctl, the Logos Core CLI, on your PATH",
-                project.path.display()
+                "sessions need logosctl, the Logos Core CLI, on your PATH. Install it, or drop \
+                 the sessions you no longer need: `logos-devnet session rm <name>`, and from \
+                 [sessions] in the project file"
             );
         }
         Ok(())
@@ -1068,8 +1066,32 @@ mod tests {
         let home = Home::locate(Some(dir.path().join("home"))).unwrap();
         let devnet = Devnet::open(home, Some(project)).unwrap();
         assert_eq!(devnet.settings().runtime, RuntimeKind::Docker);
-        let err = devnet.check_project_needs().unwrap_err();
+        let err = devnet.check_needs(|| true).unwrap_err();
         assert!(format!("{err:#}").contains("holds a `:`"), "{err:#}");
+    }
+
+    #[test]
+    fn existing_sessions_need_logosctl_before_the_devnet_is_touched() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Home::locate(Some(dir.path().to_path_buf())).unwrap();
+        // No project file: the session was made with `session new`.
+        std::fs::create_dir_all(home.sessions_dir().join("alice")).unwrap();
+        let devnet = Devnet::open(home, None).unwrap();
+        let err = devnet.check_needs(|| false).unwrap_err();
+        assert!(format!("{err:#}").contains("logosctl"), "{err:#}");
+        assert!(devnet.check_needs(|| true).is_ok());
+    }
+
+    #[test]
+    fn a_devnet_without_sessions_needs_no_logosctl() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Home::locate(Some(dir.path().to_path_buf())).unwrap();
+        assert!(
+            Devnet::open(home, None)
+                .unwrap()
+                .check_needs(|| panic!("no session needs it"))
+                .is_ok()
+        );
     }
 
     #[test]
