@@ -20,7 +20,9 @@ inputs:
     required: false
     default: "."
   args:
-    description: More options for `logos-devnet up`, e.g. `--max-txs-per-block 100`.
+    description: >-
+      More options for `logos-devnet up`, e.g. `--max-txs-per-block 100`. Set the home with the
+      LOGOS_DEVNET_HOME env var, not `--home`.
     required: false
     default: ""
   start:
@@ -96,6 +98,15 @@ runs:
         fi
         # Space-separated options, without shell quoting.
         read -r -a args <<< "$ARGS"
+        # `env` below has to read the home `up` starts, so neither may get its own.
+        for arg in "${args[@]}"; do
+          case "$arg" in
+            --home | --home=* | --config | --config=*)
+              echo "::error::set the home with LOGOS_DEVNET_HOME and the project file with the config input, not with args"
+              exit 1
+              ;;
+          esac
+        done
         logos-devnet "${config[@]}" up "${args[@]}"
         env_json=$(logos-devnet "${config[@]}" env --json)
         # A value with a newline could add variables of its own to the job.
