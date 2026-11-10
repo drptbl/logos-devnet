@@ -3,6 +3,8 @@ name: image
 # Builds ghcr.io/drptbl/logos-devnet-sequencer:<lez tag> for linux/amd64 and linux/arm64, each on
 # a native runner (emulating a RISC Zero build takes hours), and publishes one multi-arch tag.
 # Runs for the CLI's default LEZ tag when the Dockerfile changes on main, or by hand for any tag.
+# A push that creates a branch skips path filters, so the push that created this repo didn't run
+# it, and GitHub only lets you run it by hand after it has run once.
 
 on:
   push:
