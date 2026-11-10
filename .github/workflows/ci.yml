@@ -43,3 +43,52 @@ jobs:
           toolchain: "1.89"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo check --all-targets --locked
+
+  # The action, on a real Linux runner with Docker: the build from this commit on PATH, the
+  # published image, and the project file in .github/ci.
+  action:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo build --release --locked
+      - run: echo "$GITHUB_WORKSPACE/target/release" >> "$GITHUB_PATH"
+      - id: devnet
+        uses: ./
+        with:
+          config: .github/ci/logos-devnet.toml
+      - name: The devnet runs and its env is exported
+        env:
+          SEQUENCER: ${{ steps.devnet.outputs.sequencer }}
+        run: |
+          set -euo pipefail
+          test "$SEQUENCER" = "$LOGOS_DEVNET_SEQUENCER"
+          test "$(jq '.accounts | length' "$LOGOS_DEVNET_ACCOUNTS_USERS")" = 20
+          logos-devnet --config .github/ci/logos-devnet.toml status --json \
+            | jq -e '.sequencer.running and .sequencer.max_txs_per_block == 50'
+          first=$(jq -r '.accounts[0].id' "$LOGOS_DEVNET_ACCOUNTS_USERS")
+          balance=$(curl -fsS "$LOGOS_DEVNET_SEQUENCER" -H 'content-type: application/json' \
+            -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getAccountBalance\",\"params\":[\"$first\"]}" \
+            | jq -r .result)
+          test "$balance" = 1000000
+          logos-devnet fund --json "Public/$first" 5 | jq -e '.balance == 1000005'
+          logos-devnet --config .github/ci/logos-devnet.toml doctor
+
+  # The action's install path, against a published release.
+  action-install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./
+        with:
+          version: v0.1.0
+          start: "false"
+      - run: logos-devnet --version | grep -q '^logos-devnet 0.1.0$'
+

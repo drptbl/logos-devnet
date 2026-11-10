@@ -1,21 +1,52 @@
 //! `<home>/env`: what a project needs to point at the devnet, as `export` lines it can
-//! `source`. `LOGOS_DEVNET_SEQUENCER` is the RPC URL, and each deployed program adds
-//! `LOGOS_PROGRAM_<NAME>` (base58) and `LOGOS_PROGRAM_<NAME>_HEX`.
+//! `source`. `LOGOS_DEVNET_SEQUENCER` is the RPC URL, each deployed program adds
+//! `LOGOS_PROGRAM_<NAME>` (base58) and `LOGOS_PROGRAM_<NAME>_HEX`, and each account group
+//! `LOGOS_DEVNET_ACCOUNTS_<NAME>`, the path of its `accounts.json`.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 use crate::account::PublicId;
+use crate::runtime::sh_quote;
 
 pub const SEQUENCER_VAR: &str = "LOGOS_DEVNET_SEQUENCER";
+pub const HEADER: &str = "# Written by logos-devnet. Load it with: source <this file>\n";
 const PROGRAM_PREFIX: &str = "LOGOS_PROGRAM_";
+const GROUP_PREFIX: &str = "LOGOS_DEVNET_ACCOUNTS_";
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Env {
     pub sequencer: String,
     /// Program name (as `deploy` took it) to its id.
     pub programs: BTreeMap<String, PublicId>,
+    /// Account group name to its `accounts.json`.
+    pub groups: BTreeMap<String, PathBuf>,
+}
+
+/// `LOGOS_DEVNET_ACCOUNTS_<NAME>` for an account group name.
+pub fn group_var(name: &str) -> String {
+    format!(
+        "{GROUP_PREFIX}{}",
+        name.to_ascii_uppercase().replace('-', "_")
+    )
+}
+
+/// A name that becomes part of a variable, a directory or a wallet label: lower-case letters,
+/// digits and `-`, starting with a letter, so names map one to one onto variable names.
+pub fn check_name(kind: &str, name: &str) -> Result<()> {
+    let ok = name.len() <= 48
+        && name.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if !ok {
+        bail!(
+            "{kind} names are up to 48 lower-case letters, digits and -, starting with a letter: {name}"
+        );
+    }
+    Ok(())
 }
 
 /// `LOGOS_PROGRAM_<NAME>` for a program name: upper case, `-` as `_`.
@@ -30,29 +61,42 @@ pub fn program_var(name: &str) -> String {
 /// letter. Those map one to one onto env var names, and a name can't end in `-hex`, which
 /// would collide with another program's `_HEX` variable.
 pub fn check_program_name(name: &str) -> Result<()> {
-    let ok = name.chars().next().is_some_and(|c| c.is_ascii_lowercase())
-        && name
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-        && !name.ends_with("-hex");
-    if !ok {
-        bail!(
-            "program names are lower-case letters, digits and -, start with a letter and don't \
-             end in -hex: {name}"
-        );
+    check_name("program", name)?;
+    if name.ends_with("-hex") {
+        bail!("program names can't end in -hex (it would clash with another's _HEX): {name}");
     }
     Ok(())
 }
 
 impl Env {
+    /// Every variable and its value, in the order `render` writes them.
+    pub fn vars(&self) -> Vec<(String, String)> {
+        let mut vars = vec![(SEQUENCER_VAR.to_owned(), self.sequencer.clone())];
+        for (name, id) in &self.programs {
+            let var = program_var(name);
+            vars.push((var.clone(), id.as_str().to_owned()));
+            vars.push((format!("{var}_HEX"), id.hex()));
+        }
+        for (name, path) in &self.groups {
+            vars.push((group_var(name), path.to_string_lossy().into_owned()));
+        }
+        vars
+    }
+
+    /// The env file: `vars`' export lines, with a comment naming each program and group so
+    /// `parse` reads their names back.
     pub fn render(&self) -> String {
-        let mut out = String::from("# Written by logos-devnet. Load it with: source <this file>\n");
-        out += &format!("export {SEQUENCER_VAR}={}\n", self.sequencer);
+        let mut out = String::from(HEADER);
+        out += &export_line(SEQUENCER_VAR, &self.sequencer);
         for (name, id) in &self.programs {
             let var = program_var(name);
             out += &format!("# program {name}\n");
-            out += &format!("export {var}={}\n", id.as_str());
-            out += &format!("export {var}_HEX={}\n", id.hex());
+            out += &export_line(&var, id.as_str());
+            out += &export_line(&format!("{var}_HEX"), &id.hex());
+        }
+        for (name, path) in &self.groups {
+            out += &format!("# accounts {name}\n");
+            out += &export_line(&group_var(name), &path.to_string_lossy());
         }
         out
     }
@@ -62,17 +106,28 @@ impl Env {
     pub fn parse(text: &str) -> Result<Self> {
         let mut env = Env::default();
         let mut pending: Option<String> = None;
+        let mut pending_group: Option<String> = None;
         for line in text.lines() {
             if let Some(name) = line.strip_prefix("# program ") {
                 pending = Some(name.trim().to_owned());
+            } else if let Some(name) = line.strip_prefix("# accounts ") {
+                pending_group = Some(name.trim().to_owned());
             } else if let Some(assignment) = line.strip_prefix("export ") {
                 let Some((var, value)) = assignment.split_once('=') else {
                     continue;
                 };
+                // v0.1.0 wrote values unquoted.
+                let value = if value.starts_with('\'') {
+                    sh_unquote(value)?
+                } else {
+                    value.to_owned()
+                };
                 if var == SEQUENCER_VAR {
-                    env.sequencer = value.to_owned();
+                    env.sequencer = value;
                 } else if let Some(name) = pending.take_if(|n| program_var(n) == var) {
-                    env.programs.insert(name, PublicId::parse(value)?);
+                    env.programs.insert(name, PublicId::parse(&value)?);
+                } else if let Some(name) = pending_group.take_if(|n| group_var(n) == var) {
+                    env.groups.insert(name, PathBuf::from(value));
                 }
             }
         }
@@ -81,6 +136,20 @@ impl Env {
         }
         Ok(env)
     }
+}
+
+/// `export VAR='value'`: every value single-quoted, so any path survives `source`.
+pub fn export_line(var: &str, value: &str) -> String {
+    format!("export {var}={}\n", sh_quote(value))
+}
+
+/// The inverse of `runtime::sh_quote`.
+fn sh_unquote(value: &str) -> Result<String> {
+    let inner = value
+        .strip_prefix('\'')
+        .and_then(|v| v.strip_suffix('\''))
+        .context("expected a single-quoted value")?;
+    Ok(inner.replace(r"'\''", "'"))
 }
 
 #[cfg(test)]
@@ -115,10 +184,10 @@ mod tests {
         env.programs
             .insert("counter".into(), PublicId::parse(ID).unwrap());
         let text = env.render();
-        assert!(text.contains("export LOGOS_DEVNET_SEQUENCER=http://127.0.0.1:3040\n"));
-        assert!(text.contains(&format!("export LOGOS_PROGRAM_COUNTER={ID}\n")));
+        assert!(text.contains("export LOGOS_DEVNET_SEQUENCER='http://127.0.0.1:3040'\n"));
+        assert!(text.contains(&format!("export LOGOS_PROGRAM_COUNTER='{ID}'\n")));
         assert!(text.contains(
-            "export LOGOS_PROGRAM_COUNTER_HEX=f9eba477278c918fadafbcb4a6463e947d0fd8de344b5431ee0aa3cd41d7e3a4\n"
+            "export LOGOS_PROGRAM_COUNTER_HEX='f9eba477278c918fadafbcb4a6463e947d0fd8de344b5431ee0aa3cd41d7e3a4'\n"
         ));
     }
 
@@ -130,7 +199,25 @@ mod tests {
         };
         env.programs
             .insert("my-program".into(), PublicId::parse(ID).unwrap());
+        env.groups.insert(
+            "users".into(),
+            "/h/it's here/accounts/users/accounts.json".into(),
+        );
         assert_eq!(Env::parse(&env.render()).unwrap(), env);
+    }
+
+    #[test]
+    fn reads_a_v0_1_0_env_file() {
+        // As v0.1.0 wrote it: unquoted values.
+        let text = format!(
+            "# Written by logos-devnet. Load it with: source <this file>\n\
+             export LOGOS_DEVNET_SEQUENCER=http://127.0.0.1:3040\n\
+             # program escrow\n\
+             export LOGOS_PROGRAM_ESCROW={ID}\n"
+        );
+        let env = Env::parse(&text).unwrap();
+        assert_eq!(env.sequencer, "http://127.0.0.1:3040");
+        assert_eq!(env.programs["escrow"].as_str(), ID);
     }
 
     #[test]

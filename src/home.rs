@@ -9,6 +9,9 @@
 //! compose.yaml    the Docker runtime's compose file
 //! native/         the native runtime's checkout, build, log and pid file
 //! sessions/       throwaway logosctl sessions with devnet wallets (see session)
+//! accounts/       account groups: many funded keys for tests (see groups)
+//! programs.json   the binary hash each program was deployed from
+//! lock            held by the command changing the home, so two take turns
 //! ```
 
 use std::path::{Component, Path, PathBuf};
@@ -25,6 +28,8 @@ pub const DEFAULT_LEZ: &str = "v0.3.1";
 const IMAGE_REPO: &str = "ghcr.io/drptbl/logos-devnet-sequencer";
 const DEFAULT_PORT: u16 = 3040;
 const DEFAULT_BLOCK_TIME: &str = "1s";
+/// Upstream's debug config allows 20 transactions per block.
+pub const DEFAULT_MAX_TXS_PER_BLOCK: u32 = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -39,6 +44,10 @@ pub struct Settings {
     pub runtime: RuntimeKind,
     pub port: u16,
     pub block_time: String,
+    /// The most user transactions a block takes. Added after v0.1.0, so older settings files
+    /// load with the default.
+    #[serde(default = "default_max_txs_per_block")]
+    pub max_txs_per_block: u32,
     /// The dev wallet's faucet account, funded at genesis. Created on the first `up`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub faucet: Option<PublicId>,
@@ -51,9 +60,14 @@ impl Default for Settings {
             runtime: RuntimeKind::Docker,
             port: DEFAULT_PORT,
             block_time: DEFAULT_BLOCK_TIME.into(),
+            max_txs_per_block: DEFAULT_MAX_TXS_PER_BLOCK,
             faucet: None,
         }
     }
+}
+
+fn default_max_txs_per_block() -> u32 {
+    DEFAULT_MAX_TXS_PER_BLOCK
 }
 
 impl Settings {
@@ -89,6 +103,33 @@ impl Home {
         &self.root
     }
 
+    /// Holds the home for one command that changes it, until dropped. A second such command,
+    /// e.g. from another project sharing the home, waits, so starting, wiping and making
+    /// accounts never interleave.
+    pub fn lock(&self) -> Result<std::fs::File> {
+        std::fs::create_dir_all(&self.root)?;
+        let path = self.root.join("lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) => eprintln!(
+                "Waiting for another logos-devnet command using {}...",
+                self.root.display()
+            ),
+            Err(std::fs::TryLockError::Error(e)) => {
+                return Err(e).with_context(|| format!("locking {}", path.display()));
+            }
+        }
+        file.lock()
+            .with_context(|| format!("locking {}", path.display()))?;
+        Ok(file)
+    }
+
     pub fn is_default(&self) -> bool {
         default_root().is_ok_and(|d| d == self.root)
     }
@@ -116,6 +157,13 @@ impl Home {
     }
     pub fn sessions_dir(&self) -> PathBuf {
         self.root.join("sessions")
+    }
+    pub fn groups_dir(&self) -> PathBuf {
+        self.root.join("accounts")
+    }
+    /// Each deployed program's binary hash, to notice a changed build.
+    pub fn programs_file(&self) -> PathBuf {
+        self.root.join("programs.json")
     }
 
     /// Whether a chain has been started here: the sequencer's database exists.
@@ -225,6 +273,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn one_command_at_a_time_holds_the_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Home::locate(Some(dir.path().to_path_buf())).unwrap();
+        let held = home.lock().unwrap();
+        let other = std::fs::File::open(home.root().join("lock")).unwrap();
+        assert!(matches!(
+            other.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(held);
+        assert!(other.try_lock().is_ok());
+    }
+
+    #[test]
     fn a_fresh_home_has_default_settings() {
         let dir = tempfile::tempdir().unwrap();
         let home = Home::locate(Some(dir.path().into())).unwrap();
@@ -244,6 +306,18 @@ mod tests {
         };
         home.save_settings(&settings).unwrap();
         assert_eq!(home.load_settings().unwrap(), settings);
+    }
+
+    #[test]
+    fn loads_a_v0_1_0_settings_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Home::locate(Some(dir.path().into())).unwrap();
+        // As v0.1.0 wrote it.
+        let text = r#"{"lez":"v0.3.1","runtime":"docker","port":3040,"block_time":"1s","faucet":"HpavNGFYxjyhLsy171aXsvv146yUeXmRWiho22uvT43d"}"#;
+        std::fs::write(home.settings_file(), text).unwrap();
+        let settings = home.load_settings().unwrap();
+        assert_eq!(settings.max_txs_per_block, DEFAULT_MAX_TXS_PER_BLOCK);
+        assert!(settings.faucet.is_some());
     }
 
     #[test]

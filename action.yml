@@ -1,0 +1,119 @@
+name: logos-devnet
+description: Start a local LEZ devnet for integration tests, set up from the project's logos-devnet.toml.
+branding:
+  icon: box
+  color: blue
+
+inputs:
+  version:
+    description: >-
+      The logos-devnet release to install, e.g. v0.2.0. Empty installs the release this action
+      was used at (`uses: drptbl/logos-devnet@v0.2.0`), or uses a logos-devnet already on PATH.
+    required: false
+    default: ""
+  config:
+    description: The project file. Empty finds logos-devnet.toml from working-directory up.
+    required: false
+    default: ""
+  working-directory:
+    description: Where to run logos-devnet.
+    required: false
+    default: "."
+  args:
+    description: >-
+      More options for `logos-devnet up`, e.g. `--max-txs-per-block 100`. Set the home with the
+      LOGOS_DEVNET_HOME env var, not `--home`.
+    required: false
+    default: ""
+  start:
+    description: Start the devnet. "false" only installs logos-devnet.
+    required: false
+    default: "true"
+
+outputs:
+  sequencer:
+    description: The devnet's RPC URL.
+    value: ${{ steps.up.outputs.sequencer }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install logos-devnet
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        ACTION_REF: ${{ github.action_ref }}
+      run: |
+        set -euo pipefail
+        if [ "$RUNNER_OS" != "Linux" ]; then
+          echo "::error::the logos-devnet action runs on Linux runners: it needs Docker"
+          exit 1
+        fi
+        v="$VERSION"
+        if [ -z "$v" ] && [[ "$ACTION_REF" =~ ^v[0-9] ]]; then
+          v="$ACTION_REF"
+        fi
+        if [ -z "$v" ]; then
+          if ! command -v logos-devnet >/dev/null; then
+            echo "::error::set the version input, or put logos-devnet on PATH first"
+            exit 1
+          fi
+          echo "Using $(command -v logos-devnet): $(logos-devnet --version)"
+          exit 0
+        fi
+        if [[ ! "$v" =~ ^v[0-9]+(\.[0-9]+)*(-[A-Za-z0-9.]+)?$ ]]; then
+          echo "::error::not a logos-devnet version: $v"
+          exit 1
+        fi
+        case "$(uname -m)" in
+          x86_64) target=x86_64-unknown-linux-musl ;;
+          aarch64 | arm64) target=aarch64-unknown-linux-musl ;;
+          *) echo "::error::no logos-devnet build for $(uname -m)"; exit 1 ;;
+        esac
+        name="logos-devnet-$v-$target"
+        dir="$RUNNER_TEMP/logos-devnet"
+        mkdir -p "$dir"
+        cd "$dir"
+        url="https://github.com/drptbl/logos-devnet/releases/download/$v/$name.tar.gz"
+        curl -fsSL --retry 3 -o "$name.tar.gz" "$url"
+        curl -fsSL --retry 3 -o "$name.tar.gz.sha256" "$url.sha256"
+        sha256sum -c "$name.tar.gz.sha256"
+        tar -xzf "$name.tar.gz"
+        echo "$dir/$name" >> "$GITHUB_PATH"
+        "$dir/$name/logos-devnet" --version
+
+    - id: up
+      name: Start the devnet
+      if: inputs.start == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        CONFIG: ${{ inputs.config }}
+        ARGS: ${{ inputs.args }}
+      run: |
+        set -euo pipefail
+        config=()
+        if [ -n "$CONFIG" ]; then
+          config=(--config "$CONFIG")
+        fi
+        # Space-separated options, without shell quoting.
+        read -r -a args <<< "$ARGS"
+        # `env` below has to read the home `up` starts, so neither may get its own.
+        for arg in "${args[@]}"; do
+          case "$arg" in
+            --home | --home=* | --config | --config=*)
+              echo "::error::set the home with LOGOS_DEVNET_HOME and the project file with the config input, not with args"
+              exit 1
+              ;;
+          esac
+        done
+        logos-devnet "${config[@]}" up "${args[@]}"
+        env_json=$(logos-devnet "${config[@]}" env --json)
+        # A value with a newline could add variables of its own to the job.
+        if ! jq -e 'all(.[]; contains("\n") | not)' <<< "$env_json" >/dev/null; then
+          echo "::error::a devnet env value holds a newline; use paths without one"
+          exit 1
+        fi
+        jq -r 'to_entries[] | "\(.key)=\(.value)"' <<< "$env_json" >> "$GITHUB_ENV"
+        sequencer=$(jq -r .LOGOS_DEVNET_SEQUENCER <<< "$env_json")
+        echo "sequencer=$sequencer" >> "$GITHUB_OUTPUT"

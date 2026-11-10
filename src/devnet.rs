@@ -1,25 +1,35 @@
 //! The commands: start a chain, fund accounts, deploy programs, and write what projects need.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
+use std::collections::BTreeMap;
+
+use sha2::{Digest, Sha256};
+
 use crate::account::{PublicId, first_public_id};
 use crate::chain_config::{self, ChainOptions};
 use crate::envfile::{self, Env};
+use crate::groups::{self, Group, GroupInfo};
 use crate::home::{Home, RuntimeKind, Settings, write_json};
+use crate::project::Project;
+use crate::report::{
+    self, Balance, Done, EnvVars, GroupSummary, Groups, Program, Report, SessionMade, SessionRow,
+    Sessions, Status, WalletConfig,
+};
 use crate::rpc::Rpc;
-use crate::runtime::{Docker, Native, Runtime, WalletArg};
+use crate::runtime::{BATCH_CHUNK, Docker, Native, Runtime, WalletArg};
 use crate::session::{self, Session, SessionInfo};
 
 /// The faucet's genesis balance in lepta: enough that a devnet never runs dry.
 const FAUCET_BALANCE: u64 = 1_000_000_000_000_000_000;
 /// The dev wallet's label for the faucet account.
 const FAUCET_LABEL: &str = "faucet";
-/// What `fund` sends when no amount is given.
-pub const DEFAULT_FUND: u128 = 10_000_000_000;
+/// What `fund`, sessions and account groups send when no amount is given.
+pub const DEFAULT_FUND: u64 = 10_000_000_000;
 /// LEZ's program loader stores a program in segments of at most 96 KiB
 /// (`program_loader_core::MAX_SEGMENT_DATA_LEN` in v0.3.1).
 const SEGMENT_LEN: u64 = 96 * 1024;
@@ -46,13 +56,16 @@ pub struct UpOptions {
     /// Block interval, e.g. `1s` or `500ms`.
     #[arg(long)]
     pub block_time: Option<String>,
+    /// The most transactions a block takes (upstream's default is 20).
+    #[arg(long)]
+    pub max_txs_per_block: Option<u32>,
     /// Build the image or binaries even if they exist. Not remembered.
     #[arg(long)]
     pub rebuild: bool,
 }
 
 impl UpOptions {
-    fn apply(&self, mut settings: Settings) -> Settings {
+    pub(crate) fn apply(&self, mut settings: Settings) -> Settings {
         if self.docker {
             settings.runtime = RuntimeKind::Docker;
         }
@@ -68,6 +81,9 @@ impl UpOptions {
         if let Some(block_time) = &self.block_time {
             settings.block_time.clone_from(block_time);
         }
+        if let Some(max) = self.max_txs_per_block {
+            settings.max_txs_per_block = max;
+        }
         settings
     }
 }
@@ -76,15 +92,17 @@ pub struct Devnet {
     home: Home,
     settings: Settings,
     runtime: Box<dyn Runtime>,
+    /// The project's `logos-devnet.toml`, when there is one.
+    project: Option<Project>,
 }
 
 impl Devnet {
-    pub fn open(home: Home) -> Result<Self> {
+    pub fn open(home: Home, project: Option<Project>) -> Result<Self> {
         let settings = home.load_settings()?;
-        Ok(Self::with(home, settings))
+        Ok(Self::with(home, settings, project))
     }
 
-    fn with(home: Home, settings: Settings) -> Self {
+    fn with(home: Home, settings: Settings, project: Option<Project>) -> Self {
         let runtime: Box<dyn Runtime> = match settings.runtime {
             RuntimeKind::Docker => Box::new(Docker::new(home.clone(), settings.clone())),
             RuntimeKind::Native => Box::new(Native::new(home.clone(), settings.clone())),
@@ -93,6 +111,7 @@ impl Devnet {
             home,
             settings,
             runtime,
+            project,
         }
     }
 
@@ -100,15 +119,48 @@ impl Devnet {
         Rpc::new(self.settings.sequencer_url())
     }
 
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    pub fn project(&self) -> Option<&Project> {
+        self.project.as_ref()
+    }
+
+    pub fn running(&self) -> bool {
+        self.runtime.running()
+    }
+
+    /// The faucet's balance, when there is a faucet and the chain answers.
+    pub fn faucet_balance(&self) -> Option<u128> {
+        self.settings
+            .faucet
+            .as_ref()
+            .and_then(|faucet| self.rpc().balance(faucet).ok())
+    }
+
+    /// Whether sessions exist here or the project declares some.
+    pub fn needs_logosctl(&self) -> bool {
+        !self.sessions().is_empty()
+            || self
+                .project
+                .as_ref()
+                .is_some_and(|p| !p.sessions.is_empty())
+    }
+
     /// Runs the LEZ wallet on the dev wallet. Its config is rewritten first: the wallet would
     /// otherwise create a default one pointing at the public testnet.
     fn wallet(&self, args: Vec<WalletArg>) -> Result<String> {
-        std::fs::create_dir_all(self.home.wallet_dir())?;
-        write_json(
-            &self.home.wallet_dir().join("wallet_config.json"),
-            &wallet_config(&self.runtime.wallet_sequencer_url()),
-        )?;
-        self.runtime.wallet(args)
+        let home = self.home.wallet_dir();
+        self.point_wallet_at(&home, &self.runtime.wallet_sequencer_url())?;
+        self.runtime.wallet(&home, args)
+    }
+
+    /// Writes the wallet config in `home` pointing at `sequencer`. Done before every wallet
+    /// run: without one the wallet creates a default pointing at the public testnet.
+    fn point_wallet_at(&self, home: &Path, sequencer: &str) -> Result<()> {
+        std::fs::create_dir_all(home)?;
+        write_json(&home.join("wallet_config.json"), &wallet_config(sequencer))
     }
 
     fn faucet(&self) -> Result<&PublicId> {
@@ -125,22 +177,24 @@ impl Devnet {
         Ok(())
     }
 
-    pub fn up(self, opts: &UpOptions) -> Result<()> {
+    pub fn up(self, opts: &UpOptions) -> Result<Status> {
         self.launch(opts, false)
     }
 
     /// Deletes the chain and starts a new one. Keys in the dev wallet stay, so the faucet and
     /// program ids come back the same.
-    pub fn reset(self, opts: &UpOptions) -> Result<()> {
+    pub fn reset(self, opts: &UpOptions) -> Result<Status> {
         self.launch(opts, true)
     }
 
     /// Starts the devnet with `opts` applied, on a new chain when `wipe`. Everything that can
     /// fail runs before the running sequencer is stopped, the settings saved or the chain
     /// deleted, so a bad option leaves the devnet as it was.
-    fn launch(self, opts: &UpOptions, wipe: bool) -> Result<()> {
-        let settings = opts.apply(self.settings.clone());
+    fn launch(self, opts: &UpOptions, wipe: bool) -> Result<Status> {
+        let running = self.runtime.running();
+        let settings = opts.apply(self.with_project_settings(opts, running && !wipe)?);
         chain_config::block_time_secs(&settings.block_time)?;
+        chain_config::check_max_txs_per_block(settings.max_txs_per_block)?;
         let continuing = !wipe && self.home.has_chain();
         if continuing && settings.lez != self.settings.lez {
             bail!(
@@ -149,20 +203,24 @@ impl Devnet {
                 settings.lez
             );
         }
-        // Nothing to do, unless the settings file is gone and needs writing again.
+        // The devnet as it will run: its runtime is the one that has to read the binaries.
+        let mut next = Self::with(self.home.clone(), settings.clone(), self.project.clone());
+        next.check_project_needs()?;
+        // Nothing to restart, unless the settings file is gone and needs writing again.
         let unchanged = settings == self.settings && self.home.settings_file().exists();
-        if !wipe && unchanged && !opts.rebuild && self.runtime.running() {
-            println!("Already running.");
+        if !wipe && unchanged && !opts.rebuild && running {
+            eprintln!("Already running.");
+            self.make_project_groups()?;
+            self.write_env(&self.read_env().unwrap_or_default())?;
+            let applied = self.apply_project();
             let resumed = self.resume_sessions(false);
-            self.status()?;
-            return resumed;
+            return with_status(self.status(), applied.and(resumed));
         }
         // The running sequencer holds its own port, and gives it up when it stops.
-        if !(self.runtime.running() && settings.port == self.settings.port) {
+        if !(running && settings.port == self.settings.port) {
             port_free(settings.port)?;
         }
 
-        let mut next = Self::with(self.home.clone(), settings);
         next.runtime.prepare(opts.rebuild)?;
         let faucet = next.dev_faucet()?;
         if continuing && funds_another_faucet(self.settings.faucet.as_ref(), &faucet) {
@@ -172,6 +230,8 @@ impl Devnet {
             );
         }
         next.settings.faucet = Some(faucet);
+        // Keys first, so a new chain funds every group at genesis.
+        next.make_project_groups()?;
         let config = next.chain_config()?;
 
         self.runtime.stop()?;
@@ -194,8 +254,204 @@ impl Devnet {
         next.write_env(&env)?;
         // A new chain starts every session's account at zero.
         let resumed = next.resume_sessions(!continuing);
-        next.status()?;
-        resumed
+        let applied = next.apply_project();
+        with_status(next.status(), resumed.and(applied))
+    }
+
+    /// The stored settings with the project's `[devnet]` section applied. A shared devnet that
+    /// runs with other settings is not restarted for one project (`refuse_changes`), unless
+    /// `opts` asks for the same change explicitly.
+    fn with_project_settings(&self, opts: &UpOptions, refuse_changes: bool) -> Result<Settings> {
+        let Some(project) = &self.project else {
+            return Ok(self.settings.clone());
+        };
+        let wanted = project.devnet.applied_to(self.settings.clone());
+        // A project with its own home is the only one on its devnet: its file just applies.
+        let shared = project.home.is_none();
+        if refuse_changes
+            && shared
+            && opts.apply(wanted.clone()) != opts.apply(self.settings.clone())
+        {
+            bail!(
+                "the shared devnet runs with {}, but {} asks for {}. `logos-devnet down` and `up` \
+                 apply it, restarting the chain for everything on it, or give this project its \
+                 own devnet with `home = \".logos-devnet\"` in the file",
+                project.devnet.describe(&self.settings),
+                project.path.display(),
+                project.devnet.describe(&wanted)
+            );
+        }
+        Ok(wanted)
+    }
+
+    /// What the project needs that `up` can't make by itself, checked before anything changes.
+    fn check_project_needs(&self) -> Result<()> {
+        let Some(project) = &self.project else {
+            return Ok(());
+        };
+        project.check_binaries()?;
+        for binary in project.programs.values() {
+            self.runtime.check_wallet_file(binary)?;
+        }
+        let new_session = project
+            .sessions
+            .keys()
+            .any(|name| Session::new(&self.home.sessions_dir(), name).is_ok_and(|s| !s.exists()));
+        if new_session && !session::logosctl_on_path() {
+            bail!(
+                "{} declares sessions, which need logosctl, the Logos Core CLI, on your PATH",
+                project.path.display()
+            );
+        }
+        Ok(())
+    }
+
+    /// Creates the keys of every account group the project declares. Funding comes later: at
+    /// genesis on a new chain, by transfer on a running one.
+    fn make_project_groups(&self) -> Result<()> {
+        let Some(project) = &self.project else {
+            return Ok(());
+        };
+        for (name, spec) in &project.accounts {
+            self.make_group(name, spec.count, spec.amount.unwrap_or(DEFAULT_FUND))?;
+        }
+        Ok(())
+    }
+
+    /// Makes the devnet match the project once the chain runs: deploys its programs, funds
+    /// every account group's new accounts and makes missing sessions. Every item is tried;
+    /// failures are reported together after.
+    fn apply_project(&self) -> Result<()> {
+        let mut failed: Vec<String> = Vec::new();
+        if let Some(project) = &self.project {
+            for (name, binary) in &project.programs {
+                if let Err(e) = self.deploy_program(name, binary) {
+                    eprintln!("program {name}: {e:#}");
+                    failed.push(format!("program {name}"));
+                }
+            }
+        }
+        if let Err(e) = self.fund_groups(None) {
+            eprintln!("accounts: {e:#}");
+            failed.push("accounts".into());
+        }
+        if let Some(project) = &self.project {
+            for (name, spec) in &project.sessions {
+                if Session::new(&self.home.sessions_dir(), name).is_ok_and(|s| s.exists()) {
+                    continue;
+                }
+                let amount = spec.amount.unwrap_or(DEFAULT_FUND);
+                if let Err(e) = self.session_new(name, &spec.modules, u128::from(amount)) {
+                    eprintln!("session {name}: {e:#}");
+                    failed.push(format!("session {name}"));
+                }
+            }
+        }
+        if !failed.is_empty() {
+            bail!("the devnet is up, but these failed: {}", failed.join(", "));
+        }
+        Ok(())
+    }
+
+    /// Group `name` with at least `count` accounts, each to be funded with `amount`. Missing
+    /// keys are made in one wallet batch. A group never shrinks: its keys stay.
+    fn make_group(&self, name: &str, count: usize, amount: u64) -> Result<GroupInfo> {
+        let group = Group::new(&self.home.groups_dir(), name)?;
+        let mut info = group.info()?;
+        let wallet = group.wallet_dir();
+        // The group's wallet is for the project to use from this machine: it points at the
+        // devnet's local URL. Making keys needs no network.
+        self.point_wallet_at(&wallet, &self.settings.sequencer_url())?;
+        if !info.accounts.is_empty() && info.amount != amount {
+            eprintln!(
+                "group {name}: new accounts get {amount} lepta; the ones funded already keep {} \
+                 until `logos-devnet reset`",
+                info.amount
+            );
+        }
+        if count < info.accounts.len() {
+            eprintln!(
+                "group {name} keeps its {} accounts: groups never shrink",
+                info.accounts.len()
+            );
+        }
+        if info.accounts.len() < count {
+            eprintln!(
+                "Making {} accounts in group {name}...",
+                count - info.accounts.len()
+            );
+        }
+        info.amount = amount;
+        // Keys are made here and imported: the wallet's own `account new` slows down as a
+        // wallet grows (300 keys took minutes), while importing 400 takes under 2 s. In
+        // chunks, saving after each: a batch is one shell argument, and a long one fails.
+        while info.accounts.len() < count {
+            let missing = (count - info.accounts.len()).min(BATCH_CHUNK);
+            let runs = (0..missing)
+                .map(|_| {
+                    Ok(vec![
+                        "account".into(),
+                        "import".into(),
+                        "public".into(),
+                        "--private-key".into(),
+                        random_key()?,
+                    ])
+                })
+                .collect::<Result<Vec<Vec<String>>>>()?;
+            let ids = self
+                .runtime
+                .wallet_batch(&wallet, &runs)?
+                .iter()
+                .map(|out| first_public_id(out).context("the wallet made no account"))
+                .collect::<Result<Vec<_>>>()?;
+            info = Group::extended(info, ids);
+            group.save_info(&info)?;
+        }
+        group.save_info(&info)?;
+        Ok(info)
+    }
+
+    /// Funds every account that was never funded in the account groups (`only` one of them,
+    /// when given), one transfer each, and points their wallets at the devnet's current URL.
+    /// "Never funded" is read from the chain, so spent accounts aren't topped up.
+    fn fund_groups(&self, only: Option<&str>) -> Result<()> {
+        let rpc = self.rpc();
+        for group in groups::list(&self.home.groups_dir())? {
+            if only.is_some_and(|name| name != group.name) {
+                continue;
+            }
+            self.point_wallet_at(&group.wallet_dir(), &self.settings.sequencer_url())?;
+            let info = group.info()?;
+            let mut unfunded = Vec::new();
+            for account in &info.accounts {
+                if !rpc.account_in_use(&account.id)? {
+                    unfunded.push(&account.id);
+                }
+            }
+            if unfunded.is_empty() {
+                continue;
+            }
+            eprintln!(
+                "Funding {} accounts in group {} one transfer at a time \
+                 (`logos-devnet reset` funds them all at genesis)...",
+                unfunded.len(),
+                group.name
+            );
+            for id in unfunded {
+                self.send(id, u128::from(info.amount))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Every account group's accounts with their genesis balance.
+    fn genesis_accounts(&self) -> Result<Vec<(PublicId, u64)>> {
+        let mut accounts = Vec::new();
+        for group in groups::list(&self.home.groups_dir())? {
+            let info = group.info()?;
+            accounts.extend(info.accounts.into_iter().map(|a| (a.id, info.amount)));
+        }
+        Ok(accounts)
     }
 
     /// Brings each session up to date with the chain: its wallet config names the current
@@ -282,6 +538,7 @@ impl Devnet {
     }
 
     fn chain_config(&self) -> Result<Value> {
+        let genesis_accounts = self.genesis_accounts()?;
         chain_config::patch(
             self.runtime.upstream_config()?,
             &ChainOptions {
@@ -289,6 +546,8 @@ impl Devnet {
                 block_time: &self.settings.block_time,
                 faucet: self.faucet()?,
                 faucet_balance: FAUCET_BALANCE,
+                max_txs_per_block: self.settings.max_txs_per_block,
+                genesis_accounts: &genesis_accounts,
             },
         )
     }
@@ -313,7 +572,16 @@ impl Devnet {
         }
     }
 
+    /// Writes the env file: `env`'s sequencer and programs, and every account group.
     fn write_env(&self, env: &Env) -> Result<()> {
+        let mut env = Env {
+            sequencer: self.settings.sequencer_url(),
+            programs: env.programs.clone(),
+            groups: BTreeMap::new(),
+        };
+        for group in groups::list(&self.home.groups_dir())? {
+            env.groups.insert(group.name.clone(), group.manifest());
+        }
         std::fs::write(self.home.env_file(), env.render()).context("writing the env file")
     }
 
@@ -324,64 +592,112 @@ impl Devnet {
     }
 
     /// Stops the sessions' daemons, then the sequencer. The chain and sessions are kept.
-    pub fn down(&self) -> Result<()> {
+    pub fn down(&self) -> Result<Done> {
         for session in self.sessions() {
             if let Err(e) = session.logosctl().stop() {
                 eprintln!("session {}: {e:#}", session.name);
             }
         }
         self.runtime.stop()?;
-        println!("Stopped. The chain and sessions are kept; `logos-devnet up` resumes them.");
-        Ok(())
+        Ok(Done {
+            message: "Stopped. The chain and sessions are kept; `logos-devnet up` resumes them."
+                .into(),
+        })
     }
 
-    pub fn status(&self) -> Result<()> {
+    pub fn status(&self) -> Status {
         let s = &self.settings;
-        println!("lez        {} ({})", s.lez, self.runtime.describe());
         let running = self.runtime.running();
         let head = running.then(|| self.rpc().last_block_id().ok()).flatten();
-        match head {
-            Some(head) => println!("sequencer  {}  running, block {head}", s.sequencer_url()),
-            None if running => println!("sequencer  {}  starting", s.sequencer_url()),
-            None => println!("sequencer  {}  stopped", s.sequencer_url()),
+        let env = self.read_env().ok();
+        let programs = env
+            .as_ref()
+            .map(|env| {
+                env.programs
+                    .iter()
+                    .map(|(name, id)| program_report(name, id, false))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Status {
+            lez: s.lez.clone(),
+            runtime: self.runtime.describe(),
+            sequencer: report::Sequencer {
+                url: s.sequencer_url(),
+                running,
+                block: head,
+                max_txs_per_block: s.max_txs_per_block,
+                block_time: s.block_time.clone(),
+            },
+            faucet: s.faucet.as_ref().map(|faucet| Balance {
+                account: faucet.wallet_form(),
+                balance: head.and_then(|_| self.rpc().balance(faucet).ok()),
+            }),
+            programs,
+            account_groups: self.group_summaries().unwrap_or_default(),
+            sessions: self.sessions().into_iter().map(|s| s.name).collect(),
+            env_file: env.map(|_| self.home.env_file()),
         }
-        if let Some(faucet) = &s.faucet {
-            let balance = head.and_then(|_| self.rpc().balance(faucet).ok());
-            let balance = balance.map_or(String::new(), |b| format!("  {b} lepta"));
-            println!("faucet     {}{balance}", faucet.wallet_form());
-        }
-        if let Ok(env) = self.read_env() {
-            for (name, id) in &env.programs {
-                println!(
-                    "program    {name}  {}  ({})",
-                    id.as_str(),
-                    envfile::program_var(name)
-                );
-            }
-            println!("env        {}", self.home.env_file().display());
-        }
-        let sessions = self.sessions();
-        if !sessions.is_empty() {
-            let names: Vec<_> = sessions.iter().map(|s| s.name.as_str()).collect();
-            println!("sessions   {}", names.join(", "));
-        }
-        Ok(())
     }
 
-    pub fn fund(&self, account: &str, amount: u128) -> Result<()> {
+    pub fn fund(&self, account: &str, amount: u128) -> Result<Balance> {
         let to = PublicId::parse(account)?;
         // Fails before any work when there is no faucet yet.
         self.faucet()?;
         self.require_running()?;
         let balance = self.send(&to, amount)?;
-        println!("{}  {balance} lepta", to.wallet_form());
-        Ok(())
+        Ok(Balance {
+            account: to.wallet_form(),
+            balance: Some(balance),
+        })
+    }
+
+    /// Makes account group `name` with `count` accounts (at least: a group never shrinks),
+    /// each funded with `amount`, now when the devnet runs, else when it starts.
+    pub fn accounts_new(&self, name: &str, count: usize, amount: u64) -> Result<GroupSummary> {
+        groups::check_spec(count, amount)?;
+        self.runtime.prepare(false)?;
+        self.make_group(name, count, amount)?;
+        if self.runtime.running() {
+            self.fund_groups(Some(name))?;
+            self.write_env(&self.read_env().unwrap_or_default())?;
+        } else {
+            eprintln!(
+                "The devnet isn't running. `logos-devnet up` funds the group, by transfer on the \
+                 chain it resumes, and `reset` funds it at genesis on a new one."
+            );
+        }
+        self.group_summaries()?
+            .into_iter()
+            .find(|g| g.name == name)
+            .context("the group just made is missing")
+    }
+
+    pub fn accounts_list(&self) -> Result<Groups> {
+        Ok(Groups(self.group_summaries()?))
+    }
+
+    fn group_summaries(&self) -> Result<Vec<GroupSummary>> {
+        groups::list(&self.home.groups_dir())?
+            .into_iter()
+            .map(|group| {
+                let info = group.info()?;
+                Ok(GroupSummary {
+                    var: envfile::group_var(&group.name),
+                    accounts: info.accounts.len(),
+                    amount: info.amount,
+                    file: group.manifest(),
+                    wallet: group.wallet_dir(),
+                    name: group.name,
+                })
+            })
+            .collect()
     }
 
     /// Makes session `name`: its own logosctl daemon with `lez_core` (and `extra` modules)
     /// from the catalog, a devnet wallet opened in it, and a public account funded with
     /// `amount`. A failed attempt leaves nothing behind.
-    pub fn session_new(&self, name: &str, extra: &[String], amount: u128) -> Result<()> {
+    pub fn session_new(&self, name: &str, extra: &[String], amount: u128) -> Result<SessionMade> {
         let session = Session::new(&self.home.sessions_dir(), name)?;
         if session.exists() {
             bail!("session {name} exists. `logos-devnet session rm {name}` first");
@@ -404,12 +720,15 @@ impl Devnet {
             }
         }
         let info = made?;
-        println!("session {name} ready, with {}", info.modules.join(", "));
-        for (var, value) in session.vars(&info) {
-            println!("  {var}={value}");
-        }
-        println!("Load it with: source <(logos-devnet session env {name})");
-        Ok(())
+        Ok(SessionMade {
+            name: name.to_owned(),
+            vars: session
+                .vars(&info)
+                .into_iter()
+                .map(|(var, value)| (var.to_owned(), value))
+                .collect(),
+            modules: info.modules,
+        })
     }
 
     fn make_session(
@@ -443,57 +762,62 @@ impl Devnet {
         Ok(info)
     }
 
-    pub fn session_list(&self) -> Result<()> {
-        let sessions = session::list(&self.home.sessions_dir())?;
-        if sessions.is_empty() {
-            println!("No sessions. `logos-devnet session new <name>` makes one.");
-        }
+    pub fn session_list(&self) -> Result<Sessions> {
         let chain_up = self.runtime.running();
-        for session in sessions {
-            let state = if session.logosctl().running() {
-                "running"
-            } else {
-                "stopped"
-            };
-            match session.info() {
-                Ok(info) => {
-                    let balance = chain_up
-                        .then(|| self.rpc().balance(&info.account).ok())
-                        .flatten()
-                        .map_or(String::new(), |b| format!("  {b} lepta"));
-                    println!(
-                        "{:<16} {state:<8} {}{balance}",
-                        session.name,
-                        info.account.wallet_form()
-                    );
+        let rows = session::list(&self.home.sessions_dir())?
+            .into_iter()
+            .map(|session| {
+                let running = session.logosctl().running();
+                match session.info() {
+                    Ok(info) => SessionRow {
+                        balance: chain_up
+                            .then(|| self.rpc().balance(&info.account).ok())
+                            .flatten(),
+                        account: Some(info.account.wallet_form()),
+                        name: session.name,
+                        running,
+                        error: None,
+                    },
+                    Err(e) => SessionRow {
+                        name: session.name,
+                        running,
+                        account: None,
+                        balance: None,
+                        error: Some(format!("{e:#}")),
+                    },
                 }
-                Err(e) => println!("{:<16} {state:<8} {e:#}", session.name),
-            }
-        }
-        Ok(())
+            })
+            .collect();
+        Ok(Sessions(rows))
     }
 
-    /// The devnet's env file followed by the session's own variables, to `source`.
-    pub fn session_env(&self, name: &str) -> Result<()> {
+    /// The devnet's env and the session's own variables, to `source`.
+    pub fn session_env(&self, name: &str) -> Result<EnvVars> {
         let session = self.existing_session(name)?;
         let info = session.info()?;
         // Without the devnet's env the session's variables still load.
-        let devnet = self.read_env().map(|env| env.render()).unwrap_or_else(|e| {
+        let mut vars = self.read_env().map(|env| env.vars()).unwrap_or_else(|e| {
             eprintln!("{e:#}");
-            String::new()
+            Vec::new()
         });
-        print!("{devnet}{}", session.env_lines(&info));
-        Ok(())
+        vars.extend(
+            session
+                .vars(&info)
+                .into_iter()
+                .map(|(var, value)| (var.to_owned(), value)),
+        );
+        Ok(EnvVars::new(vars))
     }
 
     /// Stops the session's daemon and deletes it, wallet and all.
-    pub fn session_rm(&self, name: &str) -> Result<()> {
+    pub fn session_rm(&self, name: &str) -> Result<Done> {
         let session = self.existing_session(name)?;
         session.logosctl().stop()?;
         std::fs::remove_dir_all(session.dir())
             .with_context(|| format!("deleting {}", session.dir().display()))?;
-        println!("Removed session {name} and its wallet.");
-        Ok(())
+        Ok(Done {
+            message: format!("Removed session {name} and its wallet."),
+        })
     }
 
     fn existing_session(&self, name: &str) -> Result<Session> {
@@ -504,27 +828,32 @@ impl Devnet {
         Ok(session)
     }
 
-    /// Deploys `elf` as program `name` from the dev wallet's header key for that name, so the
-    /// program id is the same on every chain this home starts.
-    pub fn deploy(&self, name: &str, elf: &Path) -> Result<()> {
-        envfile::check_program_name(name)?;
-        let size = std::fs::metadata(elf)
-            .with_context(|| format!("{} does not exist", elf.display()))?
-            .len();
-        let faucet = self.faucet()?;
+    /// Deploys `elf` as program `name`, and adds it to the env file.
+    pub fn deploy(&self, name: &str, elf: &Path) -> Result<Program> {
+        self.faucet()?;
         self.require_running()?;
+        self.deploy_program(name, elf)
+    }
+
+    /// Deploys `elf` as program `name` from the dev wallet's header key for that name, so the
+    /// program id is the same on every chain this home starts. A program already on the chain
+    /// stays: deployed programs are immutable. When its binary changed since, that's said.
+    fn deploy_program(&self, name: &str, elf: &Path) -> Result<Program> {
+        envfile::check_program_name(name)?;
+        let bytes =
+            std::fs::read(elf).with_context(|| format!("{} does not exist", elf.display()))?;
+        let hash = hex_digest(&bytes);
+        let faucet = self.faucet()?;
         let mut env = self.read_env()?;
+        let mut hashes = self.program_hashes()?;
 
         let label = format!("program-{name}");
         let header = match self.labelled_account(&label)? {
             Some(header) => header,
             None => self.new_account(Some(&label))?,
         };
-        if self.rpc().account_in_use(&header)? {
-            println!(
-                "{name} is already deployed on this chain. `logos-devnet reset` to deploy a new build."
-            );
-        } else {
+        let deployed_now = !self.rpc().account_in_use(&header)?;
+        if deployed_now {
             let mut args: Vec<WalletArg> = vec![
                 "program-loader".into(),
                 "deploy".into(),
@@ -534,7 +863,7 @@ impl Devnet {
                 header.wallet_form().into(),
                 "--segments".into(),
             ];
-            for _ in 0..segment_count(size) {
+            for _ in 0..segment_count(bytes.len() as u64) {
                 args.push(self.new_account(None)?.wallet_form().into());
             }
             args.extend([
@@ -553,11 +882,27 @@ impl Devnet {
                     header.as_str()
                 );
             }
+            hashes.insert(name.to_owned(), hash);
+            write_json(&self.home.programs_file(), &serde_json::to_value(&hashes)?)?;
+        } else if hashes.get(name).is_some_and(|deployed| *deployed != hash) {
+            eprintln!(
+                "{name}: {} changed since it was deployed. `logos-devnet reset` deploys the new \
+                 build (programs are immutable)",
+                elf.display()
+            );
         }
         env.programs.insert(name.to_owned(), header.clone());
         self.write_env(&env)?;
-        println!("{}={}", envfile::program_var(name), header.as_str());
-        Ok(())
+        Ok(program_report(name, &header, deployed_now))
+    }
+
+    /// Each program's deployed binary hash, by name.
+    fn program_hashes(&self) -> Result<BTreeMap<String, String>> {
+        match std::fs::read_to_string(self.home.programs_file()) {
+            Ok(text) => serde_json::from_str(&text).context("reading programs.json"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+            Err(e) => Err(e).context("reading programs.json"),
+        }
     }
 
     fn new_account(&self, label: Option<&str>) -> Result<PublicId> {
@@ -574,9 +919,8 @@ impl Devnet {
         Ok(labelled(&list, label))
     }
 
-    pub fn print_env(&self) -> Result<()> {
-        print!("{}", self.read_env()?.render());
-        Ok(())
+    pub fn env_vars(&self) -> Result<EnvVars> {
+        Ok(EnvVars::new(self.read_env()?.vars()))
     }
 
     pub fn logs(&self, follow: bool) -> Result<()> {
@@ -586,7 +930,7 @@ impl Devnet {
     /// Writes `<dir>/wallet_config.json` for a project's own wallet (`lez_core` or the LEZ
     /// CLI). Refuses a directory that already holds a wallet or a config: repointing a testnet
     /// wallet at the devnet would mix up its sync state.
-    pub fn write_project_wallet_config(&self, dir: &Path) -> Result<PathBuf> {
+    pub fn write_project_wallet_config(&self, dir: &Path) -> Result<WalletConfig> {
         let path = dir.join("wallet_config.json");
         for existing in [&path, &dir.join("storage.json")] {
             if existing.exists() {
@@ -598,12 +942,52 @@ impl Devnet {
         }
         std::fs::create_dir_all(dir)?;
         write_json(&path, &wallet_config(&self.settings.sequencer_url()))?;
-        Ok(path)
+        Ok(WalletConfig { path })
     }
 }
 
+/// `status` when everything worked. When something failed, the status goes to stderr (stdout
+/// stays clean for `--json`) and the error is returned.
+fn with_status(status: Status, outcome: Result<()>) -> Result<Status> {
+    match outcome {
+        Ok(()) => Ok(status),
+        Err(e) => {
+            eprint!("{}", status.human());
+            Err(e)
+        }
+    }
+}
+
+fn program_report(name: &str, id: &PublicId, deployed_now: bool) -> Program {
+    Program {
+        name: name.to_owned(),
+        id: id.as_str().to_owned(),
+        hex: id.hex(),
+        var: envfile::program_var(name),
+        deployed_now,
+    }
+}
+
+/// A fresh private key: 32 random bytes as hex, the form `account import` takes.
+fn random_key() -> Result<String> {
+    use std::io::Read;
+    let mut bytes = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut bytes))
+        .context("reading /dev/urandom")?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Lower-case hex SHA-256 of `bytes`.
+fn hex_digest(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 /// The env file after `up`: a chain that carries on keeps its programs, a new one has none.
-fn port_free(port: u16) -> Result<()> {
+pub(crate) fn port_free(port: u16) -> Result<()> {
     std::net::TcpListener::bind(("127.0.0.1", port))
         .map(drop)
         .with_context(|| format!("port {port} on 127.0.0.1 is taken. Pick another with --port"))
@@ -668,6 +1052,34 @@ mod tests {
     use super::*;
 
     const ID: &str = "HpavNGFYxjyhLsy171aXsvv146yUeXmRWiho22uvT43d";
+
+    #[test]
+    fn refuses_a_binary_docker_cant_mount_before_touching_the_devnet() {
+        let dir = tempfile::tempdir().unwrap();
+        let build = dir.path().join("build:debug");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(build.join("counter.bin"), b"elf").unwrap();
+        std::fs::write(
+            dir.path().join(crate::project::FILE_NAME),
+            "[programs]\ncounter = \"build:debug/counter.bin\"\n",
+        )
+        .unwrap();
+        let project = Project::load(&dir.path().join(crate::project::FILE_NAME)).unwrap();
+        let home = Home::locate(Some(dir.path().join("home"))).unwrap();
+        let devnet = Devnet::open(home, Some(project)).unwrap();
+        assert_eq!(devnet.settings().runtime, RuntimeKind::Docker);
+        let err = devnet.check_project_needs().unwrap_err();
+        assert!(format!("{err:#}").contains("holds a `:`"), "{err:#}");
+    }
+
+    #[test]
+    fn makes_distinct_64_hex_keys() {
+        let a = random_key().unwrap();
+        let b = random_key().unwrap();
+        assert_eq!(a.len(), 64);
+        assert!(a.bytes().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b);
+    }
 
     #[test]
     fn counts_segments() {
@@ -784,7 +1196,7 @@ mod tests {
     }
 
     fn devnet_in(dir: &Path) -> Devnet {
-        Devnet::open(Home::locate(Some(dir.into())).unwrap()).unwrap()
+        Devnet::open(Home::locate(Some(dir.into())).unwrap(), None).unwrap()
     }
 
     #[test]
@@ -803,8 +1215,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let devnet = devnet_in(&dir.path().join("home"));
         let target = dir.path().join("new/buyer");
-        let path = devnet.write_project_wallet_config(&target).unwrap();
-        let config: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let written = devnet.write_project_wallet_config(&target).unwrap();
+        let config: Value =
+            serde_json::from_str(&std::fs::read_to_string(&written.path).unwrap()).unwrap();
         assert_eq!(config["sequencer_addr"], "http://127.0.0.1:3040");
         assert!(devnet.write_project_wallet_config(&target).is_err());
     }
@@ -834,7 +1247,10 @@ mod tests {
             lez: Some("v9.9.9".into()),
             ..UpOptions::default()
         };
-        let err = Devnet::open(home.clone()).unwrap().up(&opts).unwrap_err();
+        let err = Devnet::open(home.clone(), None)
+            .unwrap()
+            .up(&opts)
+            .unwrap_err();
         assert!(err.to_string().contains("reset --lez v9.9.9"), "{err}");
         assert!(!home.settings_file().exists(), "nothing saved");
     }
@@ -849,7 +1265,7 @@ mod tests {
             port: Some(taken.local_addr().unwrap().port()),
             ..UpOptions::default()
         };
-        let err = Devnet::open(home.clone())
+        let err = Devnet::open(home.clone(), None)
             .unwrap()
             .reset(&opts)
             .unwrap_err();
@@ -868,7 +1284,7 @@ mod tests {
                 block_time: Some("1".into()),
                 ..UpOptions::default()
             };
-            assert!(command(Devnet::open(home.clone()).unwrap(), &opts).is_err());
+            assert!(command(Devnet::open(home.clone(), None).unwrap(), &opts).is_err());
             assert!(!home.settings_file().exists(), "nothing saved");
             assert!(home.has_chain(), "nothing deleted");
         }

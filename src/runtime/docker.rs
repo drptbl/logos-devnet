@@ -3,12 +3,16 @@
 //! owned by the host user, so `reset` and inspection work the same as natively.
 
 use std::io::Write;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
-use super::{Runtime, SEQUENCER_LOG, WalletArg, all_output_of, run_attached, stdout_of};
+use super::{
+    Runtime, SEQUENCER_LOG, WalletArg, all_output_of, batch_script, redact_recovery_phrase,
+    redacted, run_attached, split_batch, stdout_of,
+};
 use crate::home::{Home, Settings, write_json};
 
 /// The image's build recipe. Built from stdin, it needs no context: it clones LEZ itself.
@@ -43,30 +47,28 @@ impl Docker {
     }
 
     fn write_compose_file(&self) -> Result<()> {
-        // The chain and wallet directories must exist before Docker mounts them, or it creates
-        // them as root.
+        // The chain directory must exist before Docker mounts it, or it creates it as root.
         std::fs::create_dir_all(self.home.chain_dir())?;
-        std::fs::create_dir_all(self.home.wallet_dir())?;
         let spec = compose_spec(&ComposeInputs {
             project: &compose_project(&self.home),
             image: &self.settings.image(),
             port: self.settings.port,
             user: &current_user()?,
             chain_dir: &self.home.chain_dir().to_string_lossy(),
-            wallet_dir: &self.home.wallet_dir().to_string_lossy(),
         });
         // JSON is YAML, and serde quotes every path correctly.
         write_json(&self.home.compose_file(), &spec)
     }
 
-    fn image_exists(&self) -> bool {
-        Command::new("docker")
-            .args(["image", "inspect", "--format", "{{.Id}}"])
-            .arg(self.settings.image())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
+    /// `compose run` of the wallet service with the wallet in `home` mounted as its home.
+    fn wallet_run(&self, home: &Path) -> Result<Command> {
+        self.write_compose_file()?;
+        std::fs::create_dir_all(home)?;
+        let home = mountable(home)?;
+        let mut cmd = self.compose();
+        cmd.args(["run", "--rm", "--no-deps", "-T", "--volume"])
+            .arg(format!("{}:{WALLET_MOUNT}", home.display()));
+        Ok(cmd)
     }
 
     fn build_image(&self) -> Result<()> {
@@ -82,6 +84,7 @@ impl Docker {
             .arg(self.settings.image())
             .arg("-")
             .stdin(Stdio::piped())
+            .stdout(std::io::stderr())
             .spawn()
             .context("could not run docker")?;
         child
@@ -106,13 +109,15 @@ impl Runtime for Docker {
         if rebuild {
             return self.build_image();
         }
-        if self.image_exists() {
+        if image_present(&self.settings.image()) {
             return Ok(());
         }
         eprintln!("Pulling {}...", self.settings.image());
         let pulled = Command::new("docker")
             .arg("pull")
             .arg(self.settings.image())
+            // Progress goes to stderr: stdout is for results, JSON with --json.
+            .stdout(std::io::stderr())
             .status()
             .is_ok_and(|s| s.success());
         if pulled {
@@ -196,19 +201,15 @@ impl Runtime for Docker {
             .is_ok_and(|ids| !ids.trim().is_empty())
     }
 
-    fn wallet(&self, args: Vec<WalletArg>) -> Result<String> {
-        self.write_compose_file()?;
-        let mut cmd = self.compose();
-        cmd.args(["run", "--rm", "--no-deps", "-T"]);
+    fn wallet(&self, home: &Path, args: Vec<WalletArg>) -> Result<String> {
+        let mut cmd = self.wallet_run(home)?;
         let mut wallet_args = Vec::new();
         for (i, arg) in args.into_iter().enumerate() {
             match arg {
                 WalletArg::Text(text) => wallet_args.push(text),
                 WalletArg::File(path) => {
                     // Mount just the file, read-only.
-                    let path = path
-                        .canonicalize()
-                        .with_context(|| format!("{} does not exist", path.display()))?;
+                    let path = mountable(&path)?;
                     let mount = format!("{FILES_MOUNT}/{i}");
                     cmd.arg("--volume")
                         .arg(format!("{}:{mount}:ro", path.display()));
@@ -218,6 +219,20 @@ impl Runtime for Docker {
         }
         cmd.arg("wallet").args(wallet_args);
         all_output_of(&mut cmd)
+            .map(|out| redact_recovery_phrase(&out))
+            .map_err(redacted)
+    }
+
+    fn check_wallet_file(&self, path: &Path) -> Result<()> {
+        mountable(path).map(drop)
+    }
+
+    fn wallet_batch(&self, home: &Path, runs: &[Vec<String>]) -> Result<Vec<String>> {
+        let mut cmd = self.wallet_run(home)?;
+        cmd.args(["--entrypoint", "sh", "wallet", "-c"])
+            .arg(batch_script("wallet", runs));
+        let out = all_output_of(&mut cmd).map_err(redacted)?;
+        split_batch(&out, runs.len())
     }
 
     fn logs(&self, follow: bool) -> Result<()> {
@@ -242,7 +257,31 @@ fn compose_project(home: &Home) -> String {
 }
 
 /// Whether the Docker daemon answers. With it down, no container of ours runs.
-fn docker_reachable() -> bool {
+/// `path`, absolute, as `--volume` can mount it: its short syntax splits on `:`.
+fn mountable(path: &Path) -> Result<std::path::PathBuf> {
+    let path = path
+        .canonicalize()
+        .with_context(|| format!("{} does not exist", path.display()))?;
+    if path.to_string_lossy().contains(':') {
+        bail!(
+            "Docker can't mount {}: the path holds a `:`. Use one without, or `up --native`",
+            path.display()
+        );
+    }
+    Ok(path)
+}
+
+/// Whether `image` is in the local Docker image store.
+pub(crate) fn image_present(image: &str) -> bool {
+    Command::new("docker")
+        .args(["image", "inspect", "--format", "{{.Id}}", image])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+pub(crate) fn docker_reachable() -> bool {
     Command::new("docker")
         .args(["info", "--format", "{{.ServerVersion}}"])
         .stdout(Stdio::null())
@@ -284,7 +323,6 @@ struct ComposeInputs<'a> {
     port: u16,
     user: &'a str,
     chain_dir: &'a str,
-    wallet_dir: &'a str,
 }
 
 /// The compose file. The RPC is published on loopback only: it has no caller auth.
@@ -301,7 +339,12 @@ fn compose_spec(i: &ComposeInputs) -> Value {
                     "--port", CONTAINER_PORT.to_string()
                 ],
                 "ports": [format!("127.0.0.1:{}:{CONTAINER_PORT}", i.port)],
-                "volumes": [format!("{}:{CHAIN_MOUNT}", compose_literal(i.chain_dir))],
+                // The long form takes any path, `:` included.
+                "volumes": [{
+                    "type": "bind",
+                    "source": compose_literal(i.chain_dir),
+                    "target": CHAIN_MOUNT
+                }],
                 "environment": { "RUST_LOG": SEQUENCER_LOG },
                 "stop_grace_period": "30s"
             },
@@ -310,7 +353,6 @@ fn compose_spec(i: &ComposeInputs) -> Value {
                 "user": i.user,
                 "profiles": ["tools"],
                 "entrypoint": ["wallet"],
-                "volumes": [format!("{}:{WALLET_MOUNT}", compose_literal(i.wallet_dir))],
                 "environment": { "LEE_WALLET_HOME_DIR": WALLET_MOUNT }
             }
         }
@@ -328,7 +370,6 @@ mod tests {
             port: 3040,
             user: "501:20",
             chain_dir: "/Users/me/My Devnet/chain",
-            wallet_dir: "/Users/me/My Devnet/wallet",
         }
     }
 
@@ -351,7 +392,11 @@ mod tests {
         assert_eq!(seq["user"], "501:20");
         assert_eq!(
             seq["volumes"],
-            json!(["/Users/me/My Devnet/chain:/devnet/chain"])
+            json!([{
+                "type": "bind",
+                "source": "/Users/me/My Devnet/chain",
+                "target": "/devnet/chain"
+            }])
         );
         assert_eq!(seq["command"][1], "/devnet/chain/sequencer_config.json");
         let wallet = &spec["services"]["wallet"];
@@ -359,6 +404,10 @@ mod tests {
         assert_eq!(
             wallet["environment"]["LEE_WALLET_HOME_DIR"],
             "/devnet/wallet"
+        );
+        assert!(
+            wallet.get("volumes").is_none(),
+            "each run mounts the wallet it works on"
         );
     }
 
@@ -375,17 +424,21 @@ mod tests {
     fn a_dollar_in_a_home_path_stays_literal() {
         let spec = compose_spec(&ComposeInputs {
             chain_dir: "/tmp/dev$HOME/chain",
-            wallet_dir: "/tmp/dev$HOME/wallet",
             ..inputs()
         });
         assert_eq!(
-            spec["services"]["sequencer"]["volumes"][0],
-            "/tmp/dev$$HOME/chain:/devnet/chain"
+            spec["services"]["sequencer"]["volumes"][0]["source"],
+            "/tmp/dev$$HOME/chain"
         );
-        assert_eq!(
-            spec["services"]["wallet"]["volumes"][0],
-            "/tmp/dev$$HOME/wallet:/devnet/wallet"
-        );
+    }
+
+    #[test]
+    fn refuses_to_mount_a_path_with_a_colon() {
+        let dir = tempfile::tempdir().unwrap();
+        let odd = dir.path().join("a:b");
+        std::fs::create_dir(&odd).unwrap();
+        assert!(mountable(&odd).is_err());
+        assert!(mountable(dir.path()).is_ok());
     }
 
     #[test]

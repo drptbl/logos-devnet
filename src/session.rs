@@ -95,14 +95,6 @@ impl Session {
         Logosctl::new(self.logosctl_dir())
     }
 
-    /// The session's export lines, values single-quoted so any path survives `source`.
-    pub fn env_lines(&self, info: &SessionInfo) -> String {
-        self.vars(info)
-            .iter()
-            .map(|(var, value)| format!("export {var}={}\n", sh_quote(value)))
-            .collect()
-    }
-
     /// What an app needs from the session, by variable name.
     pub fn vars(&self, info: &SessionInfo) -> [(&'static str, String); 4] {
         [
@@ -165,20 +157,20 @@ fn check_module(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Whether `logosctl` runs from the PATH.
+pub fn logosctl_on_path() -> bool {
+    Command::new("logosctl")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 /// Session names are lower-case letters, digits and `-`, starting with a letter: they become
 /// directory names.
 pub fn check_session_name(name: &str) -> Result<()> {
-    let ok = name.len() <= 32
-        && name.chars().next().is_some_and(|c| c.is_ascii_lowercase())
-        && name
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
-    if !ok {
-        bail!(
-            "session names are up to 32 lower-case letters, digits and -, starting with a letter: {name}"
-        );
-    }
-    Ok(())
+    crate::envfile::check_name("session", name)
 }
 
 /// The Logos Core CLI for one session directory.
@@ -356,11 +348,6 @@ fn call_result(reply: Value, what: &str) -> Result<Value> {
         .with_context(|| format!("{what} returned no result"))
 }
 
-/// `value` in single quotes for a POSIX shell.
-fn sh_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', r"'\''"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -498,7 +485,7 @@ esac"#,
     fn checks_session_names() {
         assert!(check_session_name("alice").is_ok());
         assert!(check_session_name("agent-2").is_ok());
-        for bad in ["", "Alice", "2nd", "a b", "../x", "a/b", &"a".repeat(33)] {
+        for bad in ["", "Alice", "2nd", "a b", "../x", "a/b", &"a".repeat(49)] {
             assert!(check_session_name(bad).is_err(), "{bad:?}");
         }
     }
@@ -548,19 +535,23 @@ esac"#,
     }
 
     #[test]
-    fn env_lines_quote_paths() {
+    fn vars_name_what_an_app_needs() {
         let session = Session::new(Path::new("/h/it's here/sessions"), "alice").unwrap();
         let info = SessionInfo {
             modules: vec!["lez_core".into()],
             account: PublicId::parse(ID).unwrap(),
             funded: 1,
         };
-        let lines = session.env_lines(&info);
-        assert!(
-            lines.contains(r"export LOGOSCTL_CONFIG_DIR='/h/it'\''s here/sessions/alice/logosctl'")
+        let vars = session.vars(&info);
+        assert_eq!(
+            vars[0],
+            (
+                "LOGOSCTL_CONFIG_DIR",
+                "/h/it's here/sessions/alice/logosctl".into()
+            )
         );
-        assert!(lines.contains(&format!("export LOGOS_DEVNET_ACCOUNT='Public/{ID}'")));
-        assert!(lines.contains("wallet/storage.json'"));
+        assert_eq!(vars[3], ("LOGOS_DEVNET_ACCOUNT", format!("Public/{ID}")));
+        assert!(vars[2].1.ends_with("wallet/storage.json"));
     }
 
     #[test]

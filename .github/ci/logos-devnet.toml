@@ -1,0 +1,7 @@
+# The project the action's CI job starts: an account group and a faster block budget.
+[devnet]
+max_txs_per_block = 50
+
+[accounts.users]
+count = 20
+amount = 1_000_000

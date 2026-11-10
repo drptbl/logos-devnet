@@ -13,8 +13,8 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use super::{
-    LEZ_REPO, Runtime, SEQUENCER_FEATURES, SEQUENCER_LOG, WalletArg, all_output_of, run_attached,
-    stdout_of,
+    LEZ_REPO, Runtime, SEQUENCER_FEATURES, SEQUENCER_LOG, WalletArg, all_output_of, batch_script,
+    redact_recovery_phrase, redacted, run_attached, run_building, split_batch, stdout_of,
 };
 use crate::home::{Home, Settings};
 
@@ -76,7 +76,7 @@ impl Native {
         }
         std::fs::create_dir_all(self.tag_dir())?;
         eprintln!("Cloning LEZ {}...", self.settings.lez);
-        run_attached(
+        run_building(
             Command::new("git")
                 .args([
                     "clone",
@@ -115,12 +115,12 @@ impl Runtime for Native {
         };
         // Two builds: in one, `prove` would reach the wallet too, which then links the prover
         // kernels that RISC0_SKIP_BUILD_KERNELS leaves out.
-        run_attached(
+        run_building(
             cargo("sequencer_service")
                 .env("RISC0_SKIP_BUILD_KERNELS", "1")
                 .args(["--features", SEQUENCER_FEATURES]),
         )?;
-        run_attached(&mut cargo("wallet"))
+        run_building(&mut cargo("wallet"))
     }
 
     fn upstream_config(&self) -> Result<Value> {
@@ -190,16 +190,30 @@ impl Runtime for Native {
         self.live_pid().is_some()
     }
 
-    fn wallet(&self, args: Vec<WalletArg>) -> Result<String> {
+    fn wallet(&self, home: &Path, args: Vec<WalletArg>) -> Result<String> {
         let args = args.into_iter().map(|arg| match arg {
             WalletArg::Text(text) => text.into(),
             WalletArg::File(path) => path.into_os_string(),
         });
         all_output_of(
             Command::new(self.bin("wallet"))
-                .env("LEE_WALLET_HOME_DIR", self.home.wallet_dir())
+                .env("LEE_WALLET_HOME_DIR", home)
                 .args(args),
         )
+        .map(|out| redact_recovery_phrase(&out))
+        .map_err(redacted)
+    }
+
+    fn wallet_batch(&self, home: &Path, runs: &[Vec<String>]) -> Result<Vec<String>> {
+        let script = batch_script(&self.bin("wallet").to_string_lossy(), runs);
+        let out = all_output_of(
+            Command::new("sh")
+                .env("LEE_WALLET_HOME_DIR", home)
+                .arg("-c")
+                .arg(script),
+        )
+        .map_err(redacted)?;
+        split_batch(&out, runs.len())
     }
 
     fn logs(&self, follow: bool) -> Result<()> {
