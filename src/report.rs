@@ -42,6 +42,8 @@ pub struct Sequencer {
     pub block: Option<u64>,
     pub max_txs_per_block: u32,
     pub block_time: String,
+    /// Whether it skips proof checks (`RISC0_DEV_MODE`).
+    pub dev_mode: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -58,8 +60,10 @@ pub struct Program {
     pub id: String,
     pub hex: String,
     pub var: String,
-    /// False when it was already on this chain.
+    /// True when this call put it on the chain, false when it was there already.
     pub deployed_now: bool,
+    /// True when a new build replaced it in place: it's mutable.
+    pub updated: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -142,9 +146,14 @@ impl Report for Status {
         let s = &self.sequencer;
         let mut out = format!("lez        {} ({})\n", self.lez, self.runtime);
         out += &match (s.running, s.block) {
-            (true, Some(block)) => format!("sequencer  {}  running, block {block}\n", s.url),
-            (true, None) => format!("sequencer  {}  starting\n", s.url),
-            (false, _) => format!("sequencer  {}  stopped\n", s.url),
+            (true, Some(block)) => format!("sequencer  {}  running, block {block}", s.url),
+            (true, None) => format!("sequencer  {}  starting", s.url),
+            (false, _) => format!("sequencer  {}  stopped", s.url),
+        };
+        out += if s.dev_mode {
+            ", dev mode (fake proofs)\n"
+        } else {
+            "\n"
         };
         if let Some(faucet) = &self.faucet {
             out += &format!("faucet     {}{}\n", faucet.account, lepta(faucet.balance));
@@ -282,6 +291,7 @@ mod tests {
                 block: Some(7),
                 max_txs_per_block: 20,
                 block_time: "1s".into(),
+                dev_mode: true,
             },
             faucet: None,
             programs: vec![],
@@ -303,7 +313,8 @@ mod tests {
             assert!(json.get(key).is_some(), "{key}");
         }
         assert_eq!(json["sequencer"]["block"], 7);
-        assert!(status.human().contains("running, block 7"));
+        assert_eq!(json["sequencer"]["dev_mode"], true);
+        assert!(status.human().contains("running, block 7, dev mode"));
     }
 
     #[test]

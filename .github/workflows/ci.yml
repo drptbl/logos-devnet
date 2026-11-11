@@ -69,8 +69,9 @@ jobs:
           set -euo pipefail
           test "$SEQUENCER" = "$LOGOS_DEVNET_SEQUENCER"
           test "$(jq '.accounts | length' "$LOGOS_DEVNET_ACCOUNTS_USERS")" = 20
+          test "$RISC0_DEV_MODE" = 1
           logos-devnet --config .github/ci/logos-devnet.toml status --json \
-            | jq -e '.sequencer.running and .sequencer.max_txs_per_block == 50'
+            | jq -e '.sequencer.running and .sequencer.max_txs_per_block == 50 and .sequencer.dev_mode'
           first=$(jq -r '.accounts[0].id' "$LOGOS_DEVNET_ACCOUNTS_USERS")
           balance=$(curl -fsS "$LOGOS_DEVNET_SEQUENCER" -H 'content-type: application/json' \
             -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getAccountBalance\",\"params\":[\"$first\"]}" \

@@ -4,6 +4,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use std::collections::BTreeMap;
@@ -57,6 +58,10 @@ pub struct UpOptions {
     /// The most transactions a block takes (upstream's default is 20).
     #[arg(long)]
     pub max_txs_per_block: Option<u32>,
+    /// Skip proving: private calls take a second, with fake proofs. `--dev-mode false` turns it
+    /// off. A chain keeps it, so changing it takes `reset`.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", value_name = "BOOL")]
+    pub dev_mode: Option<bool>,
     /// Build the image or binaries even if they exist. Not remembered.
     #[arg(long)]
     pub rebuild: bool,
@@ -81,6 +86,9 @@ impl UpOptions {
         }
         if let Some(max) = self.max_txs_per_block {
             settings.max_txs_per_block = max;
+        }
+        if let Some(dev_mode) = self.dev_mode {
+            settings.dev_mode = dev_mode;
         }
         settings
     }
@@ -194,12 +202,13 @@ impl Devnet {
         chain_config::block_time_secs(&settings.block_time)?;
         chain_config::check_max_txs_per_block(settings.max_txs_per_block)?;
         let continuing = !wipe && self.home.has_chain();
-        if continuing && settings.lez != self.settings.lez {
-            bail!(
-                "this chain runs LEZ {}. `logos-devnet reset --lez {}` starts a new chain on it",
-                self.settings.lez,
-                settings.lez
-            );
+        if continuing {
+            // The chain's own dev mode, not the one in settings.json.
+            let chain = Settings {
+                dev_mode: self.home.chain_dev_mode(),
+                ..self.settings.clone()
+            };
+            check_chain_keeps(&chain, &settings)?;
         }
         // The devnet as it will run: its runtime is the one that has to read the binaries.
         let mut next = Self::with(self.home.clone(), settings.clone(), self.project.clone());
@@ -240,6 +249,7 @@ impl Devnet {
         next.home.save_settings(&next.settings)?;
         std::fs::create_dir_all(next.home.chain_dir())?;
         write_json(&next.home.chain_config(), &config)?;
+        next.home.record_chain_dev_mode(next.settings.dev_mode)?;
         next.runtime.start()?;
         next.wait_ready()?;
 
@@ -270,10 +280,16 @@ impl Devnet {
             && shared
             && opts.apply(wanted.clone()) != opts.apply(self.settings.clone())
         {
+            // A LEZ tag or dev mode only changes with a new chain, so `down` and `up` won't do.
+            let apply = if check_chain_keeps(&self.settings, &opts.apply(wanted.clone())).is_ok() {
+                "`logos-devnet down` and `up` apply it, restarting the chain"
+            } else {
+                "`logos-devnet reset` applies it, with a new chain"
+            };
             bail!(
-                "the shared devnet runs with {}, but {} asks for {}. `logos-devnet down` and `up` \
-                 apply it, restarting the chain for everything on it, or give this project its \
-                 own devnet with `home = \".logos-devnet\"` in the file",
+                "the shared devnet runs with {}, but {} asks for {}. {apply} for everything on \
+                 it, or give this project its own devnet with `home = \".logos-devnet\"` in the \
+                 file",
                 project.devnet.describe(&self.settings),
                 project.path.display(),
                 project.devnet.describe(&wanted)
@@ -288,8 +304,8 @@ impl Devnet {
     fn check_needs(&self, logosctl_on_path: impl FnOnce() -> bool) -> Result<()> {
         if let Some(project) = &self.project {
             project.check_binaries()?;
-            for binary in project.programs.values() {
-                self.runtime.check_wallet_file(binary)?;
+            for program in project.programs.values() {
+                self.runtime.check_wallet_file(&program.binary)?;
             }
         }
         if self.needs_logosctl() && !logosctl_on_path() {
@@ -320,8 +336,8 @@ impl Devnet {
     fn apply_project(&self) -> Result<()> {
         let mut failed: Vec<String> = Vec::new();
         if let Some(project) = &self.project {
-            for (name, binary) in &project.programs {
-                if let Err(e) = self.deploy_program(name, binary) {
+            for (name, program) in &project.programs {
+                if let Err(e) = self.deploy_program(name, &program.binary, program.mutable) {
                     eprintln!("program {name}: {e:#}");
                     failed.push(format!("program {name}"));
                 }
@@ -475,7 +491,7 @@ impl Devnet {
                 session.forget_old_chain()?;
                 self.write_session_wallet_config(&session)?;
                 let ctl = session.logosctl();
-                ctl.start()?;
+                session.start_daemon(&ctl, self.settings.dev_mode)?;
                 ctl.load(&info.modules)?;
                 ctl.ensure_wallet(
                     &session.wallet_config(),
@@ -582,6 +598,7 @@ impl Devnet {
             sequencer: self.settings.sequencer_url(),
             programs: env.programs.clone(),
             groups: BTreeMap::new(),
+            dev_mode: self.settings.dev_mode,
         };
         for group in groups::list(&self.home.groups_dir())? {
             env.groups.insert(group.name.clone(), group.manifest());
@@ -619,7 +636,7 @@ impl Devnet {
             .map(|env| {
                 env.programs
                     .iter()
-                    .map(|(name, id)| program_report(name, id, false))
+                    .map(|(name, id)| program_report(name, id, DeployStep::Unchanged))
                     .collect()
             })
             .unwrap_or_default();
@@ -632,6 +649,7 @@ impl Devnet {
                 block: head,
                 max_txs_per_block: s.max_txs_per_block,
                 block_time: s.block_time.clone(),
+                dev_mode: s.dev_mode,
             },
             faucet: s.faucet.as_ref().map(|faucet| Balance {
                 account: faucet.wallet_form(),
@@ -748,7 +766,7 @@ impl Devnet {
             session.name,
             modules.join(", ")
         );
-        ctl.start()?;
+        session.start_daemon(&ctl, self.settings.dev_mode)?;
         ctl.install(&modules)?;
         ctl.load(&modules)?;
         ctl.create_wallet(&session.wallet_config(), &session.wallet_storage())?;
@@ -833,16 +851,16 @@ impl Devnet {
     }
 
     /// Deploys `elf` as program `name`, and adds it to the env file.
-    pub fn deploy(&self, name: &str, elf: &Path) -> Result<Program> {
+    pub fn deploy(&self, name: &str, elf: &Path, mutable: bool) -> Result<Program> {
         self.faucet()?;
         self.require_running()?;
-        self.deploy_program(name, elf)
+        self.deploy_program(name, elf, mutable)
     }
 
     /// Deploys `elf` as program `name` from the dev wallet's header key for that name, so the
-    /// program id is the same on every chain this home starts. A program already on the chain
-    /// stays: deployed programs are immutable. When its binary changed since, that's said.
-    fn deploy_program(&self, name: &str, elf: &Path) -> Result<Program> {
+    /// program id is the same on every chain this home starts. A `mutable` program whose binary
+    /// changed since is updated in place. An immutable one stays, with a note.
+    fn deploy_program(&self, name: &str, elf: &Path, mutable: bool) -> Result<Program> {
         envfile::check_program_name(name)?;
         let bytes =
             std::fs::read(elf).with_context(|| format!("{} does not exist", elf.display()))?;
@@ -851,61 +869,75 @@ impl Devnet {
         let hash = hex_digest(&bytes);
         let faucet = self.faucet()?;
         let mut env = self.read_env()?;
-        let mut hashes = self.program_hashes()?;
+        let mut records = self.program_records()?;
 
         let label = format!("program-{name}");
         let header = match self.labelled_account(&label)? {
             Some(header) => header,
             None => self.new_account(Some(&label))?,
         };
-        let deployed_now = !self.rpc().account_in_use(&header)?;
-        if deployed_now {
+        let in_use = self.rpc().account_in_use(&header)?;
+        let record = records.get(name).cloned();
+        let step = deploy_step(in_use, record.as_ref(), &hash, mutable);
+        if let Some(command) = step.loader_command() {
             let mut args: Vec<WalletArg> = vec![
                 "program-loader".into(),
-                "deploy".into(),
+                command.into(),
                 "--elf".into(),
                 WalletArg::File(elf.to_path_buf()),
                 "--header".into(),
                 header.wallet_form().into(),
                 "--segments".into(),
             ];
+            // Segments are write-once: an update writes a new chain of them.
             for _ in 0..segments {
                 args.push(self.new_account(None)?.wallet_form().into());
             }
-            args.extend([
-                "--immutable".into(),
-                "--payer".into(),
-                faucet.wallet_form().into(),
-            ]);
+            if !mutable {
+                args.push("--immutable".into());
+            }
+            args.extend(["--payer".into(), faucet.wallet_form().into()]);
             let output = self.wallet(args)?;
-            let deployed = output
-                .lines()
-                .find_map(|line| line.strip_prefix("Program deployed. Header account id: "))
-                .with_context(|| format!("the wallet did not report a deploy:\n{output}"))?;
-            if PublicId::parse(deployed.trim())? != header {
+            let reported = step
+                .reported_header(&output)
+                .with_context(|| format!("the wallet did not report the {command}:\n{output}"))?;
+            if PublicId::parse(reported.trim())? != header {
                 bail!(
-                    "the wallet deployed at {deployed}, not at {}",
+                    "the wallet's {command} went to {reported}, not {}",
                     header.as_str()
                 );
             }
-            hashes.insert(name.to_owned(), hash);
-            write_json(&self.home.programs_file(), &serde_json::to_value(&hashes)?)?;
-        } else if hashes.get(name).is_some_and(|deployed| *deployed != hash) {
-            eprintln!(
-                "{name}: {} changed since it was deployed. `logos-devnet reset` deploys the new \
-                 build (programs are immutable)",
-                elf.display()
-            );
+            records.insert(name.to_owned(), DeployedProgram { hash, mutable });
+            write_json(&self.home.programs_file(), &serde_json::to_value(&records)?)?;
+        } else if step == DeployStep::NeedsReset
+            && let Some(record) = record
+        {
+            let kind = |mutable| if mutable { "mutable" } else { "immutable" };
+            if record.mutable == mutable {
+                eprintln!(
+                    "{name}: {} changed since it was deployed, immutable. `logos-devnet reset` \
+                     deploys the new build",
+                    elf.display()
+                );
+            } else {
+                eprintln!(
+                    "{name}: deployed {}, asked for {}. Nothing changed: `logos-devnet reset` \
+                     deploys it {}",
+                    kind(record.mutable),
+                    kind(mutable),
+                    kind(mutable)
+                );
+            }
         }
         env.programs.insert(name.to_owned(), header.clone());
         self.write_env(&env)?;
-        Ok(program_report(name, &header, deployed_now))
+        Ok(program_report(name, &header, step))
     }
 
-    /// Each program's deployed binary hash, by name.
-    fn program_hashes(&self) -> Result<BTreeMap<String, String>> {
+    /// What each program was deployed from, by name.
+    fn program_records(&self) -> Result<BTreeMap<String, DeployedProgram>> {
         match std::fs::read_to_string(self.home.programs_file()) {
-            Ok(text) => serde_json::from_str(&text).context("reading programs.json"),
+            Ok(text) => parse_program_records(&text).context("reading programs.json"),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
             Err(e) => Err(e).context("reading programs.json"),
         }
@@ -964,13 +996,99 @@ fn with_status(status: Status, outcome: Result<()>) -> Result<Status> {
     }
 }
 
-fn program_report(name: &str, id: &PublicId, deployed_now: bool) -> Program {
+fn program_report(name: &str, id: &PublicId, step: DeployStep) -> Program {
     Program {
         name: name.to_owned(),
         id: id.as_str().to_owned(),
         hex: id.hex(),
         var: envfile::program_var(name),
-        deployed_now,
+        deployed_now: step == DeployStep::Deploy,
+        updated: step == DeployStep::Update,
+    }
+}
+
+/// What a program was deployed from, in `programs.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct DeployedProgram {
+    /// The binary's SHA-256.
+    hash: String,
+    /// Deployed mutable, so a new build updates it.
+    mutable: bool,
+}
+
+/// `programs.json`. v0.2 kept only each binary's hash, and deployed every program immutable.
+fn parse_program_records(text: &str) -> Result<BTreeMap<String, DeployedProgram>> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Record {
+        Hash(String),
+        Deployed(DeployedProgram),
+    }
+    let records: BTreeMap<String, Record> = serde_json::from_str(text)?;
+    Ok(records
+        .into_iter()
+        .map(|(name, record)| {
+            let deployed = match record {
+                Record::Hash(hash) => DeployedProgram {
+                    hash,
+                    mutable: false,
+                },
+                Record::Deployed(deployed) => deployed,
+            };
+            (name, deployed)
+        })
+        .collect())
+}
+
+/// What deploying a program does, given whether its header is on the chain (`in_use`), what
+/// it was deployed from (`record`), and the binary's `hash` now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeployStep {
+    Deploy,
+    Update,
+    Unchanged,
+    /// An immutable program's binary changed, or its mutability did: only a new chain takes it.
+    NeedsReset,
+}
+
+impl DeployStep {
+    /// The `wallet program-loader` subcommand that does it, if one does.
+    fn loader_command(self) -> Option<&'static str> {
+        match self {
+            DeployStep::Deploy => Some("deploy"),
+            DeployStep::Update => Some("update"),
+            DeployStep::Unchanged | DeployStep::NeedsReset => None,
+        }
+    }
+
+    /// The header the wallet names in `output` for having done it.
+    fn reported_header(self, output: &str) -> Option<&str> {
+        output.lines().find_map(|line| match self {
+            DeployStep::Deploy => line.strip_prefix("Program deployed. Header account id: "),
+            _ => line
+                .strip_prefix("Program ")
+                .and_then(|rest| rest.strip_suffix(" updated")),
+        })
+    }
+}
+
+/// `mutable` is what's asked for now. Mutability never changes on a chain: an update that made a
+/// program immutable could never be undone, and one asked for by a missing `--mutable` least of
+/// all.
+fn deploy_step(
+    in_use: bool,
+    record: Option<&DeployedProgram>,
+    hash: &str,
+    mutable: bool,
+) -> DeployStep {
+    match record {
+        _ if !in_use => DeployStep::Deploy,
+        // Deployed some other way: nothing to compare with.
+        None => DeployStep::Unchanged,
+        Some(record) if record.mutable != mutable => DeployStep::NeedsReset,
+        Some(record) if record.hash == hash => DeployStep::Unchanged,
+        Some(record) if record.mutable => DeployStep::Update,
+        Some(_) => DeployStep::NeedsReset,
     }
 }
 
@@ -1003,6 +1121,29 @@ pub(crate) fn port_free(port: u16) -> Result<()> {
 /// a stored faucet (the settings file was lost) the chain is taken to fund the wallet's.
 fn funds_another_faucet(stored: Option<&PublicId>, wallet: &PublicId) -> bool {
     stored.is_some_and(|stored| stored != wallet)
+}
+
+/// Refuses `next` settings an existing chain (`chain`) can't run on: another LEZ tag, or
+/// another dev mode (a chain with fake proofs crashes without it).
+fn check_chain_keeps(chain: &Settings, next: &Settings) -> Result<()> {
+    if next.lez != chain.lez {
+        bail!(
+            "this chain runs LEZ {}. `logos-devnet reset --lez {}` starts a new chain on it",
+            chain.lez,
+            next.lez
+        );
+    }
+    match (chain.dev_mode, next.dev_mode) {
+        (false, true) => bail!(
+            "this chain checks proofs. `logos-devnet reset --dev-mode` starts a new chain in \
+             dev mode"
+        ),
+        (true, false) => bail!(
+            "this chain runs in dev mode, and its fake proofs need it. `--dev-mode` keeps it, \
+             and `logos-devnet reset --dev-mode false` starts a new chain that checks proofs"
+        ),
+        _ => Ok(()),
+    }
 }
 
 fn carried_env(continuing: bool, existing: Option<&str>, sequencer: String) -> Result<Env> {
@@ -1146,6 +1287,157 @@ mod tests {
     }
 
     #[test]
+    fn reads_program_records_from_v0_2_and_now() {
+        let records =
+            parse_program_records(r#"{"counter":"aa","shop":{"hash":"bb","mutable":true}}"#)
+                .unwrap();
+        assert_eq!(
+            records["counter"],
+            DeployedProgram {
+                hash: "aa".into(),
+                mutable: false
+            },
+            "v0.2 deployed every program immutable"
+        );
+        assert!(records["shop"].mutable);
+    }
+
+    #[test]
+    fn a_deploy_updates_only_a_changed_mutable_program() {
+        let mutable = DeployedProgram {
+            hash: "old".into(),
+            mutable: true,
+        };
+        let immutable = DeployedProgram {
+            mutable: false,
+            ..mutable.clone()
+        };
+        use DeployStep::*;
+        assert_eq!(deploy_step(false, None, "new", false), Deploy);
+        assert_eq!(
+            deploy_step(false, Some(&mutable), "new", true),
+            Deploy,
+            "a new chain"
+        );
+        assert_eq!(deploy_step(true, Some(&mutable), "old", true), Unchanged);
+        assert_eq!(deploy_step(true, Some(&mutable), "new", true), Update);
+        assert_eq!(
+            deploy_step(true, Some(&immutable), "new", false),
+            NeedsReset
+        );
+        assert_eq!(deploy_step(true, Some(&immutable), "old", false), Unchanged);
+        // Deployed some other way: nothing is known to compare.
+        assert_eq!(deploy_step(true, None, "new", true), Unchanged);
+    }
+
+    #[test]
+    fn a_deploy_never_changes_a_programs_mutability() {
+        use DeployStep::*;
+        let mutable = DeployedProgram {
+            hash: "old".into(),
+            mutable: true,
+        };
+        let immutable = DeployedProgram {
+            mutable: false,
+            ..mutable.clone()
+        };
+        // A missing --mutable, or `mutable = true` dropped: it would freeze it for good.
+        assert_eq!(deploy_step(true, Some(&mutable), "new", false), NeedsReset);
+        assert_eq!(deploy_step(true, Some(&mutable), "old", false), NeedsReset);
+        assert_eq!(deploy_step(true, Some(&immutable), "old", true), NeedsReset);
+        assert_eq!(deploy_step(true, Some(&immutable), "new", true), NeedsReset);
+        // On a new chain it's deployed as asked.
+        assert_eq!(deploy_step(false, Some(&mutable), "old", false), Deploy);
+    }
+
+    #[test]
+    fn the_wallet_reports_a_deploy_and_an_update() {
+        let id = "6YvesSEDWW25kpi8SSki2c8o5m3uACsigvGnNQ6wMruh";
+        let deployed =
+            format!("Segment uploaded at x\nProgram deployed. Header account id: {id}\n");
+        let updated = format!("Segment uploaded at x\nProgram {id} updated\n");
+        assert_eq!(DeployStep::Deploy.reported_header(&deployed), Some(id));
+        assert_eq!(DeployStep::Update.reported_header(&updated), Some(id));
+        assert_eq!(DeployStep::Update.reported_header(&deployed), None);
+        assert_eq!(DeployStep::Unchanged.loader_command(), None);
+    }
+
+    #[test]
+    fn a_shared_devnet_names_reset_for_what_only_a_new_chain_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let ask = |devnet: &str| {
+            std::fs::write(
+                dir.path().join(crate::project::FILE_NAME),
+                format!("[devnet]\n{devnet}\n"),
+            )
+            .unwrap();
+            let project = Project::load(&dir.path().join(crate::project::FILE_NAME)).unwrap();
+            let home = Home::locate(Some(dir.path().join("home"))).unwrap();
+            Devnet::open(home, Some(project))
+                .unwrap()
+                .with_project_settings(&UpOptions::default(), true)
+                .unwrap_err()
+                .to_string()
+        };
+        assert!(ask("block_time = \"500ms\"").contains("`logos-devnet down` and `up`"));
+        assert!(ask("dev_mode = true").contains("`logos-devnet reset`"));
+        assert!(ask("lez = \"v0.3.2\"").contains("`logos-devnet reset`"));
+    }
+
+    #[test]
+    fn dev_mode_is_a_flag_with_an_optional_value() {
+        #[derive(clap::Parser)]
+        struct Up {
+            #[command(flatten)]
+            options: UpOptions,
+        }
+        let parse = |args: &[&str]| {
+            <Up as clap::Parser>::try_parse_from(std::iter::once("up").chain(args.iter().copied()))
+                .unwrap()
+                .options
+        };
+        assert_eq!(parse(&[]).dev_mode, None);
+        assert_eq!(parse(&["--dev-mode"]).dev_mode, Some(true));
+        assert_eq!(parse(&["--dev-mode", "false"]).dev_mode, Some(false));
+        assert_eq!(
+            parse(&["--dev-mode", "--port", "4000"]).dev_mode,
+            Some(true)
+        );
+        assert!(parse(&["--dev-mode"]).apply(Settings::default()).dev_mode);
+        let on = Settings {
+            dev_mode: true,
+            ..Settings::default()
+        };
+        assert!(!parse(&["--dev-mode", "false"]).apply(on.clone()).dev_mode);
+        assert!(parse(&[]).apply(on).dev_mode, "unset keeps it");
+    }
+
+    #[test]
+    fn a_chain_keeps_its_lez_tag_and_dev_mode() {
+        let chain = Settings::default();
+        assert!(check_chain_keeps(&chain, &chain).is_ok());
+        let faster = Settings {
+            block_time: "500ms".into(),
+            ..chain.clone()
+        };
+        assert!(check_chain_keeps(&chain, &faster).is_ok());
+        let dev = Settings {
+            dev_mode: true,
+            ..chain.clone()
+        };
+        let err = check_chain_keeps(&chain, &dev).unwrap_err().to_string();
+        assert!(err.contains("reset --dev-mode"), "{err}");
+        let err = check_chain_keeps(&dev, &chain).unwrap_err().to_string();
+        assert!(err.contains("reset --dev-mode false"), "{err}");
+        let other = Settings {
+            lez: "v0.3.2".into(),
+            ..chain.clone()
+        };
+        let err = check_chain_keeps(&chain, &other).unwrap_err().to_string();
+        assert!(err.contains("reset --lez v0.3.2"), "{err}");
+    }
+
+    #[test]
     fn options_change_only_what_they_name() {
         let base = Settings::default();
         let opts = UpOptions {
@@ -1251,10 +1543,10 @@ mod tests {
         assert!(err.to_string().contains("logos-devnet up"), "{err}");
         let elf = dir.path().join("program.bin");
         std::fs::write(&elf, [0u8; 8]).unwrap();
-        let err = devnet.deploy("counter", &elf).unwrap_err();
+        let err = devnet.deploy("counter", &elf, false).unwrap_err();
         assert!(err.to_string().contains("logos-devnet up"), "{err}");
         assert!(
-            devnet.deploy("Counter", &elf).is_err(),
+            devnet.deploy("Counter", &elf, false).is_err(),
             "bad names are refused first"
         );
     }

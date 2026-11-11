@@ -69,8 +69,12 @@ enum Command {
     Deploy {
         /// A name for the program, e.g. `my-program`. The same name keeps the same program id.
         name: String,
-        /// The program's RISC Zero guest binary.
+        /// The program's RISC Zero guest binary (`.bin`).
         elf: PathBuf,
+        /// Deploy it mutable, so a new build updates it in place. Undisclosed private calls
+        /// need an immutable program.
+        #[arg(long)]
+        mutable: bool,
     },
     /// Groups of funded accounts, for tests with many users.
     #[command(subcommand)]
@@ -183,7 +187,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::Fund { account, amount } => emit(&devnet.fund(&account, amount)?, json),
-        Command::Deploy { name, elf } => emit(&devnet.deploy(&name, &elf)?, json),
+        Command::Deploy { name, elf, mutable } => emit(&devnet.deploy(&name, &elf, mutable)?, json),
         Command::Accounts(command) => match command {
             AccountsCommand::New {
                 name,

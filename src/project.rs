@@ -10,6 +10,7 @@
 //!
 //! [programs]                       # name = guest binary, relative to this file
 //! counter = "target/riscv32im-risc0-zkvm-elf/docker/counter.bin"
+//! shop = { path = "target/riscv32im-risc0-zkvm-elf/docker/shop.bin", mutable = true }
 //!
 //! [accounts.users]                 # a group of funded accounts
 //! count = 100
@@ -41,11 +42,40 @@ struct ProjectFile {
     #[serde(default)]
     devnet: DevnetSection,
     #[serde(default)]
-    programs: BTreeMap<String, PathBuf>,
+    programs: BTreeMap<String, ProgramEntry>,
     #[serde(default)]
     accounts: BTreeMap<String, GroupSpec>,
     #[serde(default)]
     sessions: BTreeMap<String, SessionSpec>,
+}
+
+/// A `[programs]` entry: the binary's path, or a table that can also make it mutable.
+#[derive(Debug, Deserialize)]
+#[serde(
+    untagged,
+    expecting = "a binary's path, or { path = \"...\", mutable = true }"
+)]
+enum ProgramEntry {
+    Path(PathBuf),
+    Table(ProgramTable),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProgramTable {
+    path: PathBuf,
+    #[serde(default)]
+    mutable: bool,
+}
+
+/// A program the project deploys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgramSpec {
+    /// Its binary, absolute.
+    pub binary: PathBuf,
+    /// Deployed mutable, so a new build updates it in place. Undisclosed private calls need an
+    /// immutable program, so it's off unless asked for.
+    pub mutable: bool,
 }
 
 /// `[devnet]`: settings the project needs. Each is optional.
@@ -57,6 +87,7 @@ pub struct DevnetSection {
     pub port: Option<u16>,
     pub block_time: Option<String>,
     pub max_txs_per_block: Option<u32>,
+    pub dev_mode: Option<bool>,
 }
 
 impl DevnetSection {
@@ -69,6 +100,7 @@ impl DevnetSection {
             port: self.port,
             block_time: self.block_time.clone(),
             max_txs_per_block: self.max_txs_per_block,
+            dev_mode: self.dev_mode,
             rebuild: false,
         }
         .apply(settings)
@@ -94,6 +126,9 @@ impl DevnetSection {
                 "max_txs_per_block = {}",
                 settings.max_txs_per_block
             ));
+        }
+        if self.dev_mode.is_some() {
+            keys.push(format!("dev_mode = {}", settings.dev_mode));
         }
         keys.join(", ")
     }
@@ -122,8 +157,8 @@ pub struct Project {
     /// The devnet home it names, absolute.
     pub home: Option<PathBuf>,
     pub devnet: DevnetSection,
-    /// Program name to its binary, absolute.
-    pub programs: BTreeMap<String, PathBuf>,
+    /// Program name to what to deploy.
+    pub programs: BTreeMap<String, ProgramSpec>,
     pub accounts: BTreeMap<String, GroupSpec>,
     pub sessions: BTreeMap<String, SessionSpec>,
 }
@@ -140,7 +175,7 @@ impl Project {
     /// Every program binary exists and is one LEZ loads. Checked by `up` and `reset` only, so
     /// other commands work while a build is missing.
     pub fn check_binaries(&self) -> Result<()> {
-        for (name, binary) in &self.programs {
+        for (name, ProgramSpec { binary, .. }) in &self.programs {
             if !binary.is_file() {
                 bail!(
                     "[programs] {name}: {} doesn't exist. Build it first",
@@ -180,9 +215,19 @@ impl Project {
             bail!("[devnet] port can't be 0");
         }
         let mut programs = BTreeMap::new();
-        for (name, binary) in file.programs {
+        for (name, entry) in file.programs {
             check_program_name(&name)?;
-            programs.insert(name, dir.join(binary));
+            let (path, mutable) = match entry {
+                ProgramEntry::Path(path) => (path, false),
+                ProgramEntry::Table(table) => (table.path, table.mutable),
+            };
+            programs.insert(
+                name,
+                ProgramSpec {
+                    binary: dir.join(path),
+                    mutable,
+                },
+            );
         }
         for (name, group) in &file.accounts {
             check_name("account group", name)?;
@@ -244,7 +289,10 @@ modules = ["chat_module"]
         assert_eq!(project.devnet.max_txs_per_block, Some(100));
         assert_eq!(
             project.programs["counter"],
-            dir.path().join("out/counter.bin")
+            ProgramSpec {
+                binary: dir.path().join("out/counter.bin"),
+                mutable: false
+            }
         );
         assert_eq!(
             project.accounts["users"],
@@ -279,6 +327,40 @@ modules = ["chat_module"]
         let project = project_in(dir.path(), "").unwrap();
         assert!(project.home.is_none() && project.programs.is_empty());
         assert_eq!(project.devnet, DevnetSection::default());
+    }
+
+    #[test]
+    fn a_program_is_a_path_or_a_table_that_makes_it_mutable() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = project_in(
+            dir.path(),
+            "[programs]\ncounter = \"c.bin\"\nshop = { path = \"s.bin\", mutable = true }\n\
+             vault = { path = \"v.bin\" }\n",
+        )
+        .unwrap();
+        assert!(!project.programs["counter"].mutable);
+        assert_eq!(
+            project.programs["shop"],
+            ProgramSpec {
+                binary: dir.path().join("s.bin"),
+                mutable: true
+            }
+        );
+        assert!(!project.programs["vault"].mutable, "immutable unless asked");
+        let odd = project_in(
+            dir.path(),
+            "[programs]\nshop = { path = \"s.bin\", mutible = true }\n",
+        );
+        assert!(odd.is_err(), "a misspelled key is refused");
+    }
+
+    #[test]
+    fn the_devnet_section_turns_on_dev_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = project_in(dir.path(), "[devnet]\ndev_mode = true\n").unwrap();
+        let applied = project.devnet.applied_to(Settings::default());
+        assert!(applied.dev_mode);
+        assert_eq!(project.devnet.describe(&applied), "dev_mode = true");
     }
 
     #[test]

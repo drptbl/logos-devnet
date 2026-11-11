@@ -15,6 +15,14 @@ pub const SEQUENCER_VAR: &str = "LOGOS_DEVNET_SEQUENCER";
 pub const HEADER: &str = "# Written by logos-devnet. Load it with: source <this file>\n";
 const PROGRAM_PREFIX: &str = "LOGOS_PROGRAM_";
 const GROUP_PREFIX: &str = "LOGOS_DEVNET_ACCOUNTS_";
+/// RISC Zero's switch for fake proofs, read by every prover and verifier of the devnet.
+pub const DEV_MODE_VAR: &str = "RISC0_DEV_MODE";
+
+/// `DEV_MODE_VAR`'s value: set either way, so one left in a shell or a parent process can't
+/// differ from the chain's.
+pub fn dev_mode_value(dev_mode: bool) -> &'static str {
+    if dev_mode { "1" } else { "0" }
+}
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Env {
@@ -23,6 +31,8 @@ pub struct Env {
     pub programs: BTreeMap<String, PublicId>,
     /// Account group name to its `accounts.json`.
     pub groups: BTreeMap<String, PathBuf>,
+    /// Whether the chain runs in dev mode, so provers make fake proofs too.
+    pub dev_mode: bool,
 }
 
 /// `LOGOS_DEVNET_ACCOUNTS_<NAME>` for an account group name.
@@ -71,7 +81,13 @@ pub fn check_program_name(name: &str) -> Result<()> {
 impl Env {
     /// Every variable and its value, in the order `render` writes them.
     pub fn vars(&self) -> Vec<(String, String)> {
-        let mut vars = vec![(SEQUENCER_VAR.to_owned(), self.sequencer.clone())];
+        let mut vars = vec![
+            (SEQUENCER_VAR.to_owned(), self.sequencer.clone()),
+            (
+                DEV_MODE_VAR.to_owned(),
+                dev_mode_value(self.dev_mode).to_owned(),
+            ),
+        ];
         for (name, id) in &self.programs {
             let var = program_var(name);
             vars.push((var.clone(), id.as_str().to_owned()));
@@ -88,6 +104,7 @@ impl Env {
     pub fn render(&self) -> String {
         let mut out = String::from(HEADER);
         out += &export_line(SEQUENCER_VAR, &self.sequencer);
+        out += &export_line(DEV_MODE_VAR, dev_mode_value(self.dev_mode));
         for (name, id) in &self.programs {
             let var = program_var(name);
             out += &format!("# program {name}\n");
@@ -124,6 +141,8 @@ impl Env {
                 };
                 if var == SEQUENCER_VAR {
                     env.sequencer = value;
+                } else if var == DEV_MODE_VAR {
+                    env.dev_mode = value == dev_mode_value(true);
                 } else if let Some(name) = pending.take_if(|n| program_var(n) == var) {
                     env.programs.insert(name, PublicId::parse(&value)?);
                 } else if let Some(name) = pending_group.take_if(|n| group_var(n) == var) {
@@ -189,6 +208,20 @@ mod tests {
         assert!(text.contains(
             "export LOGOS_PROGRAM_COUNTER_HEX='f9eba477278c918fadafbcb4a6463e947d0fd8de344b5431ee0aa3cd41d7e3a4'\n"
         ));
+    }
+
+    #[test]
+    fn always_says_whether_proofs_are_skipped() {
+        let mut env = Env {
+            sequencer: "http://127.0.0.1:3040".into(),
+            ..Env::default()
+        };
+        // Off is written too: a RISC0_DEV_MODE=1 left in the shell would send fake proofs.
+        assert!(env.render().contains("export RISC0_DEV_MODE='0'\n"));
+        assert!(env.vars().contains(&("RISC0_DEV_MODE".into(), "0".into())));
+        env.dev_mode = true;
+        assert!(env.render().contains("export RISC0_DEV_MODE='1'\n"));
+        assert_eq!(Env::parse(&env.render()).unwrap(), env);
     }
 
     #[test]

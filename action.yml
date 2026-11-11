@@ -117,3 +117,16 @@ runs:
         jq -r 'to_entries[] | "\(.key)=\(.value)"' <<< "$env_json" >> "$GITHUB_ENV"
         sequencer=$(jq -r .LOGOS_DEVNET_SEQUENCER <<< "$env_json")
         echo "sequencer=$sequencer" >> "$GITHUB_OUTPUT"
+
+    - name: Print the sequencer's log
+      if: failure() && steps.up.conclusion == 'failure'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        CONFIG: ${{ inputs.config }}
+      run: |
+        config=()
+        if [ -n "$CONFIG" ]; then
+          config=(--config "$CONFIG")
+        fi
+        logos-devnet "${config[@]}" logs || true

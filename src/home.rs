@@ -48,6 +48,10 @@ pub struct Settings {
     /// load with the default.
     #[serde(default = "default_max_txs_per_block")]
     pub max_txs_per_block: u32,
+    /// Whether the chain skips proof checks (`RISC0_DEV_MODE`), so private calls take a second
+    /// instead of minutes. A chain keeps it: one with fake proofs crashes without it.
+    #[serde(default)]
+    pub dev_mode: bool,
     /// The dev wallet's faucet account, funded at genesis. Created on the first `up`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub faucet: Option<PublicId>,
@@ -61,6 +65,7 @@ impl Default for Settings {
             port: DEFAULT_PORT,
             block_time: DEFAULT_BLOCK_TIME.into(),
             max_txs_per_block: DEFAULT_MAX_TXS_PER_BLOCK,
+            dev_mode: false,
             faucet: None,
         }
     }
@@ -145,6 +150,23 @@ impl Home {
     }
     pub fn chain_config(&self) -> PathBuf {
         self.chain_dir().join("sequencer_config.json")
+    }
+    /// The chain's own record of its dev mode, which `reset` deletes with it.
+    fn chain_dev_mode_file(&self) -> PathBuf {
+        self.chain_dir().join("dev-mode")
+    }
+
+    /// Whether the chain here was started in dev mode. Kept with the chain rather than in
+    /// `settings.json`, which can be lost or edited, since a chain with fake proofs crashes
+    /// without it. Chains from before v0.3.0 have no record, and check proofs.
+    pub fn chain_dev_mode(&self) -> bool {
+        std::fs::read_to_string(self.chain_dev_mode_file()).is_ok_and(|text| text.trim() == "1")
+    }
+
+    pub fn record_chain_dev_mode(&self, dev_mode: bool) -> Result<()> {
+        let file = self.chain_dev_mode_file();
+        let value = crate::envfile::dev_mode_value(dev_mode);
+        std::fs::write(&file, value).with_context(|| format!("writing {}", file.display()))
     }
     pub fn wallet_dir(&self) -> PathBuf {
         self.root.join("wallet")
@@ -273,6 +295,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_chain_remembers_its_own_dev_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Home::locate(Some(dir.path().to_path_buf())).unwrap();
+        assert!(!home.chain_dev_mode(), "chains before v0.3.0 check proofs");
+        std::fs::create_dir_all(home.chain_dir()).unwrap();
+        home.record_chain_dev_mode(true).unwrap();
+        assert!(home.chain_dev_mode());
+        // Not settings.json, which can be lost or edited.
+        std::fs::remove_file(home.settings_file()).ok();
+        assert!(home.chain_dev_mode());
+        home.record_chain_dev_mode(false).unwrap();
+        assert!(!home.chain_dev_mode());
+    }
+
+    #[test]
     fn one_command_at_a_time_holds_the_home() {
         let dir = tempfile::tempdir().unwrap();
         let home = Home::locate(Some(dir.path().to_path_buf())).unwrap();
@@ -317,6 +354,7 @@ mod tests {
         std::fs::write(home.settings_file(), text).unwrap();
         let settings = home.load_settings().unwrap();
         assert_eq!(settings.max_txs_per_block, DEFAULT_MAX_TXS_PER_BLOCK);
+        assert!(!settings.dev_mode, "chains before v0.3.0 prove for real");
         assert!(settings.faucet.is_some());
     }
 
