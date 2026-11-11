@@ -13,7 +13,7 @@ cargo install --locked logos-devnet
 Or take a binary from the [latest release](https://github.com/drptbl/logos-devnet/releases/latest), built for macOS (`aarch64-apple-darwin`, `x86_64-apple-darwin`) and Linux (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, static, so any distribution), and check it against its `.sha256`:
 
 ```bash
-v=v0.3.5 t=aarch64-apple-darwin
+v=v0.3.6 t=aarch64-apple-darwin
 curl -fsSL --remote-name-all https://github.com/drptbl/logos-devnet/releases/download/$v/logos-devnet-$v-$t.tar.gz{,.sha256}
 shasum -a 256 -c logos-devnet-$v-$t.tar.gz.sha256 \
   && tar -xzf logos-devnet-$v-$t.tar.gz \
@@ -224,7 +224,7 @@ With `--json`, a command prints one JSON document and nothing else on stdout. No
 The repo is a GitHub Action. On a Linux runner it installs `logos-devnet`, starts the devnet from your project file and exports the env into the job:
 
 ```yaml
-- uses: drptbl/logos-devnet@v0.3.5
+- uses: drptbl/logos-devnet@v0.3.6
   with:
     args: --max-txs-per-block 100     # optional, more options for up
 - run: cargo test                     # LOGOS_DEVNET_SEQUENCER, LOGOS_PROGRAM_*, LOGOS_DEVNET_ACCOUNTS_*, RISC0_DEV_MODE are set
@@ -232,7 +232,7 @@ The repo is a GitHub Action. On a Linux runner it installs `logos-devnet`, start
   run: logos-devnet logs              # the sequencer's log, when a test fails
 ```
 
-Inputs: `version` (default: the release tag you use the action at, or, pinned to a commit, the release that commit's `Cargo.toml` names), `config`, `working-directory`, `args` (space-separated, without shell quoting. Set the home with `LOGOS_DEVNET_HOME`, not `--home`), and `start: "false"` to only install, which also works on macOS runners. Output: `sequencer`. When `up` itself fails, the action prints the sequencer's log. Starting the devnet needs a Linux runner, for Docker.
+Inputs: `version` (default: the release tag you use the action at, or, pinned to a commit, the release that commit's `Cargo.toml` names), `config`, `working-directory`, `args` (space-separated, without shell quoting. Set the home with `LOGOS_DEVNET_HOME`, not `--home`), `start: "false"` to only install, which also works on macOS runners, and `logosctl-version` (default `0.3.2`). When the project file has sessions and no `logosctl` is on `PATH`, the action installs that release of the Logos Core CLI, checked against its SHA-256. Output: `sequencer`. When `up` itself fails, the action prints the sequencer's log. Starting the devnet needs a Linux runner, for Docker.
 
 ## The image
 
