@@ -125,8 +125,13 @@ impl Devnet {
         Rpc::new(self.settings.sequencer_url())
     }
 
-    pub fn settings(&self) -> &Settings {
-        &self.settings
+    /// The settings `up` would start with: the stored ones, with the project's `[devnet]`
+    /// section applied.
+    pub fn settings_for_up(&self) -> Settings {
+        match &self.project {
+            Some(project) => project.devnet.applied_to(self.settings.clone()),
+            None => self.settings.clone(),
+        }
     }
 
     pub fn project(&self) -> Option<&Project> {
@@ -273,7 +278,7 @@ impl Devnet {
         let Some(project) = &self.project else {
             return Ok(self.settings.clone());
         };
-        let wanted = project.devnet.applied_to(self.settings.clone());
+        let wanted = self.settings_for_up();
         // A project with its own home is the only one on its devnet: its file just applies.
         let shared = project.home.is_none();
         if refuse_changes
@@ -1221,7 +1226,7 @@ mod tests {
         let project = Project::load(&dir.path().join(crate::project::FILE_NAME)).unwrap();
         let home = Home::locate(Some(dir.path().join("home"))).unwrap();
         let devnet = Devnet::open(home, Some(project)).unwrap();
-        assert_eq!(devnet.settings().runtime, RuntimeKind::Docker);
+        assert_eq!(devnet.settings.runtime, RuntimeKind::Docker);
         let err = devnet.check_needs(|| true).unwrap_err();
         assert!(format!("{err:#}").contains("holds a `:`"), "{err:#}");
     }
@@ -1335,6 +1340,24 @@ mod tests {
         assert_eq!(deploy_step(true, Some(&immutable), "old", false), Unchanged);
         // Deployed some other way: nothing is known to compare.
         assert_eq!(deploy_step(true, None, "new", true), Unchanged);
+    }
+
+    #[test]
+    fn checks_happen_against_the_settings_up_would_use() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(crate::project::FILE_NAME),
+            "[devnet]\nruntime = \"native\"\nport = 4040\n",
+        )
+        .unwrap();
+        let project = Project::load(&dir.path().join(crate::project::FILE_NAME)).unwrap();
+        let home = Home::locate(Some(dir.path().join("home"))).unwrap();
+        let devnet = Devnet::open(home, Some(project)).unwrap();
+        // Before the first `up`: nothing stored yet, the file decides.
+        assert_eq!(devnet.settings.port, Settings::default().port);
+        let wanted = devnet.settings_for_up();
+        assert_eq!(wanted.runtime, RuntimeKind::Native);
+        assert_eq!(wanted.port, 4040);
     }
 
     #[test]

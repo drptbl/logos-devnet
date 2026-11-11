@@ -46,7 +46,8 @@ fn fail(name: &str, detail: impl Into<String>, fix: impl Into<String>) -> Check 
 
 /// Runs every check. `project_error` is why the project file didn't load, when it didn't.
 pub fn run(devnet: &Devnet, project_error: Option<&anyhow::Error>) -> Doctor {
-    let settings = devnet.settings();
+    // Before the first `up`, the project file's `[devnet]` decides what runs.
+    let settings = &devnet.settings_for_up();
     let mut checks = Vec::new();
 
     checks.push(match (project_error, devnet.project()) {
