@@ -80,6 +80,30 @@ jobs:
           logos-devnet fund --json "Public/$first" 5 | jq -e '.balance == 1000005'
           logos-devnet --config .github/ci/logos-devnet.toml doctor
 
+  # The action with a session: it installs logosctl, which runners don't have, and the session
+  # comes up with a funded wallet.
+  action-sessions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo build --release --locked
+      - run: echo "$GITHUB_WORKSPACE/target/release" >> "$GITHUB_PATH"
+      - uses: ./
+        with:
+          config: .github/ci/sessions.toml
+      - name: logosctl is installed and the session runs
+        run: |
+          set -euo pipefail
+          logosctl --version
+          logos-devnet --config .github/ci/sessions.toml session ls --json \
+            | jq -e '.[0].name == "alice" and .[0].running and .[0].balance > 0'
+
   # The action's install path, against a published release.
   action-install:
     runs-on: ubuntu-latest
