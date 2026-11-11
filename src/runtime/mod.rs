@@ -11,7 +11,7 @@ mod docker;
 mod native;
 
 pub use docker::Docker;
-pub(crate) use docker::{docker_reachable, image_present};
+pub(crate) use docker::{START_DOCKER, docker_reachable, image_present};
 pub use native::Native;
 
 /// The cargo features the sequencer is built with: no Bedrock (`standalone`), and guests run
