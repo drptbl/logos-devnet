@@ -1,0 +1,8 @@
+# LEZ's hello-world tutorial on a devnet of its own. See README.md.
+home = ".logos-devnet"
+
+[devnet]
+port = 3041   # its own port, so it runs next to the shared devnet on 3040
+
+[accounts.tutorial]
+count = 2     # account 0 pays for the deploy, account 1 gets the greeting

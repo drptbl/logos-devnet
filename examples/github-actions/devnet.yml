@@ -1,0 +1,28 @@
+# Integration tests against a local LEZ devnet. Copy this to .github/workflows/ in a project
+# with a logos-devnet.toml at its root, and replace `cargo test` with your tests.
+name: devnet
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # The devnet runs in Docker, so it needs a Linux runner.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Installs logos-devnet, starts the devnet from logos-devnet.toml, and exports its env
+      # (LOGOS_DEVNET_SEQUENCER, LOGOS_PROGRAM_*, LOGOS_DEVNET_ACCOUNTS_*, RISC0_DEV_MODE).
+      - id: devnet
+        uses: drptbl/logos-devnet@v0.3.4
+      - run: cargo test
+      - name: The sequencer's log
+        if: failure()
+        run: logos-devnet logs
