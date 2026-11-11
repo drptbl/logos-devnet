@@ -106,6 +106,10 @@ impl Runtime for Docker {
     }
 
     fn prepare(&self, rebuild: bool) -> Result<()> {
+        // Without a daemon a failed pull says nothing about the image, and a build fails too.
+        if !docker_reachable() {
+            bail!("no Docker daemon answers: {START_DOCKER}");
+        }
         if rebuild {
             return self.build_image();
         }
@@ -280,6 +284,10 @@ pub(crate) fn image_present(image: &str) -> bool {
         .status()
         .is_ok_and(|s| s.success())
 }
+
+/// What to do when no Docker daemon answers.
+pub(crate) const START_DOCKER: &str =
+    "install or start Docker (OrbStack, Docker Desktop or Colima), or use `up --native`";
 
 pub(crate) fn docker_reachable() -> bool {
     Command::new("docker")

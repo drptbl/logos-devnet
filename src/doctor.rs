@@ -7,7 +7,7 @@ use serde::Serialize;
 use crate::devnet::{Devnet, port_free};
 use crate::home::RuntimeKind;
 use crate::report::Report;
-use crate::runtime::{docker_reachable, image_present};
+use crate::runtime::{START_DOCKER, docker_reachable, image_present};
 use crate::session;
 
 #[derive(Debug, Serialize)]
@@ -64,11 +64,7 @@ pub fn run(devnet: &Devnet, project_error: Option<&anyhow::Error>) -> Doctor {
             checks.push(if docker_reachable() {
                 pass("docker", "the daemon answers")
             } else {
-                fail(
-                    "docker",
-                    "no Docker daemon answers",
-                    "start Docker (OrbStack, Docker Desktop or Colima), or use `up --native`",
-                )
+                fail("docker", "no Docker daemon answers", START_DOCKER)
             });
             let image = settings.image();
             checks.push(if image_present(&image) {
