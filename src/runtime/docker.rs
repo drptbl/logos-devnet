@@ -359,7 +359,7 @@ fn compose_spec(i: &ComposeInputs) -> Value {
                 }],
                 "environment": sequencer_env(i.dev_mode, i.log_filter)
                     .into_iter()
-                    .map(|(var, value)| (var.to_owned(), Value::from(value)))
+                    .map(|(var, value)| (var.to_owned(), Value::from(compose_literal(&value))))
                     .collect::<serde_json::Map<_, _>>(),
                 "stop_grace_period": "30s"
             },
@@ -397,12 +397,13 @@ mod tests {
         assert_eq!(env["RISC0_DEV_MODE"], "0");
         assert_eq!(env["RUST_LOG"], "info,kameo=warn");
         let spec = compose_spec(&ComposeInputs {
-            log_filter: "debug",
+            log_filter: "info,my_fn$x",
             ..inputs()
         });
+        // Compose would read `$x` as a variable and drop it.
         assert_eq!(
             spec["services"]["sequencer"]["environment"]["RUST_LOG"],
-            "debug"
+            "info,my_fn$$x"
         );
         let spec = compose_spec(&ComposeInputs {
             dev_mode: true,

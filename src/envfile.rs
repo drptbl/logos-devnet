@@ -35,6 +35,15 @@ pub struct Env {
     pub dev_mode: bool,
 }
 
+/// The wallet directory of the group whose `accounts.json` is `manifest`, for
+/// `LEE_WALLET_HOME_DIR`.
+fn group_wallet(manifest: &std::path::Path) -> String {
+    manifest
+        .with_file_name(crate::groups::WALLET_DIR)
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// `LOGOS_DEVNET_ACCOUNTS_<NAME>` for an account group name.
 pub fn group_var(name: &str) -> String {
     format!(
@@ -94,7 +103,9 @@ impl Env {
             vars.push((format!("{var}_HEX"), id.hex()));
         }
         for (name, path) in &self.groups {
-            vars.push((group_var(name), path.to_string_lossy().into_owned()));
+            let var = group_var(name);
+            vars.push((var.clone(), path.to_string_lossy().into_owned()));
+            vars.push((format!("{var}_WALLET"), group_wallet(path)));
         }
         vars
     }
@@ -113,7 +124,9 @@ impl Env {
         }
         for (name, path) in &self.groups {
             out += &format!("# accounts {name}\n");
-            out += &export_line(&group_var(name), &path.to_string_lossy());
+            let var = group_var(name);
+            out += &export_line(&var, &path.to_string_lossy());
+            out += &export_line(&format!("{var}_WALLET"), &group_wallet(path));
         }
         out
     }
@@ -221,6 +234,26 @@ mod tests {
         assert!(env.vars().contains(&("RISC0_DEV_MODE".into(), "0".into())));
         env.dev_mode = true;
         assert!(env.render().contains("export RISC0_DEV_MODE='1'\n"));
+        assert_eq!(Env::parse(&env.render()).unwrap(), env);
+    }
+
+    #[test]
+    fn exports_each_groups_wallet_directory() {
+        let mut env = Env {
+            sequencer: "http://127.0.0.1:3040".into(),
+            ..Env::default()
+        };
+        env.groups
+            .insert("users".into(), "/h/accounts/users/accounts.json".into());
+        let vars = env.vars();
+        assert!(vars.contains(&(
+            "LOGOS_DEVNET_ACCOUNTS_USERS_WALLET".into(),
+            "/h/accounts/users/wallet".into()
+        )));
+        assert!(
+            env.render()
+                .contains("export LOGOS_DEVNET_ACCOUNTS_USERS_WALLET='/h/accounts/users/wallet'\n")
+        );
         assert_eq!(Env::parse(&env.render()).unwrap(), env);
     }
 

@@ -19,8 +19,24 @@ use crate::account::PublicId;
 use crate::envfile::check_name;
 use crate::home::{read_dir_if_present, write_json};
 
+/// A group's wallet directory, beside its `accounts.json`.
+pub const WALLET_DIR: &str = "wallet";
+
 /// The most accounts one group holds. Genesis takes every one of them.
 pub const MAX_ACCOUNTS: usize = 10_000;
+
+/// A name for a new account group: as `check_name` takes it, and not ending in `-wallet`, whose
+/// variable would be another group's `_WALLET` one.
+pub fn check_group_name(name: &str) -> Result<()> {
+    check_name("account group", name)?;
+    if name.ends_with("-wallet") {
+        anyhow::bail!(
+            "account group {name}: a name can't end in `-wallet`, whose variable is another \
+             group's wallet directory"
+        );
+    }
+    Ok(())
+}
 
 /// A group's size and per-account amount, as `accounts new` and the project file take them.
 pub fn check_spec(count: usize, amount: u64) -> anyhow::Result<()> {
@@ -67,7 +83,27 @@ impl Group {
     }
 
     pub fn wallet_dir(&self) -> PathBuf {
-        self.dir.join("wallet")
+        self.dir.join(WALLET_DIR)
+    }
+
+    /// The group wallet's `storage.json`, which the LEZ wallet writes on first use.
+    pub fn wallet_storage(&self) -> PathBuf {
+        self.wallet_dir().join(crate::wallet_storage::STORAGE_FILE)
+    }
+
+    /// Marks the group as on a new chain. `forget_old_chain` clears it.
+    pub fn mark_new_chain(&self) -> Result<()> {
+        crate::wallet_storage::mark_new_chain(&self.dir)
+    }
+
+    /// Makes the group's wallet forget the old chain, if the group is marked as on a new one.
+    /// An app with the wallet open would write the old chain back: stop it first.
+    pub fn forget_old_chain(&self) -> Result<()> {
+        if !crate::wallet_storage::marked_new_chain(&self.dir) {
+            return Ok(());
+        }
+        crate::wallet_storage::forget_chain_in(&self.wallet_storage())?;
+        crate::wallet_storage::clear_new_chain(&self.dir)
     }
 
     pub fn manifest(&self) -> PathBuf {
@@ -107,6 +143,7 @@ pub fn list(dir: &Path) -> Result<Vec<Group>> {
     let mut groups = Vec::new();
     for entry in read_dir_if_present(dir)?.into_iter().flatten().flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
+        // Groups made before names ending in `-wallet` were refused still count.
         if entry.path().is_dir() && check_name("account group", &name).is_ok() {
             groups.push(Group::new(dir, &name)?);
         }
@@ -150,6 +187,54 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(group.manifest()).unwrap()).unwrap();
         assert_eq!(json["accounts"][0]["id"], A);
+    }
+
+    #[test]
+    fn refuses_a_name_that_clashes_with_a_wallet_variable() {
+        // `users-wallet`'s variable would be `users`'s wallet directory's.
+        assert!(check_group_name("users-wallet").is_err());
+        assert!(check_group_name("wallets").is_ok());
+        assert!(check_group_name("users").is_ok());
+        // One made before the rule is still listed.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("users-wallet")).unwrap();
+        let names: Vec<_> = list(dir.path())
+            .unwrap()
+            .into_iter()
+            .map(|g| g.name)
+            .collect();
+        assert_eq!(names, ["users-wallet"]);
+    }
+
+    #[test]
+    fn a_marked_group_forgets_the_old_chain_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let group = Group::new(dir.path(), "users").unwrap();
+        std::fs::create_dir_all(group.wallet_dir()).unwrap();
+        let synced_to = || -> serde_json::Value {
+            serde_json::from_str::<serde_json::Value>(
+                &std::fs::read_to_string(group.wallet_storage()).unwrap(),
+            )
+            .unwrap()["last_synced_block"]
+                .clone()
+        };
+        std::fs::write(
+            group.wallet_storage(),
+            crate::wallet_storage::tests::SYNCED_STORAGE,
+        )
+        .unwrap();
+        group.forget_old_chain().unwrap();
+        assert_eq!(synced_to(), 42, "not marked: nothing changes");
+        group.mark_new_chain().unwrap();
+        group.forget_old_chain().unwrap();
+        assert_eq!(synced_to(), 0);
+        std::fs::write(
+            group.wallet_storage(),
+            crate::wallet_storage::tests::SYNCED_STORAGE,
+        )
+        .unwrap();
+        group.forget_old_chain().unwrap();
+        assert_eq!(synced_to(), 42, "once only");
     }
 
     #[test]

@@ -13,7 +13,7 @@ cargo install --locked logos-devnet
 Or take a binary from the [latest release](https://github.com/drptbl/logos-devnet/releases/latest), built for macOS (`aarch64-apple-darwin`, `x86_64-apple-darwin`) and Linux (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, static, so any distribution), and check it against its `.sha256`:
 
 ```bash
-v=v0.3.2 t=aarch64-apple-darwin
+v=v0.3.3 t=aarch64-apple-darwin
 curl -fsSL --remote-name-all https://github.com/drptbl/logos-devnet/releases/download/$v/logos-devnet-$v-$t.tar.gz{,.sha256}
 shasum -a 256 -c logos-devnet-$v-$t.tar.gz.sha256 \
   && tar -xzf logos-devnet-$v-$t.tar.gz \
@@ -88,7 +88,7 @@ An account group is any number of funded accounts for tests with many users: a h
 logos-devnet accounts new users --count 100 --amount 5000000000
 ```
 
-Its keys live in one LEZ wallet, `~/.logos-devnet/accounts/users/wallet`, which `lez_core` and the LEZ CLI wallet can both use. Its `accounts.json` lists every account, and `LOGOS_DEVNET_ACCOUNTS_USERS` in the env file points at it:
+Its keys live in one LEZ wallet, `~/.logos-devnet/accounts/users/wallet`, which `lez_core` and the LEZ CLI wallet can both use: `LOGOS_DEVNET_ACCOUNTS_USERS_WALLET` in the env file points at it, for `LEE_WALLET_HOME_DIR`. A new chain, from `reset` or a first `up`, makes it forget the old one, as it does for sessions: stop an app that has it open first, or it writes the old chain back. Its `accounts.json` lists every account, and `LOGOS_DEVNET_ACCOUNTS_USERS` points at it:
 
 ```json
 {
@@ -210,7 +210,7 @@ With `--json`, a command prints one JSON document and nothing else on stdout. No
 The repo is a GitHub Action. On a Linux runner it installs `logos-devnet`, starts the devnet from your project file and exports the env into the job:
 
 ```yaml
-- uses: drptbl/logos-devnet@v0.3.2
+- uses: drptbl/logos-devnet@v0.3.3
   with:
     args: --max-txs-per-block 100     # optional, more options for up
 - run: cargo test                     # LOGOS_DEVNET_SEQUENCER, LOGOS_PROGRAM_*, LOGOS_DEVNET_ACCOUNTS_* are set

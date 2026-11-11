@@ -57,13 +57,22 @@ runs:
         if [ -z "$v" ] && [[ "$ACTION_REF" =~ ^v[0-9] ]]; then
           v="$ACTION_REF"
         fi
+        # The release the action's own Cargo.toml names, read only when it's needed.
+        own() {
+          echo "v$(sed -n 's/^version = "\(.*\)"$/\1/p' "$GITHUB_ACTION_PATH/Cargo.toml" | head -1)"
+        }
+        # Pinned to a commit: that commit's release, before anything on PATH, which may be
+        # another version.
+        if [ -z "$v" ] && [[ "$ACTION_REF" =~ ^[0-9a-f]{40}$ ]]; then
+          v="$(own)"
+        fi
         if [ -z "$v" ] && command -v logos-devnet >/dev/null; then
           echo "Using $(command -v logos-devnet): $(logos-devnet --version)"
           exit 0
         fi
+        # A branch, or a local copy of the action.
         if [ -z "$v" ]; then
-          # Pinned to a commit: the release that commit's Cargo.toml names.
-          v="v$(sed -n 's/^version = "\(.*\)"$/\1/p' "$GITHUB_ACTION_PATH/Cargo.toml" | head -1)"
+          v="$(own)"
         fi
         if [[ ! "$v" =~ ^v[0-9]+(\.[0-9]+)*(-[A-Za-z0-9.]+)?$ ]]; then
           echo "::error::not a logos-devnet version: $v"

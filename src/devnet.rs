@@ -255,8 +255,9 @@ impl Devnet {
             self.make_project_groups()?;
             self.write_env(&self.read_env().unwrap_or_default())?;
             let applied = self.apply_project();
+            let forgot = self.forget_group_chains();
             let resumed = self.resume_sessions(false);
-            return with_status(self.status(), after_start([applied, resumed]));
+            return with_status(self.status(), after_start([forgot, applied, resumed]));
         }
         // The running sequencer holds its own port, and gives it up when it stops.
         if !(running && settings.port == self.settings.port) {
@@ -285,6 +286,12 @@ impl Devnet {
         std::fs::create_dir_all(next.home.chain_dir())?;
         write_json(&next.home.chain_config(), &config)?;
         next.home.record_chain_dev_mode(next.settings.dev_mode)?;
+        // Every one is tried, and a failure is reported once the chain runs.
+        let marked = if continuing {
+            Ok(())
+        } else {
+            next.mark_new_chain()
+        };
         next.runtime.start()?;
         next.wait_ready()?;
 
@@ -295,10 +302,14 @@ impl Devnet {
             next.settings.sequencer_url(),
         )?;
         next.write_env(&env)?;
-        // A new chain starts every session's account at zero.
+        // Marked on a new chain, or left marked by an `up` that failed.
+        let forgot = next.forget_group_chains();
         let resumed = next.resume_sessions(!continuing);
         let applied = next.apply_project();
-        with_status(next.status(), after_start([resumed, applied]))
+        with_status(
+            next.status(),
+            after_start([marked, forgot, resumed, applied]),
+        )
     }
 
     /// The stored settings with the project's `[devnet]` section applied. A shared devnet that
@@ -348,6 +359,51 @@ impl Devnet {
                 "sessions need logosctl, the Logos Core CLI, on your PATH. Install it, or drop \
                  the sessions you no longer need: `logos-devnet session rm <name>`, and from \
                  [sessions] in the project file"
+            );
+        }
+        Ok(())
+    }
+
+    /// Makes every account group's wallet that's marked as on a new chain forget the old one:
+    /// an app that used a group wallet would otherwise skip the new chain's blocks up to the old
+    /// height. Keys and accounts stay. Every group is tried.
+    fn forget_group_chains(&self) -> Result<()> {
+        let mut failed = Vec::new();
+        for group in groups::list(&self.home.groups_dir())? {
+            if let Err(e) = group.forget_old_chain() {
+                eprintln!("account group {}: {e:#}", group.name);
+                failed.push(group.name);
+            }
+        }
+        if !failed.is_empty() {
+            bail!(
+                "account group wallets {} kept the old chain; the next `up` tries again",
+                failed.join(", ")
+            );
+        }
+        Ok(())
+    }
+
+    /// Marks every session and account group as on a new chain, once the old one is gone, so
+    /// their wallets forget it even if starting the new one fails first.
+    fn mark_new_chain(&self) -> Result<()> {
+        let mut failed = Vec::new();
+        for session in self.sessions() {
+            if let Err(e) = session.mark_new_chain() {
+                eprintln!("session {}: {e:#}", session.name);
+                failed.push(format!("session {}", session.name));
+            }
+        }
+        for group in groups::list(&self.home.groups_dir())? {
+            if let Err(e) = group.mark_new_chain() {
+                eprintln!("account group {}: {e:#}", group.name);
+                failed.push(format!("account group {}", group.name));
+            }
+        }
+        if !failed.is_empty() {
+            bail!(
+                "{} couldn't be marked, so their wallets may keep the old chain",
+                failed.join(", ")
             );
         }
         Ok(())
@@ -415,6 +471,9 @@ impl Devnet {
     /// keys are made in one wallet batch. A group never shrinks: its keys stay.
     fn make_group(&self, name: &str, count: usize, amount: u64) -> Result<GroupInfo> {
         let group = Group::new(&self.home.groups_dir(), name)?;
+        if !group.wallet_dir().exists() {
+            groups::check_group_name(name)?;
+        }
         let mut info = group.info()?;
         let wallet = group.wallet_dir();
         // The group's wallet is for the project to use from this machine: it points at the
@@ -519,12 +578,6 @@ impl Devnet {
     fn resume_sessions(&self, new_chain: bool) -> Result<()> {
         let mut failed = Vec::new();
         let sessions = self.sessions();
-        if new_chain {
-            // All of them first: one that fails below forgets the old chain on a later `up`.
-            for session in &sessions {
-                session.mark_new_chain()?;
-            }
-        }
         for session in sessions {
             let resumed = session.info().and_then(|info| {
                 // Funding only needs the dev wallet: a daemon that won't start doesn't cost the
@@ -1440,6 +1493,49 @@ mod tests {
         let wanted = devnet.settings_for_up();
         assert_eq!(wanted.runtime, RuntimeKind::Native);
         assert_eq!(wanted.port, 4040);
+    }
+
+    #[test]
+    fn refuses_a_new_group_whose_variable_would_clash() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Home::locate(Some(dir.path().to_path_buf())).unwrap();
+        let err = Devnet::open(home, None)
+            .unwrap()
+            .make_group("users-wallet", 1, 1)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("-wallet"), "{err}");
+    }
+
+    #[test]
+    fn every_marked_group_wallet_forgets_even_when_one_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Home::locate(Some(dir.path().to_path_buf())).unwrap();
+        let mut groups = Vec::new();
+        for (name, storage) in [
+            ("admins", "not json"),
+            ("users", crate::wallet_storage::tests::SYNCED_STORAGE),
+        ] {
+            let group = Group::new(&home.groups_dir(), name).unwrap();
+            std::fs::create_dir_all(group.wallet_dir()).unwrap();
+            std::fs::write(group.wallet_storage(), storage).unwrap();
+            group.mark_new_chain().unwrap();
+            groups.push(group);
+        }
+        let err = Devnet::open(home, None)
+            .unwrap()
+            .forget_group_chains()
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("admins"), "{err:#}");
+        let users: Value =
+            serde_json::from_str(&std::fs::read_to_string(groups[1].wallet_storage()).unwrap())
+                .unwrap();
+        assert_eq!(
+            users["last_synced_block"], 0,
+            "tried after the one that failed"
+        );
+        // The failed one stays marked, for the next `up`.
+        assert!(groups[0].forget_old_chain().is_err());
     }
 
     #[test]
