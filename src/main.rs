@@ -6,6 +6,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 mod account;
+mod binary;
 mod chain_config;
 mod devnet;
 mod doctor;
