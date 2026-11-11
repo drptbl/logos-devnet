@@ -232,7 +232,7 @@ The repo is a GitHub Action. On a Linux runner it installs `logos-devnet`, start
   run: logos-devnet logs              # the sequencer's log, when a test fails
 ```
 
-Inputs: `version` (default: the release tag you use the action at, or, pinned to a commit, the release that commit's `Cargo.toml` names), `config`, `working-directory`, `args` (space-separated, without shell quoting. Set the home with `LOGOS_DEVNET_HOME`, not `--home`), and `start: "false"` to only install, which also works on macOS runners. Output: `sequencer`. When `up` itself fails, the action prints the sequencer's log. Starting the devnet needs a Linux runner, for Docker.
+Inputs: `version` (default: the release tag you use the action at, or, pinned to a commit, the release that commit's `Cargo.toml` names), `config`, `working-directory`, `args` (space-separated, without shell quoting. Set the home with `LOGOS_DEVNET_HOME`, not `--home`), `start: "false"` to only install, which also works on macOS runners, and `logosctl-version` (default `0.3.2`). When the project file has sessions and no `logosctl` is on `PATH`, the action installs that release of the Logos Core CLI, checked against its SHA-256. Output: `sequencer`. When `up` itself fails, the action prints the sequencer's log. Starting the devnet needs a Linux runner, for Docker.
 
 ## The image
 
