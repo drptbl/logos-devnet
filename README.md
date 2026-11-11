@@ -116,7 +116,7 @@ The env file is the contract. A project reads `LOGOS_DEVNET_SEQUENCER` for the R
 
 Program ids stay the same. `deploy my-program` always deploys from the dev wallet's `program-my-program` header key, and a program id is that key's account id, so `reset` and redeploy give you the same `LOGOS_PROGRAM_MY_PROGRAM`. A second `deploy` of the same name on the same chain does nothing, unless the program is mutable and the binary changed: then it's updated in place.
 
-Programs are immutable unless you ask, because undisclosed private calls only run against a program that was immutable from the start. A mutable one is for iterating: `up` after a rebuild takes about 10 s, against a `reset`. Each update writes new segment accounts, and the old ones stay. An immutable program can't become mutable on the same chain: `reset` deploys it mutable.
+Programs are immutable unless you ask, because undisclosed private calls only run against a program that was immutable from the start. A mutable one is for iterating: `up` after a rebuild takes about 10 s, against a `reset`. Each update writes new segment accounts, and the old ones stay. A program keeps its mutability on a chain, so a missing `--mutable` can't freeze it by accident: `reset` deploys it the other way.
 
 For a wallet, give it its own directory. `wallet-config` refuses a directory that already holds a wallet, because repointing a testnet wallet at the devnet mixes up its sync state. Then create the wallet the usual way, e.g. `logosctl call lez_core create_new str:<dir>/wallet_config.json str:<dir>/storage.json str:`, and fund its public account. After a `reset`, such a wallet still holds the old chain's sync position and private notes, and skips the new chain's blocks up to the old height: make a new one.
 

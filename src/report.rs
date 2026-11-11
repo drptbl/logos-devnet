@@ -60,7 +60,7 @@ pub struct Program {
     pub id: String,
     pub hex: String,
     pub var: String,
-    /// False when it was already on this chain.
+    /// True when this call put it on the chain, false when it was there already.
     pub deployed_now: bool,
     /// True when a new build replaced it in place: it's mutable.
     pub updated: bool,
