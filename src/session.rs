@@ -175,6 +175,15 @@ pub fn list(dir: &Path) -> Result<Vec<Session>> {
     Ok(sessions)
 }
 
+/// The modules `extra` adds (as `modules_with` takes them) that a session with `have` lacks, in
+/// order. A module left out of `extra` is not removed.
+pub fn missing_modules(have: &[String], extra: &[String]) -> Result<Vec<String>> {
+    Ok(modules_with(extra)?
+        .into_iter()
+        .filter(|module| !have.contains(module))
+        .collect())
+}
+
 /// The modules a session installs: `lez_core`, then the extras in order, without repeats.
 pub fn modules_with(extra: &[String]) -> Result<Vec<String>> {
     let mut modules = vec![LEZ_CORE.to_owned()];
@@ -729,6 +738,22 @@ esac"#,
                 started = dir.join("started").display(),
             ),
         )
+    }
+
+    #[test]
+    fn finds_the_modules_a_session_lacks() {
+        let have = ["lez_core".to_owned(), "chat_module".to_owned()];
+        let wanted = |extra: &[&str]| {
+            let extra: Vec<String> = extra.iter().map(|m| (*m).to_owned()).collect();
+            missing_modules(&have, &extra).unwrap()
+        };
+        assert!(wanted(&["chat_module"]).is_empty());
+        assert_eq!(
+            wanted(&["chat_module", "storage_module"]),
+            ["storage_module"]
+        );
+        assert!(wanted(&[]).is_empty(), "a module left out stays installed");
+        assert!(missing_modules(&have, &["Bad Name".to_owned()]).is_err());
     }
 
     #[test]

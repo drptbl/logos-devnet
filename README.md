@@ -13,7 +13,7 @@ cargo install --locked logos-devnet
 Or take a binary from the [latest release](https://github.com/drptbl/logos-devnet/releases/latest), built for macOS (`aarch64-apple-darwin`, `x86_64-apple-darwin`) and Linux (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, static, so any distribution), and check it against its `.sha256`:
 
 ```bash
-v=v0.3.0 t=aarch64-apple-darwin
+v=v0.3.1 t=aarch64-apple-darwin
 curl -fsSL --remote-name-all https://github.com/drptbl/logos-devnet/releases/download/$v/logos-devnet-$v-$t.tar.gz{,.sha256}
 shasum -a 256 -c logos-devnet-$v-$t.tar.gz.sha256 \
   && tar -xzf logos-devnet-$v-$t.tar.gz \
@@ -75,7 +75,7 @@ amount = 5_000_000_000   # lepta each, 10B when left out
 modules = ["chat_module"]
 ```
 
-`up` deploys missing programs, makes and funds missing accounts and sessions, and changes nothing the second time (0.6 s). A `mutable` program whose binary changed is updated in place, with the same id. An immutable one stays as it is, with a note: `reset` deploys the new build. `up` checks the whole file before it touches the devnet.
+`up` deploys missing programs, makes and funds missing accounts and sessions, and changes nothing the second time (0.6 s). A `mutable` program whose binary changed is updated in place, with the same id. An immutable one keeps its old build, and `up` and `deploy` fail saying so, so tests don't run against it: `reset` deploys the new build. A module added to a session's `modules` is installed into it. `up` checks the whole file before it touches the devnet.
 
 Projects share one devnet, `~/.logos-devnet` on port 3040, unless the file sets `home`, e.g. `home = ".logos-devnet"`, for a devnet of the project's own (give it its own `[devnet] port` too, if another one runs). On a shared devnet, a `[devnet]` section that disagrees with the running chain is refused rather than restarting the chain under the other projects: `down` and `up` apply it. A `reset` there funds every project's account groups again, and each project's next `up` deploys its programs on the new chain.
 
@@ -98,7 +98,7 @@ Its keys live in one LEZ wallet, `~/.logos-devnet/accounts/users/wallet`, which 
 }
 ```
 
-A group that exists when a chain starts is funded at genesis, so a hundred accounts, or a thousand, are ready at once. One added to a running chain is funded one transfer at a time, about 2.4 s each (100 accounts took 237 s), so declare groups before the first `up`, or `reset`. A group never shrinks: a lower `count` keeps the accounts it has. A new `amount` applies to new accounts, and to every account after `reset`. Making the keys is quick, 500 in under 3 s. Accounts that send need more than they move: every call holds about 1.6M lepta of fees up front, so give a sending group at least a few million each (the default is 10B).
+A group that exists when a chain starts is funded at genesis, so a hundred accounts, or a thousand, are ready at once. One added to a running chain is funded one transfer at a time, about 2.4 s each (100 accounts took 237 s), so declare groups before the first `up`, or `reset`. A group never shrinks: a lower `count` keeps the accounts it has. A new `amount` applies to new accounts, and to every account after `reset`. Making the keys takes longer as a group grows, since each one is written to the group's wallet: 500 took 3 s, and growing a group from 2,000 to 6,000 took about 80 s. It happens once, as keys outlive `reset`. Each `up` checks every account is funded, which took about 1 s with 6,000. Accounts that send need more than they move: every call holds about 1.6M lepta of fees up front, so give a sending group at least a few million each (the default is 10B).
 
 How many transactions fit is set by `max_txs_per_block`. Upstream allows 20 per block, so at 1 s blocks about 20 per second. Measured with every account of a group sending one transfer at the same moment:
 
@@ -209,7 +209,7 @@ With `--json`, a command prints one JSON document and nothing else on stdout. No
 The repo is a GitHub Action. On a Linux runner it installs `logos-devnet`, starts the devnet from your project file and exports the env into the job:
 
 ```yaml
-- uses: drptbl/logos-devnet@v0.3.0
+- uses: drptbl/logos-devnet@v0.3.1
   with:
     args: --max-txs-per-block 100     # optional, more options for up
 - run: cargo test                     # LOGOS_DEVNET_SEQUENCER, LOGOS_PROGRAM_*, LOGOS_DEVNET_ACCOUNTS_* are set
@@ -217,7 +217,7 @@ The repo is a GitHub Action. On a Linux runner it installs `logos-devnet`, start
   run: logos-devnet logs              # the sequencer's log, when a test fails
 ```
 
-Inputs: `version` (default: the release tag you use the action at, so set it when you pin a commit SHA), `config`, `working-directory`, `args` (space-separated, without shell quoting. Set the home with `LOGOS_DEVNET_HOME`, not `--home`), and `start: "false"` to only install. Output: `sequencer`. When `up` itself fails, the action prints the sequencer's log. macOS runners have no Docker, so it refuses them.
+Inputs: `version` (default: the release tag you use the action at, or, pinned to a commit, the release that commit's `Cargo.toml` names), `config`, `working-directory`, `args` (space-separated, without shell quoting. Set the home with `LOGOS_DEVNET_HOME`, not `--home`), and `start: "false"` to only install, which also works on macOS runners. Output: `sequencer`. When `up` itself fails, the action prints the sequencer's log. Starting the devnet needs a Linux runner, for Docker.
 
 ## The image
 

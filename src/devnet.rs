@@ -125,8 +125,18 @@ impl Devnet {
         Rpc::new(self.settings.sequencer_url())
     }
 
+    /// The stored settings: what runs, or last ran.
     pub fn settings(&self) -> &Settings {
         &self.settings
+    }
+
+    /// The settings `up` would start with: the stored ones, with the project's `[devnet]`
+    /// section applied.
+    pub fn settings_for_up(&self) -> Settings {
+        match &self.project {
+            Some(project) => project.devnet.applied_to(self.settings.clone()),
+            None => self.settings.clone(),
+        }
     }
 
     pub fn project(&self) -> Option<&Project> {
@@ -273,7 +283,7 @@ impl Devnet {
         let Some(project) = &self.project else {
             return Ok(self.settings.clone());
         };
-        let wanted = project.devnet.applied_to(self.settings.clone());
+        let wanted = self.settings_for_up();
         // A project with its own home is the only one on its devnet: its file just applies.
         let shared = project.home.is_none();
         if refuse_changes
@@ -349,7 +359,18 @@ impl Devnet {
         }
         if let Some(project) = &self.project {
             for (name, spec) in &project.sessions {
-                if Session::new(&self.home.sessions_dir(), name).is_ok_and(|s| s.exists()) {
+                let session = Session::new(&self.home.sessions_dir(), name)?;
+                if session.exists() {
+                    match self.add_session_modules(&session, &spec.modules) {
+                        Ok(added) if !added.is_empty() => {
+                            eprintln!("session {name}: added {}", added.join(", "));
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            eprintln!("session {name}: {e:#}");
+                            failed.push(format!("session {name}"));
+                        }
+                    }
                     continue;
                 }
                 let amount = spec.amount.unwrap_or(DEFAULT_FUND);
@@ -753,6 +774,28 @@ impl Devnet {
         })
     }
 
+    /// Installs and loads the modules `extra` names that `session` lacks, and records them, so
+    /// a module added to `[sessions.<name>]` after the session was made is there too. Returns
+    /// the ones added.
+    fn add_session_modules(&self, session: &Session, extra: &[String]) -> Result<Vec<String>> {
+        let mut info = session.info()?;
+        let missing = session::missing_modules(&info.modules, extra)?;
+        if missing.is_empty() {
+            return Ok(missing);
+        }
+        let ctl = session.logosctl();
+        session.start_daemon(&ctl, self.settings.dev_mode)?;
+        // Recorded one at a time, so a module that fails keeps the ones before it.
+        for module in &missing {
+            let one = std::slice::from_ref(module);
+            ctl.install(one)?;
+            ctl.load(one)?;
+            info.modules.push(module.clone());
+            session.save_info(&info)?;
+        }
+        Ok(missing)
+    }
+
     fn make_session(
         &self,
         session: &Session,
@@ -859,7 +902,8 @@ impl Devnet {
 
     /// Deploys `elf` as program `name` from the dev wallet's header key for that name, so the
     /// program id is the same on every chain this home starts. A `mutable` program whose binary
-    /// changed since is updated in place. An immutable one stays, with a note.
+    /// changed since is updated in place. An immutable one keeps its old build, and that's an
+    /// error: what runs isn't what was asked for.
     fn deploy_program(&self, name: &str, elf: &Path, mutable: bool) -> Result<Program> {
         envfile::check_program_name(name)?;
         let bytes =
@@ -909,28 +953,15 @@ impl Devnet {
             }
             records.insert(name.to_owned(), DeployedProgram { hash, mutable });
             write_json(&self.home.programs_file(), &serde_json::to_value(&records)?)?;
-        } else if step == DeployStep::NeedsReset
-            && let Some(record) = record
-        {
-            let kind = |mutable| if mutable { "mutable" } else { "immutable" };
-            if record.mutable == mutable {
-                eprintln!(
-                    "{name}: {} changed since it was deployed, immutable. `logos-devnet reset` \
-                     deploys the new build",
-                    elf.display()
-                );
-            } else {
-                eprintln!(
-                    "{name}: deployed {}, asked for {}. Nothing changed: `logos-devnet reset` \
-                     deploys it {}",
-                    kind(record.mutable),
-                    kind(mutable),
-                    kind(mutable)
-                );
-            }
         }
         env.programs.insert(name.to_owned(), header.clone());
         self.write_env(&env)?;
+        if step == DeployStep::NeedsReset
+            && let Some(record) = record
+        {
+            // The old build is still what runs: a caller that goes on would test the wrong one.
+            bail!(needs_reset(name, elf, record.mutable, mutable));
+        }
         Ok(program_report(name, &header, step))
     }
 
@@ -1069,6 +1100,26 @@ impl DeployStep {
                 .strip_prefix("Program ")
                 .and_then(|rest| rest.strip_suffix(" updated")),
         })
+    }
+}
+
+/// Why a program can't take `elf` on this chain, and what does.
+fn needs_reset(name: &str, elf: &Path, deployed_mutable: bool, mutable: bool) -> String {
+    let kind = |mutable| if mutable { "mutable" } else { "immutable" };
+    if deployed_mutable == mutable {
+        format!(
+            "{} changed since it was deployed, immutable, and the old build still runs. \
+             `logos-devnet reset` deploys the new one",
+            elf.display()
+        )
+    } else {
+        format!(
+            "{name} is deployed {}, asked for {}, and nothing changed. `logos-devnet reset` \
+             deploys it {}",
+            kind(deployed_mutable),
+            kind(mutable),
+            kind(mutable)
+        )
     }
 }
 
@@ -1214,7 +1265,7 @@ mod tests {
         let project = Project::load(&dir.path().join(crate::project::FILE_NAME)).unwrap();
         let home = Home::locate(Some(dir.path().join("home"))).unwrap();
         let devnet = Devnet::open(home, Some(project)).unwrap();
-        assert_eq!(devnet.settings().runtime, RuntimeKind::Docker);
+        assert_eq!(devnet.settings.runtime, RuntimeKind::Docker);
         let err = devnet.check_needs(|| true).unwrap_err();
         assert!(format!("{err:#}").contains("holds a `:`"), "{err:#}");
     }
@@ -1328,6 +1379,38 @@ mod tests {
         assert_eq!(deploy_step(true, Some(&immutable), "old", false), Unchanged);
         // Deployed some other way: nothing is known to compare.
         assert_eq!(deploy_step(true, None, "new", true), Unchanged);
+    }
+
+    #[test]
+    fn checks_happen_against_the_settings_up_would_use() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(crate::project::FILE_NAME),
+            "[devnet]\nruntime = \"native\"\nport = 4040\n",
+        )
+        .unwrap();
+        let project = Project::load(&dir.path().join(crate::project::FILE_NAME)).unwrap();
+        let home = Home::locate(Some(dir.path().join("home"))).unwrap();
+        let devnet = Devnet::open(home, Some(project)).unwrap();
+        // Before the first `up`: nothing stored yet, the file decides.
+        assert_eq!(devnet.settings.port, Settings::default().port);
+        let wanted = devnet.settings_for_up();
+        assert_eq!(wanted.runtime, RuntimeKind::Native);
+        assert_eq!(wanted.port, 4040);
+    }
+
+    #[test]
+    fn says_why_a_program_needs_reset() {
+        let elf = Path::new("out/counter.bin");
+        let rebuilt = needs_reset("counter", elf, false, false);
+        assert!(rebuilt.contains("out/counter.bin changed"), "{rebuilt}");
+        assert!(rebuilt.contains("old build still runs"), "{rebuilt}");
+        let flipped = needs_reset("counter", elf, true, false);
+        assert!(
+            flipped.contains("deployed mutable, asked for immutable"),
+            "{flipped}"
+        );
+        assert!(flipped.contains("`logos-devnet reset` deploys it immutable"));
     }
 
     #[test]
