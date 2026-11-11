@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use sha2::{Digest, Sha256};
 
 use crate::account::{PublicId, first_public_id};
+use crate::binary;
 use crate::chain_config::{self, ChainOptions};
 use crate::envfile::{self, Env};
 use crate::groups::{self, Group, GroupInfo};
@@ -30,9 +31,6 @@ const FAUCET_BALANCE: u64 = 1_000_000_000_000_000_000;
 const FAUCET_LABEL: &str = "faucet";
 /// What `fund`, sessions and account groups send when no amount is given.
 pub const DEFAULT_FUND: u64 = 10_000_000_000;
-/// LEZ's program loader stores a program in segments of at most 96 KiB
-/// (`program_loader_core::MAX_SEGMENT_DATA_LEN` in v0.3.1).
-const SEGMENT_LEN: u64 = 96 * 1024;
 /// How long `up` waits for the first block.
 const READY_TIMEOUT: Duration = Duration::from_secs(180);
 /// How often wallets poll the devnet for a transaction: a block or two.
@@ -454,19 +452,27 @@ impl Devnet {
 
     /// Brings each session up to date with the chain: its wallet config names the current
     /// port, its daemon runs with its modules loaded and its wallet open, and on a new chain
-    /// (`refund`) its account is funded again. Every session is tried; failures are reported
-    /// together after, with the chain already up.
-    fn resume_sessions(&self, refund: bool) -> Result<()> {
+    /// (`new_chain`) its account is funded again and its wallet forgets the old chain. Every
+    /// session is tried; failures are reported together after, with the chain already up.
+    fn resume_sessions(&self, new_chain: bool) -> Result<()> {
         let mut failed = Vec::new();
-        for session in self.sessions() {
+        let sessions = self.sessions();
+        if new_chain {
+            // All of them first: one that fails below forgets the old chain on a later `up`.
+            for session in &sessions {
+                session.mark_new_chain()?;
+            }
+        }
+        for session in sessions {
             let resumed = session.info().and_then(|info| {
                 // Funding only needs the dev wallet: a daemon that won't start doesn't cost the
                 // account its funds.
-                let funded = if refund {
+                let funded = if new_chain {
                     self.send(&info.account, info.funded).map(drop)
                 } else {
                     Ok(())
                 };
+                session.forget_old_chain()?;
                 self.write_session_wallet_config(&session)?;
                 let ctl = session.logosctl();
                 ctl.start()?;
@@ -840,6 +846,8 @@ impl Devnet {
         envfile::check_program_name(name)?;
         let bytes =
             std::fs::read(elf).with_context(|| format!("{} does not exist", elf.display()))?;
+        // Before any account is made: the loader takes exactly this many segments.
+        let segments = binary::segments(&bytes).with_context(|| elf.display().to_string())?;
         let hash = hex_digest(&bytes);
         let faucet = self.faucet()?;
         let mut env = self.read_env()?;
@@ -861,7 +869,7 @@ impl Devnet {
                 header.wallet_form().into(),
                 "--segments".into(),
             ];
-            for _ in 0..segment_count(bytes.len() as u64) {
+            for _ in 0..segments {
                 args.push(self.new_account(None)?.wallet_form().into());
             }
             args.extend([
@@ -1033,10 +1041,6 @@ fn wallet_config(sequencer: &str) -> Value {
     })
 }
 
-fn segment_count(elf_len: u64) -> u64 {
-    elf_len.div_ceil(SEGMENT_LEN).max(1)
-}
-
 /// The account `wallet account list` shows with `[label]`.
 fn labelled(list: &str, label: &str) -> Option<PublicId> {
     let tag = format!("[{label}]");
@@ -1056,7 +1060,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let build = dir.path().join("build:debug");
         std::fs::create_dir_all(&build).unwrap();
-        std::fs::write(build.join("counter.bin"), b"elf").unwrap();
+        std::fs::write(
+            build.join("counter.bin"),
+            crate::binary::tests::program_binary(1000),
+        )
+        .unwrap();
         std::fs::write(
             dir.path().join(crate::project::FILE_NAME),
             "[programs]\ncounter = \"build:debug/counter.bin\"\n",
@@ -1101,15 +1109,6 @@ mod tests {
         assert_eq!(a.len(), 64);
         assert!(a.bytes().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(a, b);
-    }
-
-    #[test]
-    fn counts_segments() {
-        assert_eq!(segment_count(1), 1);
-        assert_eq!(segment_count(SEGMENT_LEN), 1);
-        assert_eq!(segment_count(SEGMENT_LEN + 1), 2);
-        // A 241,064-byte program, which the program loader took in 3 segments.
-        assert_eq!(segment_count(241_064), 3);
     }
 
     #[test]

@@ -137,8 +137,8 @@ pub fn find(start: &Path) -> Option<PathBuf> {
 }
 
 impl Project {
-    /// Every program binary exists. Checked by `up` and `reset` only, so other commands work
-    /// while a build is missing.
+    /// Every program binary exists and is one LEZ loads. Checked by `up` and `reset` only, so
+    /// other commands work while a build is missing.
     pub fn check_binaries(&self) -> Result<()> {
         for (name, binary) in &self.programs {
             if !binary.is_file() {
@@ -147,6 +147,10 @@ impl Project {
                     binary.display()
                 );
             }
+            let bytes = std::fs::read(binary)
+                .with_context(|| format!("[programs] {name}: reading {}", binary.display()))?;
+            crate::binary::segments(&bytes)
+                .with_context(|| format!("[programs] {name}: {}", binary.display()))?;
         }
         Ok(())
     }
