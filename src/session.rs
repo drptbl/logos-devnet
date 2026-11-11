@@ -21,6 +21,7 @@ use serde_json::Value;
 use serde_json::value::RawValue;
 
 use crate::account::PublicId;
+use crate::envfile::{DEV_MODE_VAR, dev_mode_value};
 use crate::home::{read_dir_if_present, write_json};
 use crate::runtime::stdout_of;
 
@@ -220,7 +221,12 @@ impl Logosctl {
 
     /// Runs logosctl and returns its stdout. Fails when it exits non-zero.
     fn output(&self, args: &[&str]) -> Result<String> {
-        stdout_of(self.cmd().args(args)).map_err(|e| {
+        self.output_of(self.cmd().args(args))
+    }
+
+    /// `output` for a command built from `cmd`.
+    fn output_of(&self, cmd: &mut Command) -> Result<String> {
+        stdout_of(cmd).map_err(|e| {
             let missing = e
                 .root_cause()
                 .downcast_ref::<std::io::Error>()
@@ -240,10 +246,15 @@ impl Logosctl {
 
     /// Starts the session's daemon and returns once it takes commands. (`daemon start`
     /// answers in plain text even with `--json`.)
-    pub fn start(&self) -> Result<()> {
+    pub fn start(&self, dev_mode: bool) -> Result<()> {
         std::fs::create_dir_all(&self.dir)?;
         if !self.running() {
-            self.output(&["daemon", "start", "--detach"])?;
+            // The daemon's modules prove in its process, so it takes the chain's dev mode.
+            self.output_of(
+                self.cmd()
+                    .env(DEV_MODE_VAR, dev_mode_value(dev_mode))
+                    .args(["daemon", "start", "--detach"]),
+            )?;
         }
         Ok(())
     }
@@ -321,16 +332,11 @@ impl Logosctl {
             })
     }
 
-    /// Makes the session's wallet (`storage`) forget the chain it synced, for a new one. A
-    /// wallet open in `lez_core` is closed first, so `lez_core` can't write its copy of the old
-    /// chain back over the file. `ensure_wallet` opens it again.
+    /// Makes the session's wallet (`storage`) forget the chain it synced, for a new one. The
+    /// daemon is stopped first: then nothing can write `lez_core`'s copy of the old chain back
+    /// over the file, and it starts again with the new chain's settings.
     pub fn forget_chain(&self, storage: &Path) -> Result<()> {
-        if self.running() && module_loaded(&self.run(&["module", "ls"])?, LEZ_CORE) {
-            let current = self.call(LEZ_CORE, "get_sequencer_addr", &[])?;
-            if !current.as_str().unwrap_or_default().is_empty() {
-                self.run(&["module", "reload", LEZ_CORE])?;
-            }
-        }
+        self.stop()?;
         forget_chain_in(storage)
     }
 
@@ -682,36 +688,58 @@ esac"#
         assert!(forget_chain(odd).is_err());
     }
 
-    /// A logosctl whose daemon runs with lez_core loaded and a wallet open on `addr`.
-    fn running_lez_core_on(dir: &Path, addr: &str) -> Logosctl {
+    /// A logosctl whose daemon runs until `daemon stop`, and starts again on `daemon start`,
+    /// noting the RISC0_DEV_MODE it started with in `started`.
+    fn daemon(dir: &Path, running: bool) -> Logosctl {
         std::fs::create_dir_all(dir.join("session")).unwrap();
+        let up = dir.join("up");
+        if running {
+            std::fs::write(&up, "").unwrap();
+        }
         fake_logosctl(
             dir,
             &format!(
-                r#"case "$2 $3 $4" in
-  "daemon status "*) echo '{{"status":"ok"}}' ;;
-  "module ls ") echo '[{{"name":"lez_core","status":"loaded"}}]' ;;
-  "call lez_core get_sequencer_addr") echo '{{"result":"{addr}","status":"ok"}}' ;;
+                r#"case "$2 $3" in
+  "daemon status") [ -f '{up}' ] || exit 1; echo '{{"status":"ok"}}' ;;
+  "daemon stop") rm -f '{up}' ;;
+  "daemon start") echo "$RISC0_DEV_MODE" > '{started}'; touch '{up}' ;;
   *) echo '{{"status":"ok"}}' ;;
-esac"#
+esac"#,
+                up = up.display(),
+                started = dir.join("started").display(),
             ),
         )
     }
 
     #[test]
-    fn a_new_chain_closes_an_open_wallet_before_forgetting_the_old_one() {
+    fn a_daemon_starts_with_the_devnets_dev_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        daemon(dir.path(), false).start(true).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("started")).unwrap(),
+            "1\n"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        daemon(dir.path(), false).start(false).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("started")).unwrap(),
+            "0\n"
+        );
+    }
+
+    #[test]
+    fn a_new_chain_stops_the_daemon_before_forgetting_the_old_one() {
         let dir = tempfile::tempdir().unwrap();
         let storage = dir.path().join("s.json");
         std::fs::write(&storage, SYNCED_STORAGE).unwrap();
-        running_lez_core_on(dir.path(), "http://127.0.0.1:3055/")
-            .forget_chain(&storage)
-            .unwrap();
+        daemon(dir.path(), true).forget_chain(&storage).unwrap();
+        // Stopped, so nothing can reopen the wallet, and it restarts with the new chain's
+        // settings.
         assert_eq!(
             calls(dir.path()),
             "--json daemon status\n\
-             --json module ls\n\
-             --json call lez_core get_sequencer_addr\n\
-             --json module reload lez_core\n"
+             --json daemon stop\n\
+             --json daemon status\n"
         );
         let stored: Value =
             serde_json::from_str(&std::fs::read_to_string(&storage).unwrap()).unwrap();

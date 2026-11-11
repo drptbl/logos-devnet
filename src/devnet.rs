@@ -57,6 +57,10 @@ pub struct UpOptions {
     /// The most transactions a block takes (upstream's default is 20).
     #[arg(long)]
     pub max_txs_per_block: Option<u32>,
+    /// Skip proving: private calls take a second, with fake proofs. `--dev-mode false` turns it
+    /// off. A chain keeps it, so changing it takes `reset`.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", value_name = "BOOL")]
+    pub dev_mode: Option<bool>,
     /// Build the image or binaries even if they exist. Not remembered.
     #[arg(long)]
     pub rebuild: bool,
@@ -81,6 +85,9 @@ impl UpOptions {
         }
         if let Some(max) = self.max_txs_per_block {
             settings.max_txs_per_block = max;
+        }
+        if let Some(dev_mode) = self.dev_mode {
+            settings.dev_mode = dev_mode;
         }
         settings
     }
@@ -194,12 +201,8 @@ impl Devnet {
         chain_config::block_time_secs(&settings.block_time)?;
         chain_config::check_max_txs_per_block(settings.max_txs_per_block)?;
         let continuing = !wipe && self.home.has_chain();
-        if continuing && settings.lez != self.settings.lez {
-            bail!(
-                "this chain runs LEZ {}. `logos-devnet reset --lez {}` starts a new chain on it",
-                self.settings.lez,
-                settings.lez
-            );
+        if continuing {
+            check_chain_keeps(&self.settings, &settings)?;
         }
         // The devnet as it will run: its runtime is the one that has to read the binaries.
         let mut next = Self::with(self.home.clone(), settings.clone(), self.project.clone());
@@ -475,7 +478,7 @@ impl Devnet {
                 session.forget_old_chain()?;
                 self.write_session_wallet_config(&session)?;
                 let ctl = session.logosctl();
-                ctl.start()?;
+                ctl.start(self.settings.dev_mode)?;
                 ctl.load(&info.modules)?;
                 ctl.ensure_wallet(
                     &session.wallet_config(),
@@ -582,6 +585,7 @@ impl Devnet {
             sequencer: self.settings.sequencer_url(),
             programs: env.programs.clone(),
             groups: BTreeMap::new(),
+            dev_mode: self.settings.dev_mode,
         };
         for group in groups::list(&self.home.groups_dir())? {
             env.groups.insert(group.name.clone(), group.manifest());
@@ -632,6 +636,7 @@ impl Devnet {
                 block: head,
                 max_txs_per_block: s.max_txs_per_block,
                 block_time: s.block_time.clone(),
+                dev_mode: s.dev_mode,
             },
             faucet: s.faucet.as_ref().map(|faucet| Balance {
                 account: faucet.wallet_form(),
@@ -748,7 +753,7 @@ impl Devnet {
             session.name,
             modules.join(", ")
         );
-        ctl.start()?;
+        ctl.start(self.settings.dev_mode)?;
         ctl.install(&modules)?;
         ctl.load(&modules)?;
         ctl.create_wallet(&session.wallet_config(), &session.wallet_storage())?;
@@ -1005,6 +1010,29 @@ fn funds_another_faucet(stored: Option<&PublicId>, wallet: &PublicId) -> bool {
     stored.is_some_and(|stored| stored != wallet)
 }
 
+/// Refuses `next` settings an existing chain (`chain`) can't run on: another LEZ tag, or
+/// another dev mode (a chain with fake proofs crashes without it).
+fn check_chain_keeps(chain: &Settings, next: &Settings) -> Result<()> {
+    if next.lez != chain.lez {
+        bail!(
+            "this chain runs LEZ {}. `logos-devnet reset --lez {}` starts a new chain on it",
+            chain.lez,
+            next.lez
+        );
+    }
+    match (chain.dev_mode, next.dev_mode) {
+        (false, true) => bail!(
+            "this chain checks proofs. `logos-devnet reset --dev-mode` starts a new chain in \
+             dev mode"
+        ),
+        (true, false) => bail!(
+            "this chain runs in dev mode, and its fake proofs need it. `logos-devnet reset \
+             --dev-mode false` starts a new chain that checks proofs"
+        ),
+        _ => Ok(()),
+    }
+}
+
 fn carried_env(continuing: bool, existing: Option<&str>, sequencer: String) -> Result<Env> {
     let mut env = match existing {
         Some(text) if continuing => Env::parse(text)
@@ -1143,6 +1171,59 @@ mod tests {
         );
         assert_eq!(config["gas_limit"], 200_000);
         assert_eq!(config["seq_poll_timeout"], "2s");
+    }
+
+    #[test]
+    fn dev_mode_is_a_flag_with_an_optional_value() {
+        #[derive(clap::Parser)]
+        struct Up {
+            #[command(flatten)]
+            options: UpOptions,
+        }
+        let parse = |args: &[&str]| {
+            <Up as clap::Parser>::try_parse_from(std::iter::once("up").chain(args.iter().copied()))
+                .unwrap()
+                .options
+        };
+        assert_eq!(parse(&[]).dev_mode, None);
+        assert_eq!(parse(&["--dev-mode"]).dev_mode, Some(true));
+        assert_eq!(parse(&["--dev-mode", "false"]).dev_mode, Some(false));
+        assert_eq!(
+            parse(&["--dev-mode", "--port", "4000"]).dev_mode,
+            Some(true)
+        );
+        assert!(parse(&["--dev-mode"]).apply(Settings::default()).dev_mode);
+        let on = Settings {
+            dev_mode: true,
+            ..Settings::default()
+        };
+        assert!(!parse(&["--dev-mode", "false"]).apply(on.clone()).dev_mode);
+        assert!(parse(&[]).apply(on).dev_mode, "unset keeps it");
+    }
+
+    #[test]
+    fn a_chain_keeps_its_lez_tag_and_dev_mode() {
+        let chain = Settings::default();
+        assert!(check_chain_keeps(&chain, &chain).is_ok());
+        let faster = Settings {
+            block_time: "500ms".into(),
+            ..chain.clone()
+        };
+        assert!(check_chain_keeps(&chain, &faster).is_ok());
+        let dev = Settings {
+            dev_mode: true,
+            ..chain.clone()
+        };
+        let err = check_chain_keeps(&chain, &dev).unwrap_err().to_string();
+        assert!(err.contains("reset --dev-mode"), "{err}");
+        let err = check_chain_keeps(&dev, &chain).unwrap_err().to_string();
+        assert!(err.contains("reset --dev-mode false"), "{err}");
+        let other = Settings {
+            lez: "v0.3.2".into(),
+            ..chain.clone()
+        };
+        let err = check_chain_keeps(&chain, &other).unwrap_err().to_string();
+        assert!(err.contains("reset --lez v0.3.2"), "{err}");
     }
 
     #[test]

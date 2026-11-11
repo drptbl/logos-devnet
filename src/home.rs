@@ -48,6 +48,10 @@ pub struct Settings {
     /// load with the default.
     #[serde(default = "default_max_txs_per_block")]
     pub max_txs_per_block: u32,
+    /// Whether the chain skips proof checks (`RISC0_DEV_MODE`), so private calls take a second
+    /// instead of minutes. A chain keeps it: one with fake proofs crashes without it.
+    #[serde(default)]
+    pub dev_mode: bool,
     /// The dev wallet's faucet account, funded at genesis. Created on the first `up`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub faucet: Option<PublicId>,
@@ -61,6 +65,7 @@ impl Default for Settings {
             port: DEFAULT_PORT,
             block_time: DEFAULT_BLOCK_TIME.into(),
             max_txs_per_block: DEFAULT_MAX_TXS_PER_BLOCK,
+            dev_mode: false,
             faucet: None,
         }
     }
@@ -317,6 +322,7 @@ mod tests {
         std::fs::write(home.settings_file(), text).unwrap();
         let settings = home.load_settings().unwrap();
         assert_eq!(settings.max_txs_per_block, DEFAULT_MAX_TXS_PER_BLOCK);
+        assert!(!settings.dev_mode, "chains before v0.3.0 prove for real");
         assert!(settings.faucet.is_some());
     }
 

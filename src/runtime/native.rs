@@ -13,8 +13,9 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use super::{
-    LEZ_REPO, Runtime, SEQUENCER_FEATURES, SEQUENCER_LOG, WalletArg, all_output_of, batch_script,
-    redact_recovery_phrase, redacted, run_attached, run_building, split_batch, stdout_of,
+    LEZ_REPO, Runtime, SEQUENCER_FEATURES, WalletArg, all_output_of, batch_script,
+    redact_recovery_phrase, redacted, run_attached, run_building, sequencer_env, split_batch,
+    stdout_of,
 };
 use crate::home::{Home, Settings};
 
@@ -157,7 +158,7 @@ impl Runtime for Native {
             .args(["--listen-address", "127.0.0.1", "--port"])
             .arg(self.settings.port.to_string())
             .current_dir(self.home.chain_dir())
-            .env("RUST_LOG", SEQUENCER_LOG)
+            .envs(sequencer_env(self.settings.dev_mode))
             .stdin(Stdio::null())
             .stdout(log.try_clone()?)
             .stderr(log)

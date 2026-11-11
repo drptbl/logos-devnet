@@ -57,6 +57,7 @@ pub struct DevnetSection {
     pub port: Option<u16>,
     pub block_time: Option<String>,
     pub max_txs_per_block: Option<u32>,
+    pub dev_mode: Option<bool>,
 }
 
 impl DevnetSection {
@@ -69,6 +70,7 @@ impl DevnetSection {
             port: self.port,
             block_time: self.block_time.clone(),
             max_txs_per_block: self.max_txs_per_block,
+            dev_mode: self.dev_mode,
             rebuild: false,
         }
         .apply(settings)
@@ -94,6 +96,9 @@ impl DevnetSection {
                 "max_txs_per_block = {}",
                 settings.max_txs_per_block
             ));
+        }
+        if self.dev_mode.is_some() {
+            keys.push(format!("dev_mode = {}", settings.dev_mode));
         }
         keys.join(", ")
     }
@@ -279,6 +284,15 @@ modules = ["chat_module"]
         let project = project_in(dir.path(), "").unwrap();
         assert!(project.home.is_none() && project.programs.is_empty());
         assert_eq!(project.devnet, DevnetSection::default());
+    }
+
+    #[test]
+    fn the_devnet_section_turns_on_dev_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = project_in(dir.path(), "[devnet]\ndev_mode = true\n").unwrap();
+        let applied = project.devnet.applied_to(Settings::default());
+        assert!(applied.dev_mode);
+        assert_eq!(project.devnet.describe(&applied), "dev_mode = true");
     }
 
     #[test]

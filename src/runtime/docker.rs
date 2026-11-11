@@ -10,8 +10,8 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 use super::{
-    Runtime, SEQUENCER_LOG, WalletArg, all_output_of, batch_script, redact_recovery_phrase,
-    redacted, run_attached, split_batch, stdout_of,
+    Runtime, WalletArg, all_output_of, batch_script, redact_recovery_phrase, redacted,
+    run_attached, sequencer_env, split_batch, stdout_of,
 };
 use crate::home::{Home, Settings, write_json};
 
@@ -55,6 +55,7 @@ impl Docker {
             port: self.settings.port,
             user: &current_user()?,
             chain_dir: &self.home.chain_dir().to_string_lossy(),
+            dev_mode: self.settings.dev_mode,
         });
         // JSON is YAML, and serde quotes every path correctly.
         write_json(&self.home.compose_file(), &spec)
@@ -331,6 +332,7 @@ struct ComposeInputs<'a> {
     port: u16,
     user: &'a str,
     chain_dir: &'a str,
+    dev_mode: bool,
 }
 
 /// The compose file. The RPC is published on loopback only: it has no caller auth.
@@ -353,7 +355,10 @@ fn compose_spec(i: &ComposeInputs) -> Value {
                     "source": compose_literal(i.chain_dir),
                     "target": CHAIN_MOUNT
                 }],
-                "environment": { "RUST_LOG": SEQUENCER_LOG },
+                "environment": sequencer_env(i.dev_mode)
+                    .into_iter()
+                    .map(|(var, value)| (var.to_owned(), Value::from(value)))
+                    .collect::<serde_json::Map<_, _>>(),
                 "stop_grace_period": "30s"
             },
             "wallet": {
@@ -378,7 +383,24 @@ mod tests {
             port: 3040,
             user: "501:20",
             chain_dir: "/Users/me/My Devnet/chain",
+            dev_mode: false,
         }
+    }
+
+    #[test]
+    fn the_sequencer_skips_proof_checks_only_in_dev_mode() {
+        let spec = compose_spec(&inputs());
+        let env = &spec["services"]["sequencer"]["environment"];
+        assert_eq!(env["RISC0_DEV_MODE"], "0");
+        assert!(env["RUST_LOG"].is_string());
+        let spec = compose_spec(&ComposeInputs {
+            dev_mode: true,
+            ..inputs()
+        });
+        assert_eq!(
+            spec["services"]["sequencer"]["environment"]["RISC0_DEV_MODE"],
+            "1"
+        );
     }
 
     #[test]
