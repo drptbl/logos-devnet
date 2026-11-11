@@ -114,7 +114,7 @@ The env file is the contract. A project reads `LOGOS_DEVNET_SEQUENCER` for the R
 
 Program ids stay the same. `deploy my-program` always deploys from the dev wallet's `program-my-program` header key, and a program id is that key's account id, so `reset` and redeploy give you the same `LOGOS_PROGRAM_MY_PROGRAM`. A second `deploy` of the same name on the same chain does nothing: `reset` first to deploy a new build.
 
-For a wallet, give it its own directory. `wallet-config` refuses a directory that already holds a wallet, because repointing a testnet wallet at the devnet mixes up its sync state. Then create the wallet the usual way, e.g. `logosctl call lez_core create_new str:<dir>/wallet_config.json str:<dir>/storage.json str:`, and fund its public account.
+For a wallet, give it its own directory. `wallet-config` refuses a directory that already holds a wallet, because repointing a testnet wallet at the devnet mixes up its sync state. Then create the wallet the usual way, e.g. `logosctl call lez_core create_new str:<dir>/wallet_config.json str:<dir>/storage.json str:`, and fund its public account. After a `reset`, such a wallet still holds the old chain's sync position and private notes, and skips the new chain's blocks up to the old height: make a new one.
 
 ## Sessions
 
@@ -136,7 +136,7 @@ Each session runs its own daemon in `~/.logos-devnet/sessions/<name>`, with `lez
 | `LOGOS_DEVNET_WALLET_STORAGE` | the wallet's `storage.json` |
 | `LOGOS_DEVNET_ACCOUNT` | its funded account, `Public/<id>` |
 
-Sessions follow the chain. `down` stops their daemons. `up` starts them again, loads their modules and opens their wallets, also after a `--port` change. `reset` funds each account again with what it was created with. `session rm` deletes a session and its wallet.
+Sessions follow the chain. `down` stops their daemons. `up` starts them again, loads their modules and opens their wallets, also after a `--port` change. `reset` funds each account again with what it was created with, and makes each wallet forget the old chain: its sync position and the state of its private accounts. Its keys and accounts stay. `session rm` deletes a session and its wallet.
 
 The catalog's `lez_core` is built for the LEZ release the testnet runs, so sessions match the default `--lez` tag.
 

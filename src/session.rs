@@ -304,15 +304,27 @@ impl Logosctl {
 
     /// Makes sure `lez_core` has the session's wallet open on `sequencer`. `open` fails
     /// while a wallet is open, so one open on another sequencer (an old port) is closed by
-    /// reloading `lez_core` first.
-    pub fn ensure_wallet(&self, config: &Path, storage: &Path, sequencer: &str) -> Result<()> {
+    /// reloading `lez_core` first. On a `new_chain` the wallet is reopened whatever it was open
+    /// on, with what it knew of the old chain forgotten: its sync cursor would skip the new
+    /// chain's blocks up to the old height, and its private notes don't exist here.
+    pub fn ensure_wallet(
+        &self,
+        config: &Path,
+        storage: &Path,
+        sequencer: &str,
+        new_chain: bool,
+    ) -> Result<()> {
         let current = self.call(LEZ_CORE, "get_sequencer_addr", &[])?;
         let current = current.as_str().unwrap_or_default();
         if !current.is_empty() {
-            if same_url(current, sequencer) {
+            if !new_chain && same_url(current, sequencer) {
                 return Ok(());
             }
+            // Closed first, so lez_core can't write its copy of the old chain back after.
             self.run(&["module", "reload", LEZ_CORE])?;
+        }
+        if new_chain {
+            forget_chain_in(storage)?;
         }
         let (config, storage) = (path_text(config), path_text(storage));
         let code = self.call(LEZ_CORE, "open", &[&config, &storage])?;
@@ -321,6 +333,51 @@ impl Logosctl {
         }
         Ok(())
     }
+}
+
+/// The LEZ wallet's state of a fresh account: what every account holds on a new chain.
+fn fresh_account() -> Value {
+    serde_json::json!({ "nonce": 0, "data": { "shards": {} } })
+}
+
+/// Drops what a LEZ wallet's `storage.json` (`storage`) learned from a chain: how far it
+/// synced, and the state of its private and shared private accounts. Keys, labels and
+/// everything else stay, so the wallet's accounts are the same on the next chain.
+fn forget_chain(storage: &mut Value) {
+    storage["last_synced_block"] = 0.into();
+    let key_chain = &mut storage["key_chain"];
+    if let Some(accounts) = key_chain["accounts"].as_array_mut() {
+        for account in accounts {
+            // `value` is the account's keys, then its state per kind of private account.
+            let states = account
+                .get_mut("Private")
+                .and_then(|private| private.pointer_mut("/data/value/1"))
+                .and_then(Value::as_array_mut);
+            for state in states.into_iter().flatten() {
+                if let Some(pair) = state.as_array_mut().filter(|pair| pair.len() == 2) {
+                    pair[1] = fresh_account();
+                }
+            }
+        }
+    }
+    if let Some(shared) = key_chain["shared_private_accounts"].as_object_mut() {
+        for entry in shared.values_mut() {
+            entry["account"] = fresh_account();
+        }
+    }
+}
+
+/// `forget_chain` on the file, when the wallet has written one.
+fn forget_chain_in(storage: &Path) -> Result<()> {
+    let text = match std::fs::read_to_string(storage) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", storage.display())),
+    };
+    let mut value: Value =
+        serde_json::from_str(&text).with_context(|| format!("reading {}", storage.display()))?;
+    forget_chain(&mut value);
+    write_json(storage, &value)
 }
 
 /// URLs equal but for a trailing `/`: lez_core reports `http://127.0.0.1:3040/`.
@@ -405,6 +462,7 @@ esac"#
             Path::new("/w/c.json"),
             Path::new("/w/s.json"),
             "http://127.0.0.1:3055",
+            false,
         )
         .unwrap();
     }
@@ -440,6 +498,100 @@ esac"#
              --json module reload lez_core\n\
              --json call lez_core open str:/w/c.json str:/w/s.json\n"
         );
+    }
+
+    /// A session's `storage.json` after a chain ran: synced to block 42, one private account
+    /// holding a note, one shared account holding another.
+    fn synced_storage() -> Value {
+        serde_json::json!({
+            "key_chain": {
+                "accounts": [
+                    { "Public": { "account_id": "P", "chain_index": "/0", "data": { "k": 1 } } },
+                    { "Private": { "account_id": "Q", "chain_index": "/0", "data": {
+                        "value": [ { "keys": 2 }, [
+                            [ { "Regular": "111" }, { "nonce": 7, "data": { "shards": { "T": [1, 2] } } } ],
+                            [ { "Regular": "222" }, { "nonce": 3, "data": { "shards": {} } } ]
+                        ] ],
+                        "ccc": [0], "cci": 0
+                    } } }
+                ],
+                "group_key_holders": { "g": { "k": 3 } },
+                "shared_private_accounts": {
+                    "S": { "group_label": "g", "identifier": "1", "pda_seed": null,
+                           "authority_program_id": null,
+                           "account": { "nonce": 5, "data": { "shards": { "T": [9] } } } }
+                }
+            },
+            "last_synced_block": 42,
+            "labels": { "main": { "Public": "P" } }
+        })
+    }
+
+    #[test]
+    fn forgetting_a_chain_keeps_keys_and_drops_its_state() {
+        let mut storage = synced_storage();
+        forget_chain(&mut storage);
+        let fresh = serde_json::json!({ "nonce": 0, "data": { "shards": {} } });
+        assert_eq!(storage["last_synced_block"], 0);
+        let private = &storage["key_chain"]["accounts"][1]["Private"]["data"]["value"];
+        assert_eq!(private[0], serde_json::json!({ "keys": 2 }), "keys stay");
+        assert_eq!(private[1][0][0], serde_json::json!({ "Regular": "111" }));
+        assert_eq!(private[1][0][1], fresh);
+        assert_eq!(private[1][1][1], fresh);
+        let shared = &storage["key_chain"]["shared_private_accounts"]["S"];
+        assert_eq!(shared["account"], fresh);
+        assert_eq!(shared["group_label"], "g");
+        // Everything else is as it was.
+        let mut expected = synced_storage();
+        expected["last_synced_block"] = 0.into();
+        expected["key_chain"]["accounts"][1] = storage["key_chain"]["accounts"][1].clone();
+        expected["key_chain"]["shared_private_accounts"]["S"]["account"] = fresh;
+        assert_eq!(storage, expected);
+    }
+
+    #[test]
+    fn a_new_chain_reloads_a_wallet_open_on_the_same_port_and_forgets_the_old_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dir.path().join("s.json");
+        std::fs::write(&storage, synced_storage().to_string()).unwrap();
+        lez_core_on(dir.path(), "http://127.0.0.1:3055/")
+            .ensure_wallet(
+                Path::new("/w/c.json"),
+                &storage,
+                "http://127.0.0.1:3055",
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            calls(dir.path()),
+            format!(
+                "--json call lez_core get_sequencer_addr\n\
+                 --json module reload lez_core\n\
+                 --json call lez_core open str:/w/c.json str:{}\n",
+                storage.display()
+            )
+        );
+        let stored: Value =
+            serde_json::from_str(&std::fs::read_to_string(&storage).unwrap()).unwrap();
+        assert_eq!(stored["last_synced_block"], 0);
+    }
+
+    #[test]
+    fn a_new_chain_forgets_the_old_one_in_a_closed_wallet_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dir.path().join("s.json");
+        std::fs::write(&storage, synced_storage().to_string()).unwrap();
+        let ctl = lez_core_on(dir.path(), "");
+        ctl.ensure_wallet(Path::new("/w/c.json"), &storage, "http://x", true)
+            .unwrap();
+        let stored: Value =
+            serde_json::from_str(&std::fs::read_to_string(&storage).unwrap()).unwrap();
+        assert_eq!(stored["last_synced_block"], 0);
+        // A wallet lez_core hasn't written yet has nothing to forget.
+        let missing = dir.path().join("none.json");
+        ctl.ensure_wallet(Path::new("/w/c.json"), &missing, "http://x", true)
+            .unwrap();
+        assert!(!missing.exists());
     }
 
     #[test]
