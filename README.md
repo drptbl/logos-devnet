@@ -88,7 +88,7 @@ An account group is any number of funded accounts for tests with many users: a h
 logos-devnet accounts new users --count 100 --amount 5000000000
 ```
 
-Its keys live in one LEZ wallet, `~/.logos-devnet/accounts/users/wallet`, which `lez_core` and the LEZ CLI wallet can both use: `LOGOS_DEVNET_ACCOUNTS_USERS_WALLET` in the env file points at it, for `LEE_WALLET_HOME_DIR`. A `reset` makes it forget the old chain, as it does for sessions. Its `accounts.json` lists every account, and `LOGOS_DEVNET_ACCOUNTS_USERS` points at it:
+Its keys live in one LEZ wallet, `~/.logos-devnet/accounts/users/wallet`, which `lez_core` and the LEZ CLI wallet can both use: `LOGOS_DEVNET_ACCOUNTS_USERS_WALLET` in the env file points at it, for `LEE_WALLET_HOME_DIR`. A new chain, from `reset` or a first `up`, makes it forget the old one, as it does for sessions: stop an app that has it open first, or it writes the old chain back. Its `accounts.json` lists every account, and `LOGOS_DEVNET_ACCOUNTS_USERS` points at it:
 
 ```json
 {

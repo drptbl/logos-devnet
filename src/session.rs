@@ -22,6 +22,7 @@ use crate::account::PublicId;
 use crate::envfile::{DEV_MODE_VAR, dev_mode_value};
 use crate::home::{read_dir_if_present, write_json};
 use crate::runtime::stdout_of;
+use crate::wallet_storage;
 
 const LEZ_CORE: &str = "lez_core";
 /// How long `stop` waits for a daemon to exit.
@@ -67,7 +68,7 @@ impl Session {
         self.wallet_dir().join("wallet_config.json")
     }
     pub fn wallet_storage(&self) -> PathBuf {
-        self.wallet_dir().join("storage.json")
+        self.wallet_dir().join(wallet_storage::STORAGE_FILE)
     }
     fn info_file(&self) -> PathBuf {
         self.dir.join("session.json")
@@ -116,27 +117,19 @@ impl Session {
         std::fs::write(&record, value).with_context(|| format!("writing {}", record.display()))
     }
 
-    /// There from the start of a new chain until the session's wallet has forgotten the old
-    /// one, so a session that fails on the way forgets it on a later `up`.
-    fn new_chain_mark(&self) -> PathBuf {
-        self.dir.join("new-chain")
-    }
-
     /// Marks the session as on a new chain. `forget_old_chain` clears it.
     pub fn mark_new_chain(&self) -> Result<()> {
-        let mark = self.new_chain_mark();
-        std::fs::write(&mark, "").with_context(|| format!("writing {}", mark.display()))
+        wallet_storage::mark_new_chain(&self.dir)
     }
 
     /// Makes the session's wallet forget the old chain, if the session is marked as on a new
     /// one.
     pub fn forget_old_chain(&self) -> Result<()> {
-        let mark = self.new_chain_mark();
-        if !mark.exists() {
+        if !wallet_storage::marked_new_chain(&self.dir) {
             return Ok(());
         }
         self.logosctl().forget_chain(&self.wallet_storage())?;
-        std::fs::remove_file(&mark).with_context(|| format!("deleting {}", mark.display()))
+        wallet_storage::clear_new_chain(&self.dir)
     }
 
     /// What an app needs from the session, by variable name.
@@ -364,7 +357,7 @@ impl Logosctl {
     /// over the file, and it starts again with the new chain's settings.
     pub fn forget_chain(&self, storage: &Path) -> Result<()> {
         self.stop()?;
-        crate::wallet_storage::forget_chain_in(storage)
+        wallet_storage::forget_chain_in(storage)
     }
 
     /// Brings a started daemon back to work: `lez_core` loaded and the wallet open first, then
@@ -700,7 +693,7 @@ esac"#,
         assert_eq!(synced_to(&storage), 0);
         let mode = std::fs::metadata(&storage).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
-        assert!(!session.new_chain_mark().exists());
+        assert!(!crate::wallet_storage::marked_new_chain(session.dir()));
         assert!(!storage.with_extension("json.new").exists());
         // Once only: a later sync on the new chain stays.
         std::fs::write(&storage, SYNCED_STORAGE).unwrap();

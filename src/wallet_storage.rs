@@ -7,6 +7,31 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde_json::value::RawValue;
 
+/// The file a LEZ wallet keeps its keys and state in, inside its home directory.
+pub const STORAGE_FILE: &str = "storage.json";
+
+/// Marks wallets as on a new chain until they've forgotten the old one: in their owner's
+/// directory, so the forgetting is retried on a later `up` when it fails.
+const NEW_CHAIN_MARK: &str = "new-chain";
+
+/// Marks the wallet kept under `owner` (a session's or a group's directory) as on a new chain.
+pub fn mark_new_chain(owner: &Path) -> Result<()> {
+    std::fs::create_dir_all(owner)?;
+    let mark = owner.join(NEW_CHAIN_MARK);
+    std::fs::write(&mark, "").with_context(|| format!("writing {}", mark.display()))
+}
+
+/// Whether `owner`'s wallet still has the old chain to forget.
+pub fn marked_new_chain(owner: &Path) -> bool {
+    owner.join(NEW_CHAIN_MARK).exists()
+}
+
+/// Clears `mark_new_chain`'s mark, once the wallet has forgotten the old chain.
+pub fn clear_new_chain(owner: &Path) -> Result<()> {
+    let mark = owner.join(NEW_CHAIN_MARK);
+    std::fs::remove_file(&mark).with_context(|| format!("deleting {}", mark.display()))
+}
+
 /// A JSON value kept as written. The wallet stores `u128` nonces, which `Value` would turn into
 /// floats the wallet can't read, so `storage.json` is only ever changed where it must be.
 type Raw = Box<RawValue>;
