@@ -88,6 +88,7 @@ pub struct DevnetSection {
     pub block_time: Option<String>,
     pub max_txs_per_block: Option<u32>,
     pub dev_mode: Option<bool>,
+    pub log_filter: Option<String>,
 }
 
 impl DevnetSection {
@@ -101,6 +102,7 @@ impl DevnetSection {
             block_time: self.block_time.clone(),
             max_txs_per_block: self.max_txs_per_block,
             dev_mode: self.dev_mode,
+            log_filter: self.log_filter.clone(),
             rebuild: false,
         }
         .apply(settings)
@@ -129,6 +131,9 @@ impl DevnetSection {
         }
         if self.dev_mode.is_some() {
             keys.push(format!("dev_mode = {}", settings.dev_mode));
+        }
+        if self.log_filter.is_some() {
+            keys.push(format!("log_filter = \"{}\"", settings.log_filter));
         }
         keys.join(", ")
     }
@@ -210,6 +215,9 @@ impl Project {
         }
         if let Some(max) = devnet.max_txs_per_block {
             chain_config::check_max_txs_per_block(max).context("[devnet]")?;
+        }
+        if let Some(filter) = &devnet.log_filter {
+            crate::home::check_log_filter(filter).context("[devnet]")?;
         }
         if devnet.port == Some(0) {
             bail!("[devnet] port can't be 0");
@@ -352,6 +360,16 @@ modules = ["chat_module"]
             "[programs]\nshop = { path = \"s.bin\", mutible = true }\n",
         );
         assert!(odd.is_err(), "a misspelled key is refused");
+    }
+
+    #[test]
+    fn the_devnet_section_sets_the_log_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = project_in(dir.path(), "[devnet]\nlog_filter = \"debug\"\n").unwrap();
+        let applied = project.devnet.applied_to(Settings::default());
+        assert_eq!(applied.log_filter, "debug");
+        assert_eq!(project.devnet.describe(&applied), "log_filter = \"debug\"");
+        assert!(project_in(dir.path(), "[devnet]\nlog_filter = \"\"\n").is_err());
     }
 
     #[test]

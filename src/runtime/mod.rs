@@ -19,16 +19,13 @@ pub use native::Native;
 pub const SEQUENCER_FEATURES: &str = "standalone,prove";
 /// Where both runtimes get LEZ from.
 pub const LEZ_REPO: &str = "https://github.com/logos-blockchain/logos-execution-zone.git";
-/// The sequencer's log filter in both runtimes.
-const SEQUENCER_LOG: &str = "info,kameo=warn";
-
 /// The sequencer's environment: its log filter, and whether it takes fake proofs.
-fn sequencer_env(dev_mode: bool) -> [(&'static str, &'static str); 2] {
+fn sequencer_env(dev_mode: bool, log_filter: &str) -> [(&'static str, String); 2] {
     [
-        ("RUST_LOG", SEQUENCER_LOG),
+        ("RUST_LOG", log_filter.to_owned()),
         (
             crate::envfile::DEV_MODE_VAR,
-            crate::envfile::dev_mode_value(dev_mode),
+            crate::envfile::dev_mode_value(dev_mode).to_owned(),
         ),
     ]
 }

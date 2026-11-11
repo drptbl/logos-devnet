@@ -22,7 +22,7 @@ pub struct Check {
     pub name: String,
     pub ok: bool,
     pub detail: String,
-    /// What to do about it, when it failed.
+    /// What to do about it, when it failed and `detail` doesn't say.
     pub fix: Option<String>,
 }
 
@@ -62,23 +62,29 @@ pub fn run(devnet: &Devnet, project_error: Option<&anyhow::Error>) -> Doctor {
 
     match settings.runtime {
         RuntimeKind::Docker => {
-            checks.push(if docker_reachable() {
+            let reachable = docker_reachable();
+            checks.push(if reachable {
                 pass("docker", "the daemon answers")
             } else {
                 fail("docker", "no Docker daemon answers", START_DOCKER)
             });
             let image = settings.image();
-            checks.push(if image_present(&image) {
-                pass("image", format!("{image} is here"))
-            } else if command_ok("docker", &["manifest", "inspect", &image]) {
-                pass("image", format!("{image} will be pulled on `up`"))
-            } else {
-                fail(
-                    "image",
-                    format!("{image} is neither here nor pullable"),
-                    "`up` builds it locally (this takes a while), or check your network",
-                )
-            });
+            // Without a daemon there's nothing to ask; the docker check says so.
+            if reachable {
+                checks.push(if image_present(&image) {
+                    pass("image", format!("{image} is here"))
+                } else if command_ok("docker", &["manifest", "inspect", &image]) {
+                    pass("image", format!("{image} will be pulled on `up`"))
+                } else {
+                    pass(
+                        "image",
+                        format!(
+                            "{image} isn't here, and no published one answered: `up` builds it \
+                             locally, which takes a while and needs the network"
+                        ),
+                    )
+                });
+            }
         }
         RuntimeKind::Native => {
             for tool in ["git", "cargo"] {
@@ -93,6 +99,21 @@ pub fn run(devnet: &Devnet, project_error: Option<&anyhow::Error>) -> Doctor {
                 });
             }
         }
+    }
+
+    // With a broken project file, its settings aren't known: the file's check says so.
+    if project_error.is_none() {
+        checks.push(match devnet.check_chain_for_project() {
+            Ok(true) => pass("chain", "takes these settings"),
+            Ok(false) => pass("chain", "none yet: `up` starts one"),
+            // `up`'s refusal says what changes it.
+            Err(e) => Check {
+                name: "chain".into(),
+                ok: false,
+                detail: format!("{e:#}"),
+                fix: None,
+            },
+        });
     }
 
     let running = devnet.running();

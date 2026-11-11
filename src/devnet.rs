@@ -62,6 +62,10 @@ pub struct UpOptions {
     /// off. A chain keeps it, so changing it takes `reset`.
     #[arg(long, num_args = 0..=1, default_missing_value = "true", value_name = "BOOL")]
     pub dev_mode: Option<bool>,
+    /// The sequencer's log filter, as `RUST_LOG` takes it: e.g. `debug`, or
+    /// `info,sequencer_core=debug`.
+    #[arg(long)]
+    pub log_filter: Option<String>,
     /// Build the image or binaries even if they exist. Not remembered.
     #[arg(long)]
     pub rebuild: bool,
@@ -89,6 +93,9 @@ impl UpOptions {
         }
         if let Some(dev_mode) = self.dev_mode {
             settings.dev_mode = dev_mode;
+        }
+        if let Some(log_filter) = &self.log_filter {
+            settings.log_filter.clone_from(log_filter);
         }
         settings
     }
@@ -128,6 +135,28 @@ impl Devnet {
     /// The stored settings: what runs, or last ran.
     pub fn settings(&self) -> &Settings {
         &self.settings
+    }
+
+    /// Refuses `settings` the chain here can't run on: another LEZ tag or dev mode. Its own
+    /// record of its dev mode counts, not settings.json's.
+    fn check_chain_takes(&self, settings: &Settings) -> Result<()> {
+        let chain = Settings {
+            dev_mode: self.home.chain_dev_mode(),
+            ..self.settings.clone()
+        };
+        check_chain_keeps(&chain, settings)
+    }
+
+    /// Whether `up` would take the project file's settings here, as `up` decides it: a running
+    /// shared devnet keeps what it runs with, and a chain keeps its LEZ tag and dev mode. True
+    /// when a chain exists.
+    pub fn check_chain_for_project(&self) -> Result<bool> {
+        let wanted = self.with_project_settings(&UpOptions::default(), self.runtime.running())?;
+        let has_chain = self.home.has_chain();
+        if has_chain {
+            self.check_chain_takes(&wanted)?;
+        }
+        Ok(has_chain)
     }
 
     /// The settings `up` would start with: the stored ones, with the project's `[devnet]`
@@ -211,14 +240,10 @@ impl Devnet {
         let settings = opts.apply(self.with_project_settings(opts, running && !wipe)?);
         chain_config::block_time_secs(&settings.block_time)?;
         chain_config::check_max_txs_per_block(settings.max_txs_per_block)?;
+        crate::home::check_log_filter(&settings.log_filter)?;
         let continuing = !wipe && self.home.has_chain();
         if continuing {
-            // The chain's own dev mode, not the one in settings.json.
-            let chain = Settings {
-                dev_mode: self.home.chain_dev_mode(),
-                ..self.settings.clone()
-            };
-            check_chain_keeps(&chain, &settings)?;
+            self.check_chain_takes(&settings)?;
         }
         // The devnet as it will run: its runtime is the one that has to read the binaries.
         let mut next = Self::with(self.home.clone(), settings.clone(), self.project.clone());
@@ -231,7 +256,7 @@ impl Devnet {
             self.write_env(&self.read_env().unwrap_or_default())?;
             let applied = self.apply_project();
             let resumed = self.resume_sessions(false);
-            return with_status(self.status(), applied.and(resumed));
+            return with_status(self.status(), after_start([applied, resumed]));
         }
         // The running sequencer holds its own port, and gives it up when it stops.
         if !(running && settings.port == self.settings.port) {
@@ -273,7 +298,7 @@ impl Devnet {
         // A new chain starts every session's account at zero.
         let resumed = next.resume_sessions(!continuing);
         let applied = next.apply_project();
-        with_status(next.status(), resumed.and(applied))
+        with_status(next.status(), after_start([resumed, applied]))
     }
 
     /// The stored settings with the project's `[devnet]` section applied. A shared devnet that
@@ -381,7 +406,7 @@ impl Devnet {
             }
         }
         if !failed.is_empty() {
-            bail!("the devnet is up, but these failed: {}", failed.join(", "));
+            bail!("these failed: {}", failed.join(", "));
         }
         Ok(())
     }
@@ -513,8 +538,8 @@ impl Devnet {
                 self.write_session_wallet_config(&session)?;
                 let ctl = session.logosctl();
                 session.start_daemon(&ctl, self.settings.dev_mode)?;
-                ctl.load(&info.modules)?;
-                ctl.ensure_wallet(
+                ctl.resume(
+                    &info.modules,
                     &session.wallet_config(),
                     &session.wallet_storage(),
                     &self.settings.sequencer_url(),
@@ -528,7 +553,7 @@ impl Devnet {
         }
         if !failed.is_empty() {
             bail!(
-                "the devnet is up, but sessions {} failed. If one keeps failing, \
+                "sessions {} failed. If one keeps failing, \
                  `logos-devnet session rm <name>` and make it again",
                 failed.join(", ")
             );
@@ -789,9 +814,10 @@ impl Devnet {
         for module in &missing {
             let one = std::slice::from_ref(module);
             ctl.install(one)?;
-            ctl.load(one)?;
+            // Recorded once installed: every `up` loads recorded modules that aren't loaded.
             info.modules.push(module.clone());
             session.save_info(&info)?;
+            ctl.load(one)?;
         }
         Ok(missing)
     }
@@ -1012,6 +1038,23 @@ impl Devnet {
         std::fs::create_dir_all(dir)?;
         write_json(&path, &wallet_config(&self.settings.sequencer_url()))?;
         Ok(WalletConfig { path })
+    }
+}
+
+/// `up`'s outcome once the devnet runs: every failure among `outcomes`, after one note that the
+/// devnet itself is up.
+fn after_start<const N: usize>(outcomes: [Result<()>; N]) -> Result<()> {
+    let failures: Vec<String> = outcomes
+        .into_iter()
+        .filter_map(|outcome| outcome.err().map(|e| format!("{e:#}")))
+        .collect();
+    match failures.as_slice() {
+        [] => Ok(()),
+        [one] => Err(anyhow::anyhow!("the devnet is up, but {one}")),
+        many => Err(anyhow::anyhow!(
+            "the devnet is up, but:\n- {}",
+            many.join("\n- ")
+        )),
     }
 }
 
@@ -1400,6 +1443,45 @@ mod tests {
     }
 
     #[test]
+    fn reports_every_failure_not_only_the_first() {
+        assert!(after_start([Ok(()), Ok(())]).is_ok());
+        let one = after_start([Ok(()), Err(anyhow::anyhow!("sessions alice failed"))]);
+        assert_eq!(
+            one.unwrap_err().to_string(),
+            "the devnet is up, but sessions alice failed"
+        );
+        let both = after_start([
+            Err(anyhow::anyhow!("these failed: program shop")),
+            Err(anyhow::anyhow!("sessions alice failed")),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            both,
+            "the devnet is up, but:\n- these failed: program shop\n- sessions alice failed"
+        );
+    }
+
+    #[test]
+    fn a_chain_takes_only_settings_it_can_run_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Home::locate(Some(dir.path().to_path_buf())).unwrap();
+        std::fs::create_dir_all(home.chain_dir()).unwrap();
+        home.record_chain_dev_mode(true).unwrap();
+        let devnet = Devnet::open(home, None).unwrap();
+        let err = devnet
+            .check_chain_takes(&Settings::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("runs in dev mode"), "{err}");
+        let dev = Settings {
+            dev_mode: true,
+            ..Settings::default()
+        };
+        assert!(devnet.check_chain_takes(&dev).is_ok());
+    }
+
+    #[test]
     fn says_why_a_program_needs_reset() {
         let elf = Path::new("out/counter.bin");
         let rebuilt = needs_reset("counter", elf, false, false);
@@ -1493,6 +1575,13 @@ mod tests {
         };
         assert!(!parse(&["--dev-mode", "false"]).apply(on.clone()).dev_mode);
         assert!(parse(&[]).apply(on).dev_mode, "unset keeps it");
+        let debug = parse(&["--log-filter", "debug"]).apply(Settings::default());
+        assert_eq!(debug.log_filter, "debug");
+        assert_eq!(
+            parse(&[]).apply(debug).log_filter,
+            "debug",
+            "remembered, like the others"
+        );
     }
 
     #[test]

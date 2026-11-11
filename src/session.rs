@@ -369,6 +369,20 @@ impl Logosctl {
         forget_chain_in(storage)
     }
 
+    /// Brings a started daemon back to work: `lez_core` loaded and the wallet open first, then
+    /// the session's other `modules`, so one that won't load leaves a working wallet.
+    pub fn resume(
+        &self,
+        modules: &[String],
+        config: &Path,
+        storage: &Path,
+        sequencer: &str,
+    ) -> Result<()> {
+        self.load(&[LEZ_CORE.to_owned()])?;
+        self.ensure_wallet(config, storage, sequencer)?;
+        self.load(modules)
+    }
+
     /// Makes sure `lez_core` has the session's wallet open on `sequencer`. `open` fails
     /// while a wallet is open, so one open on another sequencer (an old port) is closed by
     /// reloading `lez_core` first.
@@ -754,6 +768,35 @@ esac"#,
         );
         assert!(wanted(&[]).is_empty(), "a module left out stays installed");
         assert!(missing_modules(&have, &["Bad Name".to_owned()]).is_err());
+    }
+
+    #[test]
+    fn opens_the_wallet_before_a_module_that_fails_to_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctl = fake_logosctl(
+            dir.path(),
+            r#"case "$2 $3 $4" in
+  "module ls ") echo '[{"name":"lez_core","status":"not_loaded"},{"name":"chat_module","status":"not_loaded"}]' ;;
+  "module load chat_module") exit 1 ;;
+  "call lez_core get_sequencer_addr") echo '{"result":"","status":"ok"}' ;;
+  "call lez_core open") echo '{"result":0,"status":"ok"}' ;;
+  *) echo '{"status":"ok"}' ;;
+esac"#,
+        );
+        let modules = ["lez_core".to_owned(), "chat_module".to_owned()];
+        let err = ctl
+            .resume(
+                &modules,
+                Path::new("/w/c.json"),
+                Path::new("/w/s.json"),
+                "http://127.0.0.1:3055",
+            )
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("chat_module"), "{err:#}");
+        let calls = calls(dir.path());
+        let opened = calls.find("call lez_core open").expect("the wallet opened");
+        let failed = calls.find("module load chat_module").unwrap();
+        assert!(opened < failed, "{calls}");
     }
 
     #[test]
