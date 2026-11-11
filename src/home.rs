@@ -151,6 +151,23 @@ impl Home {
     pub fn chain_config(&self) -> PathBuf {
         self.chain_dir().join("sequencer_config.json")
     }
+    /// The chain's own record of its dev mode, which `reset` deletes with it.
+    fn chain_dev_mode_file(&self) -> PathBuf {
+        self.chain_dir().join("dev-mode")
+    }
+
+    /// Whether the chain here was started in dev mode. Kept with the chain rather than in
+    /// `settings.json`, which can be lost or edited, since a chain with fake proofs crashes
+    /// without it. Chains from before v0.3.0 have no record, and check proofs.
+    pub fn chain_dev_mode(&self) -> bool {
+        std::fs::read_to_string(self.chain_dev_mode_file()).is_ok_and(|text| text.trim() == "1")
+    }
+
+    pub fn record_chain_dev_mode(&self, dev_mode: bool) -> Result<()> {
+        let file = self.chain_dev_mode_file();
+        let value = crate::envfile::dev_mode_value(dev_mode);
+        std::fs::write(&file, value).with_context(|| format!("writing {}", file.display()))
+    }
     pub fn wallet_dir(&self) -> PathBuf {
         self.root.join("wallet")
     }
@@ -276,6 +293,21 @@ pub fn write_json(path: &Path, value: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_chain_remembers_its_own_dev_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Home::locate(Some(dir.path().to_path_buf())).unwrap();
+        assert!(!home.chain_dev_mode(), "chains before v0.3.0 check proofs");
+        std::fs::create_dir_all(home.chain_dir()).unwrap();
+        home.record_chain_dev_mode(true).unwrap();
+        assert!(home.chain_dev_mode());
+        // Not settings.json, which can be lost or edited.
+        std::fs::remove_file(home.settings_file()).ok();
+        assert!(home.chain_dev_mode());
+        home.record_chain_dev_mode(false).unwrap();
+        assert!(!home.chain_dev_mode());
+    }
 
     #[test]
     fn one_command_at_a_time_holds_the_home() {

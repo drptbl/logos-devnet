@@ -98,6 +98,26 @@ impl Session {
         Logosctl::new(self.logosctl_dir())
     }
 
+    /// The dev mode the session's daemon was last started with.
+    fn dev_mode_record(&self) -> PathBuf {
+        self.dir.join("dev-mode")
+    }
+
+    /// Starts the session's daemon (`ctl`) with the chain's dev mode. One running with the
+    /// other mode, or with none recorded, is restarted first: it would make proofs the chain
+    /// rejects.
+    pub fn start_daemon(&self, ctl: &Logosctl, dev_mode: bool) -> Result<()> {
+        let record = self.dev_mode_record();
+        let value = dev_mode_value(dev_mode);
+        let started = std::fs::read_to_string(&record).ok();
+        if started.as_deref().map(str::trim) != Some(value) {
+            ctl.stop()?;
+        }
+        ctl.start(dev_mode)?;
+        std::fs::create_dir_all(&self.dir)?;
+        std::fs::write(&record, value).with_context(|| format!("writing {}", record.display()))
+    }
+
     /// There from the start of a new chain until the session's wallet has forgotten the old
     /// one, so a session that fails on the way forgets it on a later `up`.
     fn new_chain_mark(&self) -> PathBuf {
@@ -709,6 +729,31 @@ esac"#,
                 started = dir.join("started").display(),
             ),
         )
+    }
+
+    #[test]
+    fn a_daemon_started_in_the_other_mode_is_restarted() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session::new(&dir.path().join("sessions"), "alice").unwrap();
+        // Running from before v0.3.0: nothing says how it started.
+        let ctl = daemon(dir.path(), true);
+        session.start_daemon(&ctl, true).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("started")).unwrap(),
+            "1\n"
+        );
+        assert!(calls(dir.path()).contains("daemon stop"));
+        // Started in this mode: left running.
+        std::fs::remove_file(dir.path().join("calls.log")).unwrap();
+        session.start_daemon(&ctl, true).unwrap();
+        assert!(!calls(dir.path()).contains("daemon stop"));
+        // The other mode: restarted.
+        session.start_daemon(&ctl, false).unwrap();
+        assert!(calls(dir.path()).contains("daemon stop"));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("started")).unwrap(),
+            "0\n"
+        );
     }
 
     #[test]

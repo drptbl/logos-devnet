@@ -203,7 +203,12 @@ impl Devnet {
         chain_config::check_max_txs_per_block(settings.max_txs_per_block)?;
         let continuing = !wipe && self.home.has_chain();
         if continuing {
-            check_chain_keeps(&self.settings, &settings)?;
+            // The chain's own dev mode, not the one in settings.json.
+            let chain = Settings {
+                dev_mode: self.home.chain_dev_mode(),
+                ..self.settings.clone()
+            };
+            check_chain_keeps(&chain, &settings)?;
         }
         // The devnet as it will run: its runtime is the one that has to read the binaries.
         let mut next = Self::with(self.home.clone(), settings.clone(), self.project.clone());
@@ -244,6 +249,7 @@ impl Devnet {
         next.home.save_settings(&next.settings)?;
         std::fs::create_dir_all(next.home.chain_dir())?;
         write_json(&next.home.chain_config(), &config)?;
+        next.home.record_chain_dev_mode(next.settings.dev_mode)?;
         next.runtime.start()?;
         next.wait_ready()?;
 
@@ -485,7 +491,7 @@ impl Devnet {
                 session.forget_old_chain()?;
                 self.write_session_wallet_config(&session)?;
                 let ctl = session.logosctl();
-                ctl.start(self.settings.dev_mode)?;
+                session.start_daemon(&ctl, self.settings.dev_mode)?;
                 ctl.load(&info.modules)?;
                 ctl.ensure_wallet(
                     &session.wallet_config(),
@@ -760,7 +766,7 @@ impl Devnet {
             session.name,
             modules.join(", ")
         );
-        ctl.start(self.settings.dev_mode)?;
+        session.start_daemon(&ctl, self.settings.dev_mode)?;
         ctl.install(&modules)?;
         ctl.load(&modules)?;
         ctl.create_wallet(&session.wallet_config(), &session.wallet_storage())?;
@@ -1133,8 +1139,8 @@ fn check_chain_keeps(chain: &Settings, next: &Settings) -> Result<()> {
              dev mode"
         ),
         (true, false) => bail!(
-            "this chain runs in dev mode, and its fake proofs need it. `logos-devnet reset \
-             --dev-mode false` starts a new chain that checks proofs"
+            "this chain runs in dev mode, and its fake proofs need it. `--dev-mode` keeps it, \
+             and `logos-devnet reset --dev-mode false` starts a new chain that checks proofs"
         ),
         _ => Ok(()),
     }
