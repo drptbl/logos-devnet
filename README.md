@@ -56,6 +56,17 @@ Every command takes `--json` for scripts and agents, `--config <file>` for a pro
 
 [`examples/`](examples) has LEZ's hello-world tutorial running on a devnet, two `logosctl` sessions paying each other, and a GitHub Actions workflow to copy. For a whole project on it, [logos-agents](https://github.com/drptbl/logos-agents) deploys a released program and runs two sessions from its [`logos-devnet.toml`](https://github.com/drptbl/logos-agents/blob/main/logos-devnet.toml).
 
+## For AI agents
+
+[`skills/logos-devnet`](skills/logos-devnet) is an agent skill: the loop to run, the choices that matter, and what to do when `logos-devnet` refuses. For Claude Code, copy it into `~/.claude/skills/` for every project, or into a project's `.claude/skills/`:
+
+```bash
+git clone --depth 1 https://github.com/drptbl/logos-devnet.git /tmp/logos-devnet
+mkdir -p ~/.claude/skills && cp -R /tmp/logos-devnet/skills/logos-devnet ~/.claude/skills/
+```
+
+The files are plain Markdown, so other agents can read `SKILL.md` from their own instructions.
+
 ## Set up a project
 
 Commit a `logos-devnet.toml` at your project's root, and `logos-devnet up` anywhere below it makes the devnet match:
