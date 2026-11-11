@@ -254,10 +254,14 @@ impl Devnet {
             eprintln!("Already running.");
             self.make_project_groups()?;
             self.write_env(&self.read_env().unwrap_or_default())?;
-            let applied = self.apply_project();
+            let mut deployed = Vec::new();
+            let applied = self.apply_project(&mut deployed);
             let forgot = self.forget_group_chains();
             let resumed = self.resume_sessions(false);
-            return with_status(self.status(), after_start([forgot, applied, resumed]));
+            return with_status(
+                with_deploys(self.status(), &deployed),
+                after_start([forgot, applied, resumed]),
+            );
         }
         // The running sequencer holds its own port, and gives it up when it stops.
         if !(running && settings.port == self.settings.port) {
@@ -305,9 +309,10 @@ impl Devnet {
         // Marked on a new chain, or left marked by an `up` that failed.
         let forgot = next.forget_group_chains();
         let resumed = next.resume_sessions(!continuing);
-        let applied = next.apply_project();
+        let mut deployed = Vec::new();
+        let applied = next.apply_project(&mut deployed);
         with_status(
-            next.status(),
+            with_deploys(next.status(), &deployed),
             after_start([marked, forgot, resumed, applied]),
         )
     }
@@ -423,14 +428,18 @@ impl Devnet {
 
     /// Makes the devnet match the project once the chain runs: deploys its programs, funds
     /// every account group's new accounts and makes missing sessions. Every item is tried;
-    /// failures are reported together after.
-    fn apply_project(&self) -> Result<()> {
+    /// failures are reported together after. Each program it deploys or updates is added to
+    /// `deployed`.
+    fn apply_project(&self, deployed: &mut Vec<Program>) -> Result<()> {
         let mut failed: Vec<String> = Vec::new();
         if let Some(project) = &self.project {
             for (name, program) in &project.programs {
-                if let Err(e) = self.deploy_program(name, &program.binary, program.mutable) {
-                    eprintln!("program {name}: {e:#}");
-                    failed.push(format!("program {name}"));
+                match self.deploy_program(name, &program.binary, program.mutable) {
+                    Ok(report) => deployed.push(report),
+                    Err(e) => {
+                        eprintln!("program {name}: {e:#}");
+                        failed.push(format!("program {name}"));
+                    }
                 }
             }
         }
@@ -1111,6 +1120,18 @@ fn after_start<const N: usize>(outcomes: [Result<()>; N]) -> Result<()> {
     }
 }
 
+/// `status`, whose programs say only what's on the chain, with `deployed` saying what this run
+/// deployed or updated.
+fn with_deploys(mut status: Status, deployed: &[Program]) -> Status {
+    for program in &mut status.programs {
+        if let Some(done) = deployed.iter().find(|d| d.name == program.name) {
+            program.deployed_now = done.deployed_now;
+            program.updated = done.updated;
+        }
+    }
+    status
+}
+
 /// `status` when everything worked. When something failed, the status goes to stderr (stdout
 /// stays clean for `--json`) and the error is returned.
 fn with_status(status: Status, outcome: Result<()>) -> Result<Status> {
@@ -1536,6 +1557,51 @@ mod tests {
         );
         // The failed one stays marked, for the next `up`.
         assert!(groups[0].forget_old_chain().is_err());
+    }
+
+    #[test]
+    fn up_reports_what_it_deployed_and_updated() {
+        let id = PublicId::parse(ID).unwrap();
+        let mut status = Status {
+            lez: "v0.3.1".into(),
+            runtime: "docker".into(),
+            sequencer: report::Sequencer {
+                url: "http://127.0.0.1:3040".into(),
+                running: true,
+                block: Some(1),
+                max_txs_per_block: 20,
+                block_time: "1s".into(),
+                dev_mode: false,
+            },
+            faucet: None,
+            programs: vec![],
+            account_groups: vec![],
+            sessions: vec![],
+            env_file: None,
+        };
+        status.programs = vec![
+            program_report("counter", &id, DeployStep::Unchanged),
+            program_report("shop", &id, DeployStep::Unchanged),
+            program_report("vault", &id, DeployStep::Unchanged),
+        ];
+        let done = [
+            program_report("counter", &id, DeployStep::Deploy),
+            program_report("shop", &id, DeployStep::Update),
+        ];
+        let status = with_deploys(status, &done);
+        let flags: Vec<_> = status
+            .programs
+            .iter()
+            .map(|p| (p.name.as_str(), p.deployed_now, p.updated))
+            .collect();
+        assert_eq!(
+            flags,
+            [
+                ("counter", true, false),
+                ("shop", false, true),
+                ("vault", false, false)
+            ]
+        );
     }
 
     #[test]
