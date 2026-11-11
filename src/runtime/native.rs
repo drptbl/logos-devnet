@@ -158,7 +158,10 @@ impl Runtime for Native {
             .args(["--listen-address", "127.0.0.1", "--port"])
             .arg(self.settings.port.to_string())
             .current_dir(self.home.chain_dir())
-            .envs(sequencer_env(self.settings.dev_mode))
+            .envs(sequencer_env(
+                self.settings.dev_mode,
+                &self.settings.log_filter,
+            ))
             .stdin(Stdio::null())
             .stdout(log.try_clone()?)
             .stderr(log)

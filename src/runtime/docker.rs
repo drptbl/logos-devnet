@@ -56,6 +56,7 @@ impl Docker {
             user: &current_user()?,
             chain_dir: &self.home.chain_dir().to_string_lossy(),
             dev_mode: self.settings.dev_mode,
+            log_filter: &self.settings.log_filter,
         });
         // JSON is YAML, and serde quotes every path correctly.
         write_json(&self.home.compose_file(), &spec)
@@ -333,6 +334,7 @@ struct ComposeInputs<'a> {
     user: &'a str,
     chain_dir: &'a str,
     dev_mode: bool,
+    log_filter: &'a str,
 }
 
 /// The compose file. The RPC is published on loopback only: it has no caller auth.
@@ -355,7 +357,7 @@ fn compose_spec(i: &ComposeInputs) -> Value {
                     "source": compose_literal(i.chain_dir),
                     "target": CHAIN_MOUNT
                 }],
-                "environment": sequencer_env(i.dev_mode)
+                "environment": sequencer_env(i.dev_mode, i.log_filter)
                     .into_iter()
                     .map(|(var, value)| (var.to_owned(), Value::from(value)))
                     .collect::<serde_json::Map<_, _>>(),
@@ -384,6 +386,7 @@ mod tests {
             user: "501:20",
             chain_dir: "/Users/me/My Devnet/chain",
             dev_mode: false,
+            log_filter: "info,kameo=warn",
         }
     }
 
@@ -392,7 +395,15 @@ mod tests {
         let spec = compose_spec(&inputs());
         let env = &spec["services"]["sequencer"]["environment"];
         assert_eq!(env["RISC0_DEV_MODE"], "0");
-        assert!(env["RUST_LOG"].is_string());
+        assert_eq!(env["RUST_LOG"], "info,kameo=warn");
+        let spec = compose_spec(&ComposeInputs {
+            log_filter: "debug",
+            ..inputs()
+        });
+        assert_eq!(
+            spec["services"]["sequencer"]["environment"]["RUST_LOG"],
+            "debug"
+        );
         let spec = compose_spec(&ComposeInputs {
             dev_mode: true,
             ..inputs()

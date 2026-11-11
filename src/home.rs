@@ -30,6 +30,17 @@ const DEFAULT_PORT: u16 = 3040;
 const DEFAULT_BLOCK_TIME: &str = "1s";
 /// Upstream's debug config allows 20 transactions per block.
 pub const DEFAULT_MAX_TXS_PER_BLOCK: u32 = 20;
+/// The sequencer's log filter (`RUST_LOG`): its own progress, without its actor framework's.
+pub const DEFAULT_LOG_FILTER: &str = "info,kameo=warn";
+
+/// A log filter the sequencer takes: `RUST_LOG` syntax, e.g. `debug` or
+/// `info,sequencer_core=debug`.
+pub fn check_log_filter(filter: &str) -> Result<()> {
+    if filter.trim().is_empty() {
+        anyhow::bail!("the log filter can't be empty: `info` is the least");
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -52,6 +63,9 @@ pub struct Settings {
     /// instead of minutes. A chain keeps it: one with fake proofs crashes without it.
     #[serde(default)]
     pub dev_mode: bool,
+    /// The sequencer's `RUST_LOG`. Added in v0.3.2.
+    #[serde(default = "default_log_filter")]
+    pub log_filter: String,
     /// The dev wallet's faucet account, funded at genesis. Created on the first `up`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub faucet: Option<PublicId>,
@@ -66,6 +80,7 @@ impl Default for Settings {
             block_time: DEFAULT_BLOCK_TIME.into(),
             max_txs_per_block: DEFAULT_MAX_TXS_PER_BLOCK,
             dev_mode: false,
+            log_filter: DEFAULT_LOG_FILTER.into(),
             faucet: None,
         }
     }
@@ -73,6 +88,10 @@ impl Default for Settings {
 
 fn default_max_txs_per_block() -> u32 {
     DEFAULT_MAX_TXS_PER_BLOCK
+}
+
+fn default_log_filter() -> String {
+    DEFAULT_LOG_FILTER.into()
 }
 
 impl Settings {
@@ -295,6 +314,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn refuses_an_empty_log_filter() {
+        assert!(check_log_filter("debug").is_ok());
+        assert!(check_log_filter("info,sequencer_core=debug").is_ok());
+        assert!(check_log_filter(" ").is_err());
+    }
+
+    #[test]
     fn a_chain_remembers_its_own_dev_mode() {
         let dir = tempfile::tempdir().unwrap();
         let home = Home::locate(Some(dir.path().to_path_buf())).unwrap();
@@ -364,6 +390,7 @@ mod tests {
         let settings = home.load_settings().unwrap();
         assert_eq!(settings.max_txs_per_block, DEFAULT_MAX_TXS_PER_BLOCK);
         assert!(!settings.dev_mode, "chains before v0.3.0 prove for real");
+        assert_eq!(settings.log_filter, DEFAULT_LOG_FILTER);
         assert!(settings.faucet.is_some());
     }
 

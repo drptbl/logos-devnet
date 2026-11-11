@@ -62,6 +62,10 @@ pub struct UpOptions {
     /// off. A chain keeps it, so changing it takes `reset`.
     #[arg(long, num_args = 0..=1, default_missing_value = "true", value_name = "BOOL")]
     pub dev_mode: Option<bool>,
+    /// The sequencer's log filter, as `RUST_LOG` takes it: e.g. `debug`, or
+    /// `info,sequencer_core=debug`. The default is `info,kameo=warn`.
+    #[arg(long)]
+    pub log_filter: Option<String>,
     /// Build the image or binaries even if they exist. Not remembered.
     #[arg(long)]
     pub rebuild: bool,
@@ -89,6 +93,9 @@ impl UpOptions {
         }
         if let Some(dev_mode) = self.dev_mode {
             settings.dev_mode = dev_mode;
+        }
+        if let Some(log_filter) = &self.log_filter {
+            settings.log_filter.clone_from(log_filter);
         }
         settings
     }
@@ -211,6 +218,7 @@ impl Devnet {
         let settings = opts.apply(self.with_project_settings(opts, running && !wipe)?);
         chain_config::block_time_secs(&settings.block_time)?;
         chain_config::check_max_txs_per_block(settings.max_txs_per_block)?;
+        crate::home::check_log_filter(&settings.log_filter)?;
         let continuing = !wipe && self.home.has_chain();
         if continuing {
             // The chain's own dev mode, not the one in settings.json.
@@ -1493,6 +1501,13 @@ mod tests {
         };
         assert!(!parse(&["--dev-mode", "false"]).apply(on.clone()).dev_mode);
         assert!(parse(&[]).apply(on).dev_mode, "unset keeps it");
+        let debug = parse(&["--log-filter", "debug"]).apply(Settings::default());
+        assert_eq!(debug.log_filter, "debug");
+        assert_eq!(
+            parse(&[]).apply(debug).log_filter,
+            "debug",
+            "remembered, like the others"
+        );
     }
 
     #[test]
