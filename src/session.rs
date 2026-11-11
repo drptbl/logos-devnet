@@ -352,7 +352,6 @@ fn call_result(reply: Value, what: &str) -> Result<Value> {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::os::unix::fs::PermissionsExt;
 
     const ID: &str = "HpavNGFYxjyhLsy171aXsvv146yUeXmRWiho22uvT43d";
     const PHRASE: &str = "amused river fossil";
@@ -360,13 +359,23 @@ mod tests {
     /// A logosctl stand-in: records its arguments, one call per line, and answers per `script`.
     fn fake_logosctl(dir: &Path, script: &str) -> Logosctl {
         let program = dir.join("logosctl");
+        let source = dir.join("logosctl.sh");
         let log = dir.join("calls.log");
         std::fs::write(
-            &program,
+            &source,
             format!("#!/bin/sh\necho \"$@\" >> '{}'\n{script}\n", log.display()),
         )
         .unwrap();
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // `install` writes the executable in its own process. Written here, a process another
+        // test thread forks in that moment would hold it open for writing, and running it would
+        // fail with "Text file busy" on Linux.
+        let installed = std::process::Command::new("install")
+            .args(["-m", "755"])
+            .arg(&source)
+            .arg(&program)
+            .status()
+            .unwrap();
+        assert!(installed.success());
         Logosctl {
             program,
             dir: dir.join("session"),
