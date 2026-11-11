@@ -373,6 +373,14 @@ modules = ["chat_module"]
     }
 
     #[test]
+    fn the_examples_project_files_load() {
+        let file =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/hello-world/logos-devnet.toml");
+        let project = Project::load(&file).unwrap();
+        assert_eq!(project.accounts["tutorial"].count, 2);
+    }
+
+    #[test]
     fn the_devnet_section_turns_on_dev_mode() {
         let dir = tempfile::tempdir().unwrap();
         let project = project_in(dir.path(), "[devnet]\ndev_mode = true\n").unwrap();

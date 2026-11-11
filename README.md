@@ -54,6 +54,8 @@ source ~/.logos-devnet/env                         # LOGOS_DEVNET_SEQUENCER, LOG
 
 Every command takes `--json` for scripts and agents, `--config <file>` for a project file elsewhere, and `--home <dir>`. A bad option changes nothing: `up` and `reset` check it, and build what they need, before they stop the running chain.
 
+[`examples/`](examples) has LEZ's hello-world tutorial running on a devnet, and a GitHub Actions workflow to copy.
+
 ## Set up a project
 
 Commit a `logos-devnet.toml` at your project's root, and `logos-devnet up` anywhere below it makes the devnet match:
