@@ -57,12 +57,17 @@ runs:
         if [ -z "$v" ] && [[ "$ACTION_REF" =~ ^v[0-9] ]]; then
           v="$ACTION_REF"
         fi
+        # Pinned to a commit: the release that commit's Cargo.toml names, before anything on
+        # PATH, which may be another version.
+        if [ -z "$v" ] && [[ "$ACTION_REF" =~ ^[0-9a-f]{40}$ ]]; then
+          v="v$(sed -n 's/^version = "\(.*\)"$/\1/p' "$GITHUB_ACTION_PATH/Cargo.toml" | head -1)"
+        fi
         if [ -z "$v" ] && command -v logos-devnet >/dev/null; then
           echo "Using $(command -v logos-devnet): $(logos-devnet --version)"
           exit 0
         fi
         if [ -z "$v" ]; then
-          # Pinned to a commit: the release that commit's Cargo.toml names.
+          # A branch, or a local copy of the action: the release its Cargo.toml names.
           v="v$(sed -n 's/^version = "\(.*\)"$/\1/p' "$GITHUB_ACTION_PATH/Cargo.toml" | head -1)"
         fi
         if [[ ! "$v" =~ ^v[0-9]+(\.[0-9]+)*(-[A-Za-z0-9.]+)?$ ]]; then
