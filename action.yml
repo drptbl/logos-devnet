@@ -30,6 +30,12 @@ inputs:
     description: Start the devnet. "false" only installs logos-devnet, which works on macOS too.
     required: false
     default: "true"
+  logosctl-version:
+    description: >-
+      The Logos Core CLI (logosctl) release to install when the project's sessions need it and
+      none is on PATH.
+    required: false
+    default: "0.3.2"
 
 outputs:
   sequencer:
@@ -103,6 +109,64 @@ runs:
         tar -xzf "$name.tar.gz"
         echo "$dir/$name" >> "$GITHUB_PATH"
         "$dir/$name/logos-devnet" --version
+
+    - name: Install logosctl for sessions
+      if: inputs.start == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        CONFIG: ${{ inputs.config }}
+        VERSION: ${{ inputs.logosctl-version }}
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        config=()
+        if [ -n "$CONFIG" ]; then
+          config=(--config "$CONFIG")
+        fi
+        # doctor checks logosctl only when sessions need it, so a failed check is the cue.
+        checks=$(logos-devnet "${config[@]}" doctor --json || true)
+        if ! jq -e '.checks[] | select(.name == "logosctl" and (.ok | not))' <<< "$checks" >/dev/null; then
+          exit 0
+        fi
+        if [[ ! "$VERSION" =~ ^[0-9]+(\.[0-9]+)*(-[A-Za-z0-9.]+)?$ ]]; then
+          echo "::error::not a logosctl version: $VERSION"
+          exit 1
+        fi
+        case "$(uname -m)" in
+          x86_64) arch=x86_64 ;;
+          aarch64 | arm64) arch=aarch64 ;;
+          *) echo "::error::no logosctl build for $(uname -m)"; exit 1 ;;
+        esac
+        name="logosctl-$arch-linux.tar.gz"
+        # The default release's digests are pinned here; others come from GitHub's release.
+        case "$VERSION-$arch" in
+          0.3.2-x86_64) sha=294fbcc6409a8851b7471582bdad2dbfaf681b5d1c67dfffec38ada925dc6762 ;;
+          0.3.2-aarch64) sha=e77ccd9c1a7e673c1a5533f2bcda03f84fd04e80f415ac414c378a897e5135fe ;;
+          *)
+            sha=$(gh api "repos/logos-co/logos-logoscore-cli/releases/tags/$VERSION" \
+              --jq ".assets[] | select(.name == \"$name\") | .digest" | sed 's/^sha256://')
+            ;;
+        esac
+        if [ -z "$sha" ]; then
+          echo "::error::logosctl $VERSION has no $name"
+          exit 1
+        fi
+        dir="$RUNNER_TEMP/logosctl"
+        mkdir -p "$dir/bin"
+        cd "$dir"
+        curl -fsSL --retry 3 -o "$name" \
+          "https://github.com/logos-co/logos-logoscore-cli/releases/download/$VERSION/$name"
+        echo "$sha  $name" | sha256sum -c
+        tar -xzf "$name"
+        # An AppImage, and runners have no FUSE: run it extracted.
+        appimage=$(find . -maxdepth 2 -name '*.AppImage' | head -1)
+        chmod +x "$appimage"
+        "$appimage" --appimage-extract > /dev/null
+        printf '#!/bin/sh\nexec "%s/squashfs-root/AppRun" "$@"\n' "$dir" > bin/logosctl
+        chmod +x bin/logosctl
+        echo "$dir/bin" >> "$GITHUB_PATH"
+        bin/logosctl --version
 
     - id: up
       name: Start the devnet
