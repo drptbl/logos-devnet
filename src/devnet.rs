@@ -909,28 +909,15 @@ impl Devnet {
             }
             records.insert(name.to_owned(), DeployedProgram { hash, mutable });
             write_json(&self.home.programs_file(), &serde_json::to_value(&records)?)?;
-        } else if step == DeployStep::NeedsReset
-            && let Some(record) = record
-        {
-            let kind = |mutable| if mutable { "mutable" } else { "immutable" };
-            if record.mutable == mutable {
-                eprintln!(
-                    "{name}: {} changed since it was deployed, immutable. `logos-devnet reset` \
-                     deploys the new build",
-                    elf.display()
-                );
-            } else {
-                eprintln!(
-                    "{name}: deployed {}, asked for {}. Nothing changed: `logos-devnet reset` \
-                     deploys it {}",
-                    kind(record.mutable),
-                    kind(mutable),
-                    kind(mutable)
-                );
-            }
         }
         env.programs.insert(name.to_owned(), header.clone());
         self.write_env(&env)?;
+        if step == DeployStep::NeedsReset
+            && let Some(record) = record
+        {
+            // The old build is still what runs: a caller that goes on would test the wrong one.
+            bail!(needs_reset(name, elf, record.mutable, mutable));
+        }
         Ok(program_report(name, &header, step))
     }
 
@@ -1075,6 +1062,26 @@ impl DeployStep {
 /// `mutable` is what's asked for now. Mutability never changes on a chain: an update that made a
 /// program immutable could never be undone, and one asked for by a missing `--mutable` least of
 /// all.
+/// Why a program can't take `elf` on this chain, and what does.
+fn needs_reset(name: &str, elf: &Path, deployed_mutable: bool, mutable: bool) -> String {
+    let kind = |mutable| if mutable { "mutable" } else { "immutable" };
+    if deployed_mutable == mutable {
+        format!(
+            "{name}: {} changed since it was deployed, immutable, and the old build still runs. \
+             `logos-devnet reset` deploys the new one",
+            elf.display()
+        )
+    } else {
+        format!(
+            "{name}: deployed {}, asked for {}, and nothing changed. `logos-devnet reset` \
+             deploys it {}",
+            kind(deployed_mutable),
+            kind(mutable),
+            kind(mutable)
+        )
+    }
+}
+
 fn deploy_step(
     in_use: bool,
     record: Option<&DeployedProgram>,
@@ -1328,6 +1335,20 @@ mod tests {
         assert_eq!(deploy_step(true, Some(&immutable), "old", false), Unchanged);
         // Deployed some other way: nothing is known to compare.
         assert_eq!(deploy_step(true, None, "new", true), Unchanged);
+    }
+
+    #[test]
+    fn says_why_a_program_needs_reset() {
+        let elf = Path::new("out/counter.bin");
+        let rebuilt = needs_reset("counter", elf, false, false);
+        assert!(rebuilt.contains("out/counter.bin changed"), "{rebuilt}");
+        assert!(rebuilt.contains("old build still runs"), "{rebuilt}");
+        let flipped = needs_reset("counter", elf, true, false);
+        assert!(
+            flipped.contains("deployed mutable, asked for immutable"),
+            "{flipped}"
+        );
+        assert!(flipped.contains("`logos-devnet reset` deploys it immutable"));
     }
 
     #[test]
