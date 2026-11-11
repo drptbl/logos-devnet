@@ -25,8 +25,8 @@ pub const WALLET_DIR: &str = "wallet";
 /// The most accounts one group holds. Genesis takes every one of them.
 pub const MAX_ACCOUNTS: usize = 10_000;
 
-/// An account group name: as `check_name` takes it, and not ending in `-wallet`, whose variable
-/// would be another group's `_WALLET` one.
+/// A name for a new account group: as `check_name` takes it, and not ending in `-wallet`, whose
+/// variable would be another group's `_WALLET` one.
 pub fn check_group_name(name: &str) -> Result<()> {
     check_name("account group", name)?;
     if name.ends_with("-wallet") {
@@ -75,7 +75,7 @@ pub struct Group {
 
 impl Group {
     pub fn new(groups_dir: &Path, name: &str) -> Result<Self> {
-        check_group_name(name)?;
+        check_name("account group", name)?;
         Ok(Self {
             name: name.to_owned(),
             dir: groups_dir.join(name),
@@ -143,7 +143,8 @@ pub fn list(dir: &Path) -> Result<Vec<Group>> {
     let mut groups = Vec::new();
     for entry in read_dir_if_present(dir)?.into_iter().flatten().flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if entry.path().is_dir() && check_group_name(&name).is_ok() {
+        // Groups made before names ending in `-wallet` were refused still count.
+        if entry.path().is_dir() && check_name("account group", &name).is_ok() {
             groups.push(Group::new(dir, &name)?);
         }
     }
@@ -194,6 +195,15 @@ mod tests {
         assert!(check_group_name("users-wallet").is_err());
         assert!(check_group_name("wallets").is_ok());
         assert!(check_group_name("users").is_ok());
+        // One made before the rule is still listed.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("users-wallet")).unwrap();
+        let names: Vec<_> = list(dir.path())
+            .unwrap()
+            .into_iter()
+            .map(|g| g.name)
+            .collect();
+        assert_eq!(names, ["users-wallet"]);
     }
 
     #[test]

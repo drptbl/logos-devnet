@@ -28,7 +28,7 @@ use serde::Deserialize;
 
 use crate::chain_config;
 use crate::devnet::{DEFAULT_FUND, UpOptions};
-use crate::envfile::check_program_name;
+use crate::envfile::{check_name, check_program_name};
 use crate::groups;
 use crate::home::{RuntimeKind, Settings};
 use crate::session::{check_session_name, modules_with};
@@ -238,7 +238,7 @@ impl Project {
             );
         }
         for (name, group) in &file.accounts {
-            groups::check_group_name(name)?;
+            check_name("account group", name)?;
             groups::check_spec(group.count, group.amount.unwrap_or(DEFAULT_FUND))
                 .with_context(|| format!("[accounts.{name}]"))?;
         }

@@ -286,9 +286,12 @@ impl Devnet {
         std::fs::create_dir_all(next.home.chain_dir())?;
         write_json(&next.home.chain_config(), &config)?;
         next.home.record_chain_dev_mode(next.settings.dev_mode)?;
-        if !continuing {
-            next.mark_new_chain()?;
-        }
+        // Every one is tried, and a failure is reported once the chain runs.
+        let marked = if continuing {
+            Ok(())
+        } else {
+            next.mark_new_chain()
+        };
         next.runtime.start()?;
         next.wait_ready()?;
 
@@ -303,7 +306,10 @@ impl Devnet {
         let forgot = next.forget_group_chains();
         let resumed = next.resume_sessions(!continuing);
         let applied = next.apply_project();
-        with_status(next.status(), after_start([forgot, resumed, applied]))
+        with_status(
+            next.status(),
+            after_start([marked, forgot, resumed, applied]),
+        )
     }
 
     /// The stored settings with the project's `[devnet]` section applied. A shared devnet that
@@ -381,11 +387,24 @@ impl Devnet {
     /// Marks every session and account group as on a new chain, once the old one is gone, so
     /// their wallets forget it even if starting the new one fails first.
     fn mark_new_chain(&self) -> Result<()> {
+        let mut failed = Vec::new();
         for session in self.sessions() {
-            session.mark_new_chain()?;
+            if let Err(e) = session.mark_new_chain() {
+                eprintln!("session {}: {e:#}", session.name);
+                failed.push(format!("session {}", session.name));
+            }
         }
         for group in groups::list(&self.home.groups_dir())? {
-            group.mark_new_chain()?;
+            if let Err(e) = group.mark_new_chain() {
+                eprintln!("account group {}: {e:#}", group.name);
+                failed.push(format!("account group {}", group.name));
+            }
+        }
+        if !failed.is_empty() {
+            bail!(
+                "{} couldn't be marked, so their wallets may keep the old chain",
+                failed.join(", ")
+            );
         }
         Ok(())
     }
@@ -452,6 +471,9 @@ impl Devnet {
     /// keys are made in one wallet batch. A group never shrinks: its keys stay.
     fn make_group(&self, name: &str, count: usize, amount: u64) -> Result<GroupInfo> {
         let group = Group::new(&self.home.groups_dir(), name)?;
+        if !group.wallet_dir().exists() {
+            groups::check_group_name(name)?;
+        }
         let mut info = group.info()?;
         let wallet = group.wallet_dir();
         // The group's wallet is for the project to use from this machine: it points at the
@@ -1471,6 +1493,18 @@ mod tests {
         let wanted = devnet.settings_for_up();
         assert_eq!(wanted.runtime, RuntimeKind::Native);
         assert_eq!(wanted.port, 4040);
+    }
+
+    #[test]
+    fn refuses_a_new_group_whose_variable_would_clash() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Home::locate(Some(dir.path().to_path_buf())).unwrap();
+        let err = Devnet::open(home, None)
+            .unwrap()
+            .make_group("users-wallet", 1, 1)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("-wallet"), "{err}");
     }
 
     #[test]
