@@ -256,7 +256,7 @@ impl Devnet {
             self.write_env(&self.read_env().unwrap_or_default())?;
             let applied = self.apply_project();
             let resumed = self.resume_sessions(false);
-            return with_status(self.status(), applied.and(resumed));
+            return with_status(self.status(), all_of([applied, resumed]));
         }
         // The running sequencer holds its own port, and gives it up when it stops.
         if !(running && settings.port == self.settings.port) {
@@ -298,7 +298,7 @@ impl Devnet {
         // A new chain starts every session's account at zero.
         let resumed = next.resume_sessions(!continuing);
         let applied = next.apply_project();
-        with_status(next.status(), resumed.and(applied))
+        with_status(next.status(), all_of([resumed, applied]))
     }
 
     /// The stored settings with the project's `[devnet]` section applied. A shared devnet that
@@ -1043,6 +1043,19 @@ impl Devnet {
 
 /// `status` when everything worked. When something failed, the status goes to stderr (stdout
 /// stays clean for `--json`) and the error is returned.
+/// Every failure among `outcomes`, one per line, or success.
+fn all_of<const N: usize>(outcomes: [Result<()>; N]) -> Result<()> {
+    let failures: Vec<String> = outcomes
+        .into_iter()
+        .filter_map(|outcome| outcome.err().map(|e| format!("{e:#}")))
+        .collect();
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(failures.join("\n")))
+    }
+}
+
 fn with_status(status: Status, outcome: Result<()>) -> Result<Status> {
     match outcome {
         Ok(()) => Ok(status),
@@ -1423,6 +1436,20 @@ mod tests {
         let wanted = devnet.settings_for_up();
         assert_eq!(wanted.runtime, RuntimeKind::Native);
         assert_eq!(wanted.port, 4040);
+    }
+
+    #[test]
+    fn reports_every_failure_not_only_the_first() {
+        assert!(all_of([Ok(()), Ok(())]).is_ok());
+        let one = all_of([Ok(()), Err(anyhow::anyhow!("sessions alice failed"))]);
+        assert_eq!(one.unwrap_err().to_string(), "sessions alice failed");
+        let both = all_of([
+            Err(anyhow::anyhow!("these failed: program shop")),
+            Err(anyhow::anyhow!("sessions alice failed")),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert_eq!(both, "these failed: program shop\nsessions alice failed");
     }
 
     #[test]
