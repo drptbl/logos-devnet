@@ -19,6 +19,9 @@ use crate::account::PublicId;
 use crate::envfile::check_name;
 use crate::home::{read_dir_if_present, write_json};
 
+/// A group's wallet directory, beside its `accounts.json`.
+pub const WALLET_DIR: &str = "wallet";
+
 /// The most accounts one group holds. Genesis takes every one of them.
 pub const MAX_ACCOUNTS: usize = 10_000;
 
@@ -67,7 +70,7 @@ impl Group {
     }
 
     pub fn wallet_dir(&self) -> PathBuf {
-        self.dir.join("wallet")
+        self.dir.join(WALLET_DIR)
     }
 
     /// The group wallet's `storage.json`, which the LEZ wallet writes on first use.
