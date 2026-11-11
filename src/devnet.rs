@@ -814,9 +814,10 @@ impl Devnet {
         for module in &missing {
             let one = std::slice::from_ref(module);
             ctl.install(one)?;
-            ctl.load(one)?;
+            // Recorded once installed: every `up` loads recorded modules that aren't loaded.
             info.modules.push(module.clone());
             session.save_info(&info)?;
+            ctl.load(one)?;
         }
         Ok(missing)
     }
