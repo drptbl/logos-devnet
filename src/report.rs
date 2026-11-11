@@ -62,6 +62,8 @@ pub struct Program {
     pub var: String,
     /// False when it was already on this chain.
     pub deployed_now: bool,
+    /// True when a new build replaced it in place: it's mutable.
+    pub updated: bool,
 }
 
 #[derive(Debug, Serialize)]
