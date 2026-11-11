@@ -70,6 +70,11 @@ impl Group {
         self.dir.join("wallet")
     }
 
+    /// The group wallet's `storage.json`, which the LEZ wallet writes on first use.
+    pub fn wallet_storage(&self) -> PathBuf {
+        self.wallet_dir().join("storage.json")
+    }
+
     pub fn manifest(&self) -> PathBuf {
         self.dir.join("accounts.json")
     }

@@ -295,10 +295,15 @@ impl Devnet {
             next.settings.sequencer_url(),
         )?;
         next.write_env(&env)?;
-        // A new chain starts every session's account at zero.
+        // A new chain starts every session's account at zero, and every wallet over.
+        let forgot = if continuing {
+            Ok(())
+        } else {
+            next.forget_group_chains()
+        };
         let resumed = next.resume_sessions(!continuing);
         let applied = next.apply_project();
-        with_status(next.status(), after_start([resumed, applied]))
+        with_status(next.status(), after_start([forgot, resumed, applied]))
     }
 
     /// The stored settings with the project's `[devnet]` section applied. A shared devnet that
@@ -349,6 +354,17 @@ impl Devnet {
                  the sessions you no longer need: `logos-devnet session rm <name>`, and from \
                  [sessions] in the project file"
             );
+        }
+        Ok(())
+    }
+
+    /// Makes every account group's wallet forget the chain it synced, for a new one: an app
+    /// that used a group wallet would otherwise skip the new chain's blocks up to the old
+    /// height. Keys and accounts stay.
+    fn forget_group_chains(&self) -> Result<()> {
+        for group in groups::list(&self.home.groups_dir())? {
+            crate::wallet_storage::forget_chain_in(&group.wallet_storage())
+                .with_context(|| format!("account group {}", group.name))?;
         }
         Ok(())
     }
@@ -1440,6 +1456,29 @@ mod tests {
         let wanted = devnet.settings_for_up();
         assert_eq!(wanted.runtime, RuntimeKind::Native);
         assert_eq!(wanted.port, 4040);
+    }
+
+    #[test]
+    fn a_new_chain_makes_group_wallets_forget_the_old_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Home::locate(Some(dir.path().to_path_buf())).unwrap();
+        let group = Group::new(&home.groups_dir(), "users").unwrap();
+        std::fs::create_dir_all(group.wallet_dir()).unwrap();
+        std::fs::write(
+            group.wallet_storage(),
+            crate::wallet_storage::tests::SYNCED_STORAGE,
+        )
+        .unwrap();
+        // A group whose wallet hasn't been written yet.
+        std::fs::create_dir_all(home.groups_dir().join("admins")).unwrap();
+        Devnet::open(home, None)
+            .unwrap()
+            .forget_group_chains()
+            .unwrap();
+        let storage: Value =
+            serde_json::from_str(&std::fs::read_to_string(group.wallet_storage()).unwrap())
+                .unwrap();
+        assert_eq!(storage["last_synced_block"], 0);
     }
 
     #[test]
