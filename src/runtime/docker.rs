@@ -68,8 +68,17 @@ impl Docker {
         std::fs::create_dir_all(home)?;
         let home = mountable(home)?;
         let mut cmd = self.compose();
-        cmd.args(["run", "--rm", "--no-deps", "-T", "--volume"])
-            .arg(format!("{}:{WALLET_MOUNT}", home.display()));
+        // No stdin for the container: a new wallet reads a password from it, and waits forever
+        // when the client leaves it open.
+        cmd.args([
+            "run",
+            "--rm",
+            "--no-deps",
+            "-T",
+            "--interactive=false",
+            "--volume",
+        ])
+        .arg(format!("{}:{WALLET_MOUNT}", home.display()));
         Ok(cmd)
     }
 
@@ -413,6 +422,20 @@ mod tests {
             spec["services"]["sequencer"]["environment"]["RISC0_DEV_MODE"],
             "1"
         );
+    }
+
+    #[test]
+    fn a_wallet_run_gets_no_stdin_to_wait_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Home::locate(Some(dir.path().to_path_buf())).unwrap();
+        let docker = Docker::new(home, Settings::default());
+        let cmd = docker.wallet_run(&dir.path().join("wallet")).unwrap();
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        // A new wallet asks for a password on stdin: an open one would hang it.
+        assert!(args.contains(&"--interactive=false".to_owned()), "{args:?}");
     }
 
     #[test]
