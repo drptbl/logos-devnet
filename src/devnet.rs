@@ -354,7 +354,18 @@ impl Devnet {
         }
         if let Some(project) = &self.project {
             for (name, spec) in &project.sessions {
-                if Session::new(&self.home.sessions_dir(), name).is_ok_and(|s| s.exists()) {
+                let session = Session::new(&self.home.sessions_dir(), name)?;
+                if session.exists() {
+                    match self.add_session_modules(&session, &spec.modules) {
+                        Ok(added) if !added.is_empty() => {
+                            eprintln!("session {name}: added {}", added.join(", "));
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            eprintln!("session {name}: {e:#}");
+                            failed.push(format!("session {name}"));
+                        }
+                    }
                     continue;
                 }
                 let amount = spec.amount.unwrap_or(DEFAULT_FUND);
@@ -758,6 +769,24 @@ impl Devnet {
         })
     }
 
+    /// Installs and loads the modules `extra` names that `session` lacks, and records them, so
+    /// a module added to `[sessions.<name>]` after the session was made is there too. Returns
+    /// the ones added.
+    fn add_session_modules(&self, session: &Session, extra: &[String]) -> Result<Vec<String>> {
+        let mut info = session.info()?;
+        let missing = session::missing_modules(&info.modules, extra)?;
+        if missing.is_empty() {
+            return Ok(missing);
+        }
+        let ctl = session.logosctl();
+        session.start_daemon(&ctl, self.settings.dev_mode)?;
+        ctl.install(&missing)?;
+        ctl.load(&missing)?;
+        info.modules.extend(missing.iter().cloned());
+        session.save_info(&info)?;
+        Ok(missing)
+    }
+
     fn make_session(
         &self,
         session: &Session,
@@ -1072,13 +1101,13 @@ fn needs_reset(name: &str, elf: &Path, deployed_mutable: bool, mutable: bool) ->
     let kind = |mutable| if mutable { "mutable" } else { "immutable" };
     if deployed_mutable == mutable {
         format!(
-            "{name}: {} changed since it was deployed, immutable, and the old build still runs. \
+            "{} changed since it was deployed, immutable, and the old build still runs. \
              `logos-devnet reset` deploys the new one",
             elf.display()
         )
     } else {
         format!(
-            "{name}: deployed {}, asked for {}, and nothing changed. `logos-devnet reset` \
+            "{name} is deployed {}, asked for {}, and nothing changed. `logos-devnet reset` \
              deploys it {}",
             kind(deployed_mutable),
             kind(mutable),
