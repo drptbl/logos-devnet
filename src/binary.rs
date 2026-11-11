@@ -10,7 +10,7 @@
 use anyhow::{Result, bail};
 
 /// LEZ's `MAX_SEGMENT_DATA_LEN`.
-pub const SEGMENT_LEN: usize = 96 * 1024;
+const SEGMENT_LEN: usize = 96 * 1024;
 
 const MAGIC: &[u8] = b"R0BF";
 const FORMAT_VERSION: u32 = 1;

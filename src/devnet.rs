@@ -452,8 +452,8 @@ impl Devnet {
 
     /// Brings each session up to date with the chain: its wallet config names the current
     /// port, its daemon runs with its modules loaded and its wallet open, and on a new chain
-    /// (`new_chain`) its account is funded again and its wallet forgets the old chain. Every session is tried; failures are reported
-    /// together after, with the chain already up.
+    /// (`new_chain`) its account is funded again and its wallet forgets the old chain. Every
+    /// session is tried; failures are reported together after, with the chain already up.
     fn resume_sessions(&self, new_chain: bool) -> Result<()> {
         let mut failed = Vec::new();
         for session in self.sessions() {
@@ -467,13 +467,16 @@ impl Devnet {
                 };
                 self.write_session_wallet_config(&session)?;
                 let ctl = session.logosctl();
+                // Before anything else can fail: the next `up` sees no new chain to forget.
+                if new_chain {
+                    ctl.forget_chain(&session.wallet_storage())?;
+                }
                 ctl.start()?;
                 ctl.load(&info.modules)?;
                 ctl.ensure_wallet(
                     &session.wallet_config(),
                     &session.wallet_storage(),
                     &self.settings.sequencer_url(),
-                    new_chain,
                 )?;
                 funded
             });

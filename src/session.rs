@@ -10,6 +10,7 @@
 //! Modules come from the official catalog. `lez_core` is always installed, and the session's
 //! wallet is open in its daemon whenever the daemon runs.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -17,6 +18,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use serde_json::value::RawValue;
 
 use crate::account::PublicId;
 use crate::home::{read_dir_if_present, write_json};
@@ -267,13 +269,7 @@ impl Logosctl {
     /// Loads the `modules` that aren't loaded yet.
     pub fn load(&self, modules: &[String]) -> Result<()> {
         let listed = self.run(&["module", "ls"])?;
-        let loaded = |name: &str| {
-            listed.as_array().is_some_and(|all| {
-                all.iter()
-                    .any(|m| m["name"] == name && m["status"] == "loaded")
-            })
-        };
-        for module in modules.iter().filter(|m| !loaded(m)) {
+        for module in modules.iter().filter(|m| !module_loaded(&listed, m)) {
             self.run(&["module", "load", module])
                 .with_context(|| format!("loading {module}"))?;
         }
@@ -302,29 +298,30 @@ impl Logosctl {
             })
     }
 
+    /// Makes the session's wallet (`storage`) forget the chain it synced, for a new one. A
+    /// wallet open in `lez_core` is closed first, so `lez_core` can't write its copy of the old
+    /// chain back over the file. `ensure_wallet` opens it again.
+    pub fn forget_chain(&self, storage: &Path) -> Result<()> {
+        if self.running() && module_loaded(&self.run(&["module", "ls"])?, LEZ_CORE) {
+            let current = self.call(LEZ_CORE, "get_sequencer_addr", &[])?;
+            if !current.as_str().unwrap_or_default().is_empty() {
+                self.run(&["module", "reload", LEZ_CORE])?;
+            }
+        }
+        forget_chain_in(storage)
+    }
+
     /// Makes sure `lez_core` has the session's wallet open on `sequencer`. `open` fails
     /// while a wallet is open, so one open on another sequencer (an old port) is closed by
-    /// reloading `lez_core` first. On a `new_chain` the wallet is reopened whatever it was open
-    /// on, with what it knew of the old chain forgotten: its sync cursor would skip the new
-    /// chain's blocks up to the old height, and its private notes don't exist here.
-    pub fn ensure_wallet(
-        &self,
-        config: &Path,
-        storage: &Path,
-        sequencer: &str,
-        new_chain: bool,
-    ) -> Result<()> {
+    /// reloading `lez_core` first.
+    pub fn ensure_wallet(&self, config: &Path, storage: &Path, sequencer: &str) -> Result<()> {
         let current = self.call(LEZ_CORE, "get_sequencer_addr", &[])?;
         let current = current.as_str().unwrap_or_default();
         if !current.is_empty() {
-            if !new_chain && same_url(current, sequencer) {
+            if same_url(current, sequencer) {
                 return Ok(());
             }
-            // Closed first, so lez_core can't write its copy of the old chain back after.
             self.run(&["module", "reload", LEZ_CORE])?;
-        }
-        if new_chain {
-            forget_chain_in(storage)?;
         }
         let (config, storage) = (path_text(config), path_text(storage));
         let code = self.call(LEZ_CORE, "open", &[&config, &storage])?;
@@ -335,49 +332,119 @@ impl Logosctl {
     }
 }
 
+/// Whether `module ls` (`listed`) shows `name` loaded.
+fn module_loaded(listed: &Value, name: &str) -> bool {
+    listed.as_array().is_some_and(|all| {
+        all.iter()
+            .any(|m| m["name"] == name && m["status"] == "loaded")
+    })
+}
+
+/// A JSON value kept as written. The wallet stores `u128` nonces, which `Value` would turn into
+/// floats the wallet can't read, so `storage.json` is only ever changed where it must be.
+type Raw = Box<RawValue>;
+type RawObject = BTreeMap<String, Raw>;
+
 /// The LEZ wallet's state of a fresh account: what every account holds on a new chain.
-fn fresh_account() -> Value {
-    serde_json::json!({ "nonce": 0, "data": { "shards": {} } })
+fn fresh_account() -> Result<Raw> {
+    Ok(RawValue::from_string(
+        r#"{"nonce":0,"data":{"shards":{}}}"#.into(),
+    )?)
 }
 
-/// Drops what a LEZ wallet's `storage.json` (`storage`) learned from a chain: how far it
+/// `raw`, an object, with `change` applied to its members.
+fn edit_object(raw: &mut Raw, change: impl FnOnce(&mut RawObject) -> Result<()>) -> Result<()> {
+    let mut object: RawObject = serde_json::from_str(raw.get())?;
+    change(&mut object)?;
+    *raw = serde_json::value::to_raw_value(&object)?;
+    Ok(())
+}
+
+/// `change` applied to `object`'s member `key`, when it has one.
+fn edit_member(
+    object: &mut RawObject,
+    key: &str,
+    change: impl FnOnce(&mut Raw) -> Result<()>,
+) -> Result<()> {
+    object.get_mut(key).map_or(Ok(()), change)
+}
+
+/// A LEZ wallet's `storage.json` (`text`) without what it learned from a chain: how far it
 /// synced, and the state of its private and shared private accounts. Keys, labels and
-/// everything else stay, so the wallet's accounts are the same on the next chain.
-fn forget_chain(storage: &mut Value) {
-    storage["last_synced_block"] = 0.into();
-    let key_chain = &mut storage["key_chain"];
-    if let Some(accounts) = key_chain["accounts"].as_array_mut() {
-        for account in accounts {
-            // `value` is the account's keys, then its state per kind of private account.
-            let states = account
-                .get_mut("Private")
-                .and_then(|private| private.pointer_mut("/data/value/1"))
-                .and_then(Value::as_array_mut);
-            for state in states.into_iter().flatten() {
-                if let Some(pair) = state.as_array_mut().filter(|pair| pair.len() == 2) {
-                    pair[1] = fresh_account();
+/// everything else stay as written, so the wallet's accounts are the same on the next chain.
+/// Accounts imported from genesis data keep their state. A layout it doesn't know is an error,
+/// not a guess.
+fn forget_chain(text: &str) -> Result<String> {
+    let mut storage: RawObject = serde_json::from_str(text)?;
+    storage.insert(
+        "last_synced_block".into(),
+        RawValue::from_string("0".into())?,
+    );
+    edit_member(&mut storage, "key_chain", |key_chain| {
+        edit_object(key_chain, |key_chain| {
+            edit_member(key_chain, "accounts", |accounts| {
+                let mut accounts_list: Vec<RawObject> = serde_json::from_str(accounts.get())?;
+                for account in &mut accounts_list {
+                    edit_member(account, "Private", |private| {
+                        edit_object(private, |private| {
+                            edit_member(private, "data", |data| {
+                                edit_object(data, |data| {
+                                    edit_member(data, "value", forget_private_states)
+                                })
+                            })
+                        })
+                    })?;
                 }
-            }
-        }
-    }
-    if let Some(shared) = key_chain["shared_private_accounts"].as_object_mut() {
-        for entry in shared.values_mut() {
-            entry["account"] = fresh_account();
-        }
-    }
+                *accounts = serde_json::value::to_raw_value(&accounts_list)?;
+                Ok(())
+            })?;
+            edit_member(key_chain, "shared_private_accounts", |shared| {
+                let mut entries: RawObject = serde_json::from_str(shared.get())?;
+                for entry in entries.values_mut() {
+                    edit_object(entry, |entry| {
+                        if entry.contains_key("account") {
+                            entry.insert("account".into(), fresh_account()?);
+                        }
+                        Ok(())
+                    })?;
+                }
+                *shared = serde_json::value::to_raw_value(&entries)?;
+                Ok(())
+            })
+        })
+    })?;
+    Ok(serde_json::to_string_pretty(&storage)? + "\n")
 }
 
-/// `forget_chain` on the file, when the wallet has written one.
+/// A private account's `value`: its keys, then its state per kind of private account, each
+/// set back to a fresh account.
+fn forget_private_states(value: &mut Raw) -> Result<()> {
+    let (keys, states): (Raw, Vec<(Raw, Raw)>) = serde_json::from_str(value.get())?;
+    let states = states
+        .into_iter()
+        .map(|(kind, _)| Ok((kind, fresh_account()?)))
+        .collect::<Result<Vec<_>>>()?;
+    *value = serde_json::value::to_raw_value(&(keys, states))?;
+    Ok(())
+}
+
+/// `forget_chain` on the file, when the wallet has written one. The new file replaces the old
+/// one whole: it holds the wallet's keys.
 fn forget_chain_in(storage: &Path) -> Result<()> {
     let text = match std::fs::read_to_string(storage) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e).with_context(|| format!("reading {}", storage.display())),
     };
-    let mut value: Value =
-        serde_json::from_str(&text).with_context(|| format!("reading {}", storage.display()))?;
-    forget_chain(&mut value);
-    write_json(storage, &value)
+    let forgotten = forget_chain(&text).with_context(|| {
+        format!(
+            "{}: not a LEZ wallet storage this version knows",
+            storage.display()
+        )
+    })?;
+    let next = storage.with_extension("json.new");
+    std::fs::write(&next, forgotten).with_context(|| format!("writing {}", next.display()))?;
+    std::fs::rename(&next, storage).with_context(|| format!("replacing {}", storage.display()))
 }
 
 /// URLs equal but for a trailing `/`: lez_core reports `http://127.0.0.1:3040/`.
@@ -462,7 +529,6 @@ esac"#
             Path::new("/w/c.json"),
             Path::new("/w/s.json"),
             "http://127.0.0.1:3055",
-            false,
         )
         .unwrap();
     }
@@ -500,37 +566,41 @@ esac"#
         );
     }
 
-    /// A session's `storage.json` after a chain ran: synced to block 42, one private account
-    /// holding a note, one shared account holding another.
-    fn synced_storage() -> Value {
-        serde_json::json!({
-            "key_chain": {
-                "accounts": [
-                    { "Public": { "account_id": "P", "chain_index": "/0", "data": { "k": 1 } } },
-                    { "Private": { "account_id": "Q", "chain_index": "/0", "data": {
-                        "value": [ { "keys": 2 }, [
-                            [ { "Regular": "111" }, { "nonce": 7, "data": { "shards": { "T": [1, 2] } } } ],
-                            [ { "Regular": "222" }, { "nonce": 3, "data": { "shards": {} } } ]
-                        ] ],
-                        "ccc": [0], "cci": 0
-                    } } }
-                ],
-                "group_key_holders": { "g": { "k": 3 } },
-                "shared_private_accounts": {
-                    "S": { "group_label": "g", "identifier": "1", "pda_seed": null,
-                           "authority_program_id": null,
-                           "account": { "nonce": 5, "data": { "shards": { "T": [9] } } } }
-                }
-            },
-            "last_synced_block": 42,
-            "labels": { "main": { "Public": "P" } }
-        })
+    /// A session's `storage.json` after a chain ran, as the LEZ wallet writes it: synced to
+    /// block 42, a private account and a shared one holding notes, and an account imported from
+    /// genesis data whose nonce only fits a u128.
+    const SYNCED_STORAGE: &str = r#"{
+  "key_chain": {
+    "accounts": [
+      { "Public": { "account_id": "P", "chain_index": "/0", "data": { "k": [1, 2] } } },
+      { "Private": { "account_id": "Q", "chain_index": "/0", "data": {
+        "value": [ { "keys": 2 }, [
+          [ { "Regular": "111" }, { "nonce": 7, "data": { "shards": { "T": [1, 2] } } } ],
+          [ { "Regular": "222" }, { "nonce": 3, "data": { "shards": {} } } ]
+        ] ],
+        "ccc": [0], "cci": 0 } } },
+      { "ImportedPrivate": { "account": { "nonce": 340282366920938463463374607431768211455 } } }
+    ],
+    "group_key_holders": { "g": { "k": 3 } },
+    "shared_private_accounts": {
+      "S": { "group_label": "g", "identifier": "1", "pda_seed": null,
+             "authority_program_id": null,
+             "account": { "nonce": 5, "data": { "shards": { "T": [9] } } } }
     }
+  },
+  "last_synced_block": 42,
+  "labels": { "main": { "Public": "P" } }
+}"#;
 
     #[test]
     fn forgetting_a_chain_keeps_keys_and_drops_its_state() {
-        let mut storage = synced_storage();
-        forget_chain(&mut storage);
+        let text = forget_chain(SYNCED_STORAGE).unwrap();
+        // Numbers past u64 come back as written, not as floats.
+        assert!(
+            text.contains("340282366920938463463374607431768211455"),
+            "{text}"
+        );
+        let storage: Value = serde_json::from_str(&text).unwrap();
         let fresh = serde_json::json!({ "nonce": 0, "data": { "shards": {} } });
         assert_eq!(storage["last_synced_block"], 0);
         let private = &storage["key_chain"]["accounts"][1]["Private"]["data"]["value"];
@@ -542,7 +612,7 @@ esac"#
         assert_eq!(shared["account"], fresh);
         assert_eq!(shared["group_label"], "g");
         // Everything else is as it was.
-        let mut expected = synced_storage();
+        let mut expected: Value = serde_json::from_str(SYNCED_STORAGE).unwrap();
         expected["last_synced_block"] = 0.into();
         expected["key_chain"]["accounts"][1] = storage["key_chain"]["accounts"][1].clone();
         expected["key_chain"]["shared_private_accounts"]["S"]["account"] = fresh;
@@ -550,26 +620,47 @@ esac"#
     }
 
     #[test]
-    fn a_new_chain_reloads_a_wallet_open_on_the_same_port_and_forgets_the_old_chain() {
+    fn forgetting_a_chain_adds_nothing_and_refuses_a_layout_it_doesnt_know() {
+        let bare = r#"{"key_chain":{"accounts":[]},"last_synced_block":9}"#;
+        let storage: Value = serde_json::from_str(&forget_chain(bare).unwrap()).unwrap();
+        assert_eq!(
+            storage,
+            serde_json::json!({ "key_chain": { "accounts": [] }, "last_synced_block": 0 })
+        );
+        let odd = r#"{"key_chain":{"accounts":[{"Private":{"data":{"value":[1,2,3]}}}]}}"#;
+        assert!(forget_chain(odd).is_err());
+    }
+
+    /// A logosctl whose daemon runs with lez_core loaded and a wallet open on `addr`.
+    fn running_lez_core_on(dir: &Path, addr: &str) -> Logosctl {
+        std::fs::create_dir_all(dir.join("session")).unwrap();
+        fake_logosctl(
+            dir,
+            &format!(
+                r#"case "$2 $3 $4" in
+  "daemon status "*) echo '{{"status":"ok"}}' ;;
+  "module ls ") echo '[{{"name":"lez_core","status":"loaded"}}]' ;;
+  "call lez_core get_sequencer_addr") echo '{{"result":"{addr}","status":"ok"}}' ;;
+  *) echo '{{"status":"ok"}}' ;;
+esac"#
+            ),
+        )
+    }
+
+    #[test]
+    fn a_new_chain_closes_an_open_wallet_before_forgetting_the_old_one() {
         let dir = tempfile::tempdir().unwrap();
         let storage = dir.path().join("s.json");
-        std::fs::write(&storage, synced_storage().to_string()).unwrap();
-        lez_core_on(dir.path(), "http://127.0.0.1:3055/")
-            .ensure_wallet(
-                Path::new("/w/c.json"),
-                &storage,
-                "http://127.0.0.1:3055",
-                true,
-            )
+        std::fs::write(&storage, SYNCED_STORAGE).unwrap();
+        running_lez_core_on(dir.path(), "http://127.0.0.1:3055/")
+            .forget_chain(&storage)
             .unwrap();
         assert_eq!(
             calls(dir.path()),
-            format!(
-                "--json call lez_core get_sequencer_addr\n\
-                 --json module reload lez_core\n\
-                 --json call lez_core open str:/w/c.json str:{}\n",
-                storage.display()
-            )
+            "--json daemon status\n\
+             --json module ls\n\
+             --json call lez_core get_sequencer_addr\n\
+             --json module reload lez_core\n"
         );
         let stored: Value =
             serde_json::from_str(&std::fs::read_to_string(&storage).unwrap()).unwrap();
@@ -577,20 +668,20 @@ esac"#
     }
 
     #[test]
-    fn a_new_chain_forgets_the_old_one_in_a_closed_wallet_too() {
+    fn a_new_chain_forgets_the_old_one_in_a_stopped_session_too() {
         let dir = tempfile::tempdir().unwrap();
         let storage = dir.path().join("s.json");
-        std::fs::write(&storage, synced_storage().to_string()).unwrap();
+        std::fs::write(&storage, SYNCED_STORAGE).unwrap();
+        // No session directory: its daemon doesn't run, so nothing is asked of logosctl.
         let ctl = lez_core_on(dir.path(), "");
-        ctl.ensure_wallet(Path::new("/w/c.json"), &storage, "http://x", true)
-            .unwrap();
+        ctl.forget_chain(&storage).unwrap();
+        assert_eq!(calls(dir.path()), "");
         let stored: Value =
             serde_json::from_str(&std::fs::read_to_string(&storage).unwrap()).unwrap();
         assert_eq!(stored["last_synced_block"], 0);
         // A wallet lez_core hasn't written yet has nothing to forget.
         let missing = dir.path().join("none.json");
-        ctl.ensure_wallet(Path::new("/w/c.json"), &missing, "http://x", true)
-            .unwrap();
+        ctl.forget_chain(&missing).unwrap();
         assert!(!missing.exists());
     }
 
