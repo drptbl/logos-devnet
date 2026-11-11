@@ -320,7 +320,16 @@ mod tests {
             Err(std::fs::TryLockError::WouldBlock)
         ));
         drop(held);
-        assert!(other.try_lock().is_ok());
+        // A process another test thread forks in this moment holds a copy of the lock until it
+        // runs its program, so it can outlast the drop by a moment.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while other.try_lock().is_err() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the lock was never released"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     #[test]
