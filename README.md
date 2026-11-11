@@ -13,7 +13,7 @@ cargo install --locked logos-devnet
 Or take a binary from the [latest release](https://github.com/drptbl/logos-devnet/releases/latest), built for macOS (`aarch64-apple-darwin`, `x86_64-apple-darwin`) and Linux (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, static, so any distribution), and check it against its `.sha256`:
 
 ```bash
-v=v0.2.0 t=aarch64-apple-darwin
+v=v0.3.0 t=aarch64-apple-darwin
 curl -fsSL --remote-name-all https://github.com/drptbl/logos-devnet/releases/download/$v/logos-devnet-$v-$t.tar.gz{,.sha256}
 shasum -a 256 -c logos-devnet-$v-$t.tar.gz.sha256 \
   && tar -xzf logos-devnet-$v-$t.tar.gz \
@@ -36,13 +36,13 @@ source ~/.logos-devnet/env                         # LOGOS_DEVNET_SEQUENCER, LOG
 
 | Command | What it does |
 | --- | --- |
-| `up` | Starts the devnet, or resumes it, and makes it match your `logos-devnet.toml`. Takes `--docker` or `--native`, `--lez <tag>`, `--port`, `--block-time` and `--max-txs-per-block`, and remembers them. `--rebuild` builds the image or binaries again. |
+| `up` | Starts the devnet, or resumes it, and makes it match your `logos-devnet.toml`. Takes `--docker` or `--native`, `--lez <tag>`, `--port`, `--block-time`, `--max-txs-per-block` and `--dev-mode`, and remembers them. `--rebuild` builds the image or binaries again. |
 | `down` | Stops it. The chain is kept. |
 | `reset` | Deletes the chain and starts a new one, every account group funded at genesis. Takes the same options as `up`. |
 | `status` | What runs, the chain head, the faucet, programs, account groups and sessions. |
 | `doctor` | Checks the project file, Docker and the image (or git and cargo with `--native`), the port, the faucet and, when sessions need it, `logosctl`, and says how to fix what fails. |
 | `fund <account> [amount]` | Sends lepta from the faucet to a public account, 10B by default. |
-| `deploy <name> <elf>` | Deploys a program and adds `LOGOS_PROGRAM_<NAME>` and `LOGOS_PROGRAM_<NAME>_HEX` to the env file. Names are lower-case letters, digits and `-`. |
+| `deploy <name> <bin> [--mutable]` | Deploys a program and adds `LOGOS_PROGRAM_<NAME>` and `LOGOS_PROGRAM_<NAME>_HEX` to the env file. Names are lower-case letters, digits and `-`. With `--mutable`, a new build updates it in place. |
 | `wallet-config <dir>` | Writes a `wallet_config.json` pointing at the devnet into a new wallet directory. |
 | `env` | Prints the env file. |
 | `logs [-f]` | Prints the sequencer's log. |
@@ -61,9 +61,11 @@ Commit a `logos-devnet.toml` at your project's root, and `logos-devnet up` anywh
 [devnet]                 # optional, the same settings as up's flags
 block_time = "1s"
 max_txs_per_block = 100
+dev_mode = true          # fake proofs: private calls take a second
 
 [programs]               # name = guest binary, relative to this file
 counter = "target/riscv32im-risc0-zkvm-elf/docker/counter.bin"
+shop = { path = "target/riscv32im-risc0-zkvm-elf/docker/shop.bin", mutable = true }
 
 [accounts.users]         # a group of funded accounts
 count = 100
@@ -73,7 +75,7 @@ amount = 5_000_000_000   # lepta each, 10B when left out
 modules = ["chat_module"]
 ```
 
-`up` deploys missing programs, makes and funds missing accounts and sessions, and changes nothing the second time (0.6 s). A program whose binary changed since it was deployed stays as it is, with a note: deployed programs are immutable, so `reset` deploys the new build. `up` checks the whole file before it touches the devnet.
+`up` deploys missing programs, makes and funds missing accounts and sessions, and changes nothing the second time (0.6 s). A `mutable` program whose binary changed is updated in place, with the same id. An immutable one stays as it is, with a note: `reset` deploys the new build. `up` checks the whole file before it touches the devnet.
 
 Projects share one devnet, `~/.logos-devnet` on port 3040, unless the file sets `home`, e.g. `home = ".logos-devnet"`, for a devnet of the project's own (give it its own `[devnet] port` too, if another one runs). On a shared devnet, a `[devnet]` section that disagrees with the running chain is refused rather than restarting the chain under the other projects: `down` and `up` apply it. A `reset` there funds every project's account groups again, and each project's next `up` deploys its programs on the new chain.
 
@@ -112,7 +114,9 @@ Up to 1000 is accepted. Above 100 clients at the same instant, the RPC answers 4
 
 The env file is the contract. A project reads `LOGOS_DEVNET_SEQUENCER` for the RPC URL, and `LOGOS_PROGRAM_<NAME>` (base58) or `LOGOS_PROGRAM_<NAME>_HEX` (what `lez_core` takes as `program_id_hex`) for its programs, falling back to the testnet values when they're not set.
 
-Program ids stay the same. `deploy my-program` always deploys from the dev wallet's `program-my-program` header key, and a program id is that key's account id, so `reset` and redeploy give you the same `LOGOS_PROGRAM_MY_PROGRAM`. A second `deploy` of the same name on the same chain does nothing: `reset` first to deploy a new build.
+Program ids stay the same. `deploy my-program` always deploys from the dev wallet's `program-my-program` header key, and a program id is that key's account id, so `reset` and redeploy give you the same `LOGOS_PROGRAM_MY_PROGRAM`. A second `deploy` of the same name on the same chain does nothing, unless the program is mutable and the binary changed: then it's updated in place.
+
+Programs are immutable unless you ask, because undisclosed private calls only run against a program that was immutable from the start. A mutable one is for iterating: `up` after a rebuild takes about 10 s, against a `reset`. Each update writes new segment accounts, and the old ones stay. An immutable program can't become mutable on the same chain: `reset` deploys it mutable.
 
 For a wallet, give it its own directory. `wallet-config` refuses a directory that already holds a wallet, because repointing a testnet wallet at the devnet mixes up its sync state. Then create the wallet the usual way, e.g. `logosctl call lez_core create_new str:<dir>/wallet_config.json str:<dir>/storage.json str:`, and fund its public account. After a `reset`, such a wallet still holds the old chain's sync position and private notes, and skips the new chain's blocks up to the old height: make a new one.
 
@@ -154,7 +158,15 @@ LEZ's own `sequencer_service` runs, built with two features. `standalone` replac
 
 Fees are the testnet's. Every call holds `gas_limit × base fee` up front, plus a little for its size, so about 1.6M lepta at a `gas_limit` of 200,000. The faucet makes that irrelevant.
 
-Private calls still prove on your machine, so they take as long as on the testnet.
+Private calls still prove on your machine, so they take as long as on the testnet: a shielded transfer from a session took 118 s on an Apple M-series laptop. Dev mode skips that.
+
+## Dev mode
+
+`up --dev-mode`, or `dev_mode = true` under `[devnet]`, runs the chain with `RISC0_DEV_MODE=1`: provers make fake proofs and the sequencer accepts them. The same transfer lands in 1 s.
+
+The env file sets `RISC0_DEV_MODE` for your app and tests, `1` or `0`, so a value left in your shell can't send fake proofs to a chain that checks them. Sessions' daemons get it too. Real proofs still work in dev mode, so an app that doesn't set it is only slow.
+
+A chain keeps its dev mode: one holding fake proofs crashes when it restarts without it. `reset --dev-mode` and `reset --dev-mode false` start a new chain with or without it, and `status` shows which runs. Don't use dev mode for anything that should prove a private call is valid.
 
 ## Where things live
 
@@ -181,8 +193,8 @@ With `--json`, a command prints one JSON document and nothing else on stdout. No
 
 | Command | Fields |
 | --- | --- |
-| `up`, `reset`, `status` | `lez`, `runtime`, `sequencer` (`url`, `running`, `block`, `max_txs_per_block`, `block_time`), `faucet` (`account`, `balance`), `programs`, `account_groups`, `sessions`, `env_file` |
-| `deploy` | `name`, `id`, `hex`, `var`, `deployed_now` |
+| `up`, `reset`, `status` | `lez`, `runtime`, `sequencer` (`url`, `running`, `block`, `max_txs_per_block`, `block_time`, `dev_mode`), `faucet` (`account`, `balance`), `programs`, `account_groups`, `sessions`, `env_file` |
+| `deploy` | `name`, `id`, `hex`, `var`, `deployed_now`, `updated` |
 | `fund` | `account`, `balance` |
 | `accounts new`, `accounts ls` | `name`, `accounts`, `amount`, `file`, `wallet`, `var` (a list for `ls`) |
 | `session new` | `name`, `modules`, `vars` |
@@ -197,13 +209,15 @@ With `--json`, a command prints one JSON document and nothing else on stdout. No
 The repo is a GitHub Action. On a Linux runner it installs `logos-devnet`, starts the devnet from your project file and exports the env into the job:
 
 ```yaml
-- uses: drptbl/logos-devnet@v0.2.0
+- uses: drptbl/logos-devnet@v0.3.0
   with:
     args: --max-txs-per-block 100     # optional, more options for up
 - run: cargo test                     # LOGOS_DEVNET_SEQUENCER, LOGOS_PROGRAM_*, LOGOS_DEVNET_ACCOUNTS_* are set
+- if: failure()
+  run: logos-devnet logs              # the sequencer's log, when a test fails
 ```
 
-Inputs: `version` (default: the release tag you use the action at, so set it when you pin a commit SHA), `config`, `working-directory`, `args` (space-separated, without shell quoting. Set the home with `LOGOS_DEVNET_HOME`, not `--home`), and `start: "false"` to only install. Output: `sequencer`. macOS runners have no Docker, so it refuses them.
+Inputs: `version` (default: the release tag you use the action at, so set it when you pin a commit SHA), `config`, `working-directory`, `args` (space-separated, without shell quoting. Set the home with `LOGOS_DEVNET_HOME`, not `--home`), and `start: "false"` to only install. Output: `sequencer`. When `up` itself fails, the action prints the sequencer's log. macOS runners have no Docker, so it refuses them.
 
 ## The image
 
