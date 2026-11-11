@@ -22,11 +22,12 @@ shasum -a 256 -c logos-devnet-$v-$t.tar.gz.sha256 \
 
 Put `~/.local/bin` on your `PATH` if it isn't. `cargo install --locked --git https://github.com/drptbl/logos-devnet` builds the latest `main`.
 
-You need Docker (OrbStack, Docker Desktop or Colima). With `--native` you need git, a Rust toolchain and LEZ's build dependencies instead: clang, pkg-config and OpenSSL (`brew install pkg-config openssl` on macOS), plus `libpcsclite-dev` on Linux. The first native build takes a few minutes.
+It runs on macOS and Linux, and needs Docker (OrbStack, Docker Desktop or Colima). There's no Windows build. With `--native` you need git, a Rust toolchain and LEZ's build dependencies instead: clang, pkg-config and OpenSSL (`brew install pkg-config openssl` on macOS), plus `libpcsclite-dev` on Linux. The first native build takes a few minutes.
 
 ## Use it
 
 ```bash
+logos-devnet doctor                                # what's missing, and how to fix it
 logos-devnet up                                    # start, or resume
 logos-devnet fund Public/<your account id>         # 10B lepta from the faucet
 logos-devnet deploy my-program my_program.bin      # prints LOGOS_PROGRAM_MY_PROGRAM=<id>
@@ -42,7 +43,7 @@ source ~/.logos-devnet/env                         # LOGOS_DEVNET_SEQUENCER, LOG
 | `status` | What runs, the chain head, the faucet, programs, account groups and sessions. |
 | `doctor` | Checks the project file, Docker and the image (or git and cargo with `--native`), whether the chain takes the project's settings, the port, the faucet and, when sessions need it, `logosctl`, and says how to fix what fails. |
 | `fund <account> [amount]` | Sends lepta from the faucet to a public account, 10B by default. |
-| `deploy <name> <bin> [--mutable]` | Deploys a program and adds `LOGOS_PROGRAM_<NAME>` and `LOGOS_PROGRAM_<NAME>_HEX` to the env file. Names are lower-case letters, digits and `-`. With `--mutable`, a new build updates it in place. |
+| `deploy <name> <bin> [--mutable]` | Deploys a program, from its `.bin` (what `cargo risczero build` makes, not the bare ELF), and adds `LOGOS_PROGRAM_<NAME>` and `LOGOS_PROGRAM_<NAME>_HEX` to the env file. Names are lower-case letters, digits and `-`. With `--mutable`, a new build updates it in place. |
 | `wallet-config <dir>` | Writes a `wallet_config.json` pointing at the devnet into a new wallet directory. |
 | `env` | Prints the env file. |
 | `logs [-f]` | Prints the sequencer's log. |
@@ -78,7 +79,7 @@ modules = ["chat_module"]
 
 `up` deploys missing programs, makes and funds missing accounts and sessions, and changes nothing the second time (0.6 s). A `mutable` program whose binary changed is updated in place, with the same id. An immutable one keeps its old build, and `up` and `deploy` fail saying so, so tests don't run against it: `reset` deploys the new build. A module added to a session's `modules` is installed into it. `up` checks the whole file before it touches the devnet.
 
-Projects share one devnet, `~/.logos-devnet` on port 3040, unless the file sets `home`, e.g. `home = ".logos-devnet"`, for a devnet of the project's own (give it its own `[devnet] port` too, if another one runs). On a shared devnet, a `[devnet]` section that disagrees with the running chain is refused rather than restarting the chain under the other projects: `down` and `up` apply it. A `reset` there funds every project's account groups again, and each project's next `up` deploys its programs on the new chain.
+Projects share one devnet, `~/.logos-devnet` on port 3040, unless the file sets `home`, e.g. `home = ".logos-devnet"`, for a devnet of the project's own (give it its own `[devnet] port` too, if another one runs). On a shared devnet, a `[devnet]` section that disagrees with the running chain is refused rather than restarting the chain under the other projects: `down` and `up` apply it, or `reset` for `lez` and `dev_mode`, which only a new chain takes. A `reset` there funds every project's account groups again, and each project's next `up` deploys its programs on the new chain.
 
 ## Many accounts
 
@@ -88,7 +89,7 @@ An account group is any number of funded accounts for tests with many users: a h
 logos-devnet accounts new users --count 100 --amount 5000000000
 ```
 
-Its keys live in one LEZ wallet, `~/.logos-devnet/accounts/users/wallet`, which `lez_core` and the LEZ CLI wallet can both use: `LOGOS_DEVNET_ACCOUNTS_USERS_WALLET` in the env file points at it, for `LEE_WALLET_HOME_DIR`. A new chain, from `reset` or a first `up`, makes it forget the old one, as it does for sessions: stop an app that has it open first, or it writes the old chain back. Its `accounts.json` lists every account, and `LOGOS_DEVNET_ACCOUNTS_USERS` points at it:
+Group names follow the rules for program names, and can't end in `-wallet`. A group's keys live in one LEZ wallet, `~/.logos-devnet/accounts/users/wallet`, which `lez_core` and the LEZ CLI wallet can both use: `LOGOS_DEVNET_ACCOUNTS_USERS_WALLET` in the env file points at it, for `LEE_WALLET_HOME_DIR`. A new chain, from `reset` or a first `up`, makes it forget the old one, as it does for sessions: stop an app that has it open first, or it writes the old chain back. Its `accounts.json` lists every account, and `LOGOS_DEVNET_ACCOUNTS_USERS` points at it:
 
 ```json
 {
@@ -143,11 +144,11 @@ Each session runs its own daemon in `~/.logos-devnet/sessions/<name>`, with `lez
 
 Sessions follow the chain. `down` stops their daemons. `up` starts them again, loads their modules and opens their wallets, also after a `--port` change. `reset` funds each account again with what it was created with, and makes each wallet forget the old chain: its sync position and the state of its private accounts. Its keys and accounts stay. `session rm` deletes a session and its wallet.
 
-The catalog's `lez_core` is built for the LEZ release the testnet runs, so sessions match the default `--lez` tag.
+The catalog's `lez_core` 0.5.1 is built on LEZ `v0.3.1`, the default `--lez` tag, so sessions match it.
 
 ## What runs
 
-LEZ's own `sequencer_service` runs, built with two features. `standalone` replaces Bedrock, the L1, with an in-process mock that accepts every block. `prove` runs programs in-process, so you don't need `r0vm`. The default is `v0.3.1`, the release `lez_core` 0.5.1 is built on. `--lez` picks another tag, and a chain only runs one tag: `reset --lez <tag>` to switch.
+LEZ's own `sequencer_service` runs, built with two features. `standalone` replaces Bedrock, the L1, with an in-process mock that accepts every block. `prove` runs programs in-process, so you don't need `r0vm`. The default is `v0.3.1`. `--lez` picks another `v0.3` tag, and a chain only runs one tag: `reset --lez <tag>` to switch. LEZ `v0.4` changes the sequencer's config and commands, and isn't supported yet.
 
 | | devnet | testnet |
 | --- | --- | --- |
@@ -175,9 +176,9 @@ Everything is in `~/.logos-devnet` (or `LOGOS_DEVNET_HOME`):
 
 | Path | |
 | --- | --- |
-| `settings.json` | LEZ tag, runtime, port, block time, faucet |
+| `settings.json` | LEZ tag, runtime, port, block time, transactions per block, dev mode, log filter, faucet |
 | `env` | the env file |
-| `chain/` | the sequencer's config, database and keys. `reset` deletes it. |
+| `chain/` | the sequencer's config, database and keys, and whether the chain runs in dev mode. `reset` deletes it. |
 | `wallet/` | the dev wallet: the faucet and each program's header key. Kept across resets. |
 | `compose.yaml` | the Docker runtime's compose file |
 | `native/` | the native runtime's LEZ checkout, build, log and pid file |
@@ -213,7 +214,7 @@ The repo is a GitHub Action. On a Linux runner it installs `logos-devnet`, start
 - uses: drptbl/logos-devnet@v0.3.4
   with:
     args: --max-txs-per-block 100     # optional, more options for up
-- run: cargo test                     # LOGOS_DEVNET_SEQUENCER, LOGOS_PROGRAM_*, LOGOS_DEVNET_ACCOUNTS_* are set
+- run: cargo test                     # LOGOS_DEVNET_SEQUENCER, LOGOS_PROGRAM_*, LOGOS_DEVNET_ACCOUNTS_*, RISC0_DEV_MODE are set
 - if: failure()
   run: logos-devnet logs              # the sequencer's log, when a test fails
 ```
