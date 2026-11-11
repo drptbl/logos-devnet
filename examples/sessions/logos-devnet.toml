@@ -1,0 +1,10 @@
+# Two logosctl sessions paying each other on a devnet of their own. See README.md.
+home = ".logos-devnet"
+
+[devnet]
+port = 3042       # its own port, so it runs next to the shared devnet on 3040
+dev_mode = true   # fake proofs: a shielded transfer lands in about a second
+
+[sessions.alice]
+
+[sessions.bob]

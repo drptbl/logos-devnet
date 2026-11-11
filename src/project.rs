@@ -378,6 +378,11 @@ modules = ["chat_module"]
             Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/hello-world/logos-devnet.toml");
         let project = Project::load(&file).unwrap();
         assert_eq!(project.accounts["tutorial"].count, 2);
+        let file =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/sessions/logos-devnet.toml");
+        let project = Project::load(&file).unwrap();
+        assert_eq!(project.devnet.dev_mode, Some(true));
+        assert_eq!(project.sessions.len(), 2);
     }
 
     #[test]
