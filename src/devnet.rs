@@ -137,6 +137,28 @@ impl Devnet {
         &self.settings
     }
 
+    /// Refuses `settings` the chain here can't run on: another LEZ tag or dev mode. Its own
+    /// record of its dev mode counts, not settings.json's.
+    fn check_chain_takes(&self, settings: &Settings) -> Result<()> {
+        let chain = Settings {
+            dev_mode: self.home.chain_dev_mode(),
+            ..self.settings.clone()
+        };
+        check_chain_keeps(&chain, settings)
+    }
+
+    /// Whether `up` would take the project file's settings here, as `up` decides it: a running
+    /// shared devnet keeps what it runs with, and a chain keeps its LEZ tag and dev mode. True
+    /// when a chain exists.
+    pub fn check_chain_for_project(&self) -> Result<bool> {
+        let wanted = self.with_project_settings(&UpOptions::default(), self.runtime.running())?;
+        let has_chain = self.home.has_chain();
+        if has_chain {
+            self.check_chain_takes(&wanted)?;
+        }
+        Ok(has_chain)
+    }
+
     /// The settings `up` would start with: the stored ones, with the project's `[devnet]`
     /// section applied.
     pub fn settings_for_up(&self) -> Settings {
@@ -221,12 +243,7 @@ impl Devnet {
         crate::home::check_log_filter(&settings.log_filter)?;
         let continuing = !wipe && self.home.has_chain();
         if continuing {
-            // The chain's own dev mode, not the one in settings.json.
-            let chain = Settings {
-                dev_mode: self.home.chain_dev_mode(),
-                ..self.settings.clone()
-            };
-            check_chain_keeps(&chain, &settings)?;
+            self.check_chain_takes(&settings)?;
         }
         // The devnet as it will run: its runtime is the one that has to read the binaries.
         let mut next = Self::with(self.home.clone(), settings.clone(), self.project.clone());
@@ -1405,6 +1422,25 @@ mod tests {
         let wanted = devnet.settings_for_up();
         assert_eq!(wanted.runtime, RuntimeKind::Native);
         assert_eq!(wanted.port, 4040);
+    }
+
+    #[test]
+    fn a_chain_takes_only_settings_it_can_run_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Home::locate(Some(dir.path().to_path_buf())).unwrap();
+        std::fs::create_dir_all(home.chain_dir()).unwrap();
+        home.record_chain_dev_mode(true).unwrap();
+        let devnet = Devnet::open(home, None).unwrap();
+        let err = devnet
+            .check_chain_takes(&Settings::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("runs in dev mode"), "{err}");
+        let dev = Settings {
+            dev_mode: true,
+            ..Settings::default()
+        };
+        assert!(devnet.check_chain_takes(&dev).is_ok());
     }
 
     #[test]

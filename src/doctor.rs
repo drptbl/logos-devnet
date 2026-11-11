@@ -22,7 +22,7 @@ pub struct Check {
     pub name: String,
     pub ok: bool,
     pub detail: String,
-    /// What to do about it, when it failed.
+    /// What to do about it, when it failed and `detail` doesn't say.
     pub fix: Option<String>,
 }
 
@@ -68,17 +68,22 @@ pub fn run(devnet: &Devnet, project_error: Option<&anyhow::Error>) -> Doctor {
                 fail("docker", "no Docker daemon answers", START_DOCKER)
             });
             let image = settings.image();
-            checks.push(if image_present(&image) {
-                pass("image", format!("{image} is here"))
-            } else if command_ok("docker", &["manifest", "inspect", &image]) {
-                pass("image", format!("{image} will be pulled on `up`"))
-            } else {
-                fail(
-                    "image",
-                    format!("{image} is neither here nor pullable"),
-                    "`up` builds it locally (this takes a while), or check your network",
-                )
-            });
+            // Without a daemon there's nothing to ask; the docker check says so.
+            if docker_reachable() {
+                checks.push(if image_present(&image) {
+                    pass("image", format!("{image} is here"))
+                } else if command_ok("docker", &["manifest", "inspect", &image]) {
+                    pass("image", format!("{image} will be pulled on `up`"))
+                } else {
+                    pass(
+                        "image",
+                        format!(
+                            "{image} isn't published, so `up` builds it locally: the first build \
+                             takes a while"
+                        ),
+                    )
+                });
+            }
         }
         RuntimeKind::Native => {
             for tool in ["git", "cargo"] {
@@ -94,6 +99,18 @@ pub fn run(devnet: &Devnet, project_error: Option<&anyhow::Error>) -> Doctor {
             }
         }
     }
+
+    checks.push(match devnet.check_chain_for_project() {
+        Ok(true) => pass("chain", "takes these settings"),
+        Ok(false) => pass("chain", "none yet: `up` starts one"),
+        // `up`'s refusal says what changes it.
+        Err(e) => Check {
+            name: "chain".into(),
+            ok: false,
+            detail: format!("{e:#}"),
+            fix: None,
+        },
+    });
 
     let running = devnet.running();
     // A running chain holds its own port; `up` moving it elsewhere needs that port free.
