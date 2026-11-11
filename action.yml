@@ -47,7 +47,9 @@ runs:
         START: ${{ inputs.start }}
       run: |
         set -euo pipefail
-        if [ "$RUNNER_OS" != "Linux" ] && [ "$START" = "true" ]; then
+        # GitHub compares `start` without case, in the step that starts the devnet.
+        start=$(printf '%s' "$START" | tr '[:upper:]' '[:lower:]')
+        if [ "$RUNNER_OS" != "Linux" ] && [ "$start" = "true" ]; then
           echo "::error::the devnet runs on Linux runners: it needs Docker. start: \"false\" only installs logos-devnet"
           exit 1
         fi
@@ -79,7 +81,10 @@ runs:
         mkdir -p "$dir"
         cd "$dir"
         url="https://github.com/drptbl/logos-devnet/releases/download/$v/$name.tar.gz"
-        curl -fsSL --retry 3 -o "$name.tar.gz" "$url"
+        if ! curl -fsSL --retry 3 -o "$name.tar.gz" "$url"; then
+          echo "::error::no logos-devnet $v release for $target. Set the version input to a published release"
+          exit 1
+        fi
         curl -fsSL --retry 3 -o "$name.tar.gz.sha256" "$url.sha256"
         if command -v sha256sum >/dev/null; then
           sha256sum -c "$name.tar.gz.sha256"

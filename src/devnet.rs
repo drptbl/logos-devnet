@@ -125,6 +125,11 @@ impl Devnet {
         Rpc::new(self.settings.sequencer_url())
     }
 
+    /// The stored settings: what runs, or last ran.
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
     /// The settings `up` would start with: the stored ones, with the project's `[devnet]`
     /// section applied.
     pub fn settings_for_up(&self) -> Settings {
@@ -780,10 +785,14 @@ impl Devnet {
         }
         let ctl = session.logosctl();
         session.start_daemon(&ctl, self.settings.dev_mode)?;
-        ctl.install(&missing)?;
-        ctl.load(&missing)?;
-        info.modules.extend(missing.iter().cloned());
-        session.save_info(&info)?;
+        // Recorded one at a time, so a module that fails keeps the ones before it.
+        for module in &missing {
+            let one = std::slice::from_ref(module);
+            ctl.install(one)?;
+            ctl.load(one)?;
+            info.modules.push(module.clone());
+            session.save_info(&info)?;
+        }
         Ok(missing)
     }
 
@@ -893,7 +902,8 @@ impl Devnet {
 
     /// Deploys `elf` as program `name` from the dev wallet's header key for that name, so the
     /// program id is the same on every chain this home starts. A `mutable` program whose binary
-    /// changed since is updated in place. An immutable one stays, with a note.
+    /// changed since is updated in place. An immutable one keeps its old build, and that's an
+    /// error: what runs isn't what was asked for.
     fn deploy_program(&self, name: &str, elf: &Path, mutable: bool) -> Result<Program> {
         envfile::check_program_name(name)?;
         let bytes =
@@ -1093,9 +1103,6 @@ impl DeployStep {
     }
 }
 
-/// `mutable` is what's asked for now. Mutability never changes on a chain: an update that made a
-/// program immutable could never be undone, and one asked for by a missing `--mutable` least of
-/// all.
 /// Why a program can't take `elf` on this chain, and what does.
 fn needs_reset(name: &str, elf: &Path, deployed_mutable: bool, mutable: bool) -> String {
     let kind = |mutable| if mutable { "mutable" } else { "immutable" };
@@ -1116,6 +1123,9 @@ fn needs_reset(name: &str, elf: &Path, deployed_mutable: bool, mutable: bool) ->
     }
 }
 
+/// `mutable` is what's asked for now. Mutability never changes on a chain: an update that made a
+/// program immutable could never be undone, and one asked for by a missing `--mutable` least of
+/// all.
 fn deploy_step(
     in_use: bool,
     record: Option<&DeployedProgram>,

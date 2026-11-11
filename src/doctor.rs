@@ -96,7 +96,8 @@ pub fn run(devnet: &Devnet, project_error: Option<&anyhow::Error>) -> Doctor {
     }
 
     let running = devnet.running();
-    checks.push(if running {
+    // A running chain holds its own port; `up` moving it elsewhere needs that port free.
+    checks.push(if running && settings.port == devnet.settings().port {
         pass(
             "port",
             format!("{} serves the devnet", settings.sequencer_url()),
