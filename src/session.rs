@@ -97,6 +97,29 @@ impl Session {
         Logosctl::new(self.logosctl_dir())
     }
 
+    /// There from the start of a new chain until the session's wallet has forgotten the old
+    /// one, so a session that fails on the way forgets it on a later `up`.
+    fn new_chain_mark(&self) -> PathBuf {
+        self.dir.join("new-chain")
+    }
+
+    /// Marks the session as on a new chain. `forget_old_chain` clears it.
+    pub fn mark_new_chain(&self) -> Result<()> {
+        let mark = self.new_chain_mark();
+        std::fs::write(&mark, "").with_context(|| format!("writing {}", mark.display()))
+    }
+
+    /// Makes the session's wallet forget the old chain, if the session is marked as on a new
+    /// one.
+    pub fn forget_old_chain(&self) -> Result<()> {
+        let mark = self.new_chain_mark();
+        if !mark.exists() {
+            return Ok(());
+        }
+        self.logosctl().forget_chain(&self.wallet_storage())?;
+        std::fs::remove_file(&mark).with_context(|| format!("deleting {}", mark.display()))
+    }
+
     /// What an app needs from the session, by variable name.
     pub fn vars(&self, info: &SessionInfo) -> [(&'static str, String); 4] {
         [
@@ -442,9 +465,37 @@ fn forget_chain_in(storage: &Path) -> Result<()> {
             storage.display()
         )
     })?;
-    let next = storage.with_extension("json.new");
-    std::fs::write(&next, forgotten).with_context(|| format!("writing {}", next.display()))?;
-    std::fs::rename(&next, storage).with_context(|| format!("replacing {}", storage.display()))
+    replace_file(storage, forgotten.as_bytes())
+        .with_context(|| format!("replacing {}", storage.display()))
+}
+
+/// Replaces `path` with `contents` in one step, keeping its permissions: it never holds half of
+/// either, and the new file is on disk before it takes the old one's place.
+fn replace_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+    let mode = std::fs::metadata(path)?.permissions().mode() & 0o777;
+    let next = path.with_extension("json.new");
+    let written = (|| {
+        // One left by an earlier failure would keep its own permissions.
+        match std::fs::remove_file(&next) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .open(&next)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+        std::fs::rename(&next, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&next);
+    }
+    written
 }
 
 /// URLs equal but for a trailing `/`: lez_core reports `http://127.0.0.1:3040/`.
@@ -683,6 +734,38 @@ esac"#
         let missing = dir.path().join("none.json");
         ctl.forget_chain(&missing).unwrap();
         assert!(!missing.exists());
+    }
+
+    #[test]
+    fn a_marked_session_forgets_the_old_chain_once() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session::new(dir.path(), "alice").unwrap();
+        std::fs::create_dir_all(session.wallet_dir()).unwrap();
+        let storage = session.wallet_storage();
+        let synced_to = |path: &Path| -> Value {
+            serde_json::from_str::<Value>(&std::fs::read_to_string(path).unwrap()).unwrap()
+                ["last_synced_block"]
+                .clone()
+        };
+        std::fs::write(&storage, SYNCED_STORAGE).unwrap();
+        std::fs::set_permissions(&storage, std::fs::Permissions::from_mode(0o600)).unwrap();
+        // Not marked: nothing changes.
+        session.forget_old_chain().unwrap();
+        assert_eq!(synced_to(&storage), 42);
+        // Marked: forgotten, with the file's permissions kept, and the mark cleared.
+        session.mark_new_chain().unwrap();
+        session.forget_old_chain().unwrap();
+        assert_eq!(synced_to(&storage), 0);
+        let mode = std::fs::metadata(&storage).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert!(!session.new_chain_mark().exists());
+        assert!(!storage.with_extension("json.new").exists());
+        // Once only: a later sync on the new chain stays.
+        std::fs::write(&storage, SYNCED_STORAGE).unwrap();
+        session.forget_old_chain().unwrap();
+        assert_eq!(synced_to(&storage), 42);
     }
 
     #[test]

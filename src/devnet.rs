@@ -456,7 +456,14 @@ impl Devnet {
     /// session is tried; failures are reported together after, with the chain already up.
     fn resume_sessions(&self, new_chain: bool) -> Result<()> {
         let mut failed = Vec::new();
-        for session in self.sessions() {
+        let sessions = self.sessions();
+        if new_chain {
+            // All of them first: one that fails below forgets the old chain on a later `up`.
+            for session in &sessions {
+                session.mark_new_chain()?;
+            }
+        }
+        for session in sessions {
             let resumed = session.info().and_then(|info| {
                 // Funding only needs the dev wallet: a daemon that won't start doesn't cost the
                 // account its funds.
@@ -465,12 +472,9 @@ impl Devnet {
                 } else {
                     Ok(())
                 };
+                session.forget_old_chain()?;
                 self.write_session_wallet_config(&session)?;
                 let ctl = session.logosctl();
-                // Before anything else can fail: the next `up` sees no new chain to forget.
-                if new_chain {
-                    ctl.forget_chain(&session.wallet_storage())?;
-                }
                 ctl.start()?;
                 ctl.load(&info.modules)?;
                 ctl.ensure_wallet(
