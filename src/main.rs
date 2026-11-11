@@ -18,6 +18,7 @@ mod report;
 mod rpc;
 mod runtime;
 mod session;
+mod wallet_storage;
 
 use devnet::{DEFAULT_FUND, Devnet, UpOptions};
 use home::Home;
