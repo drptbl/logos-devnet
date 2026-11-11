@@ -93,3 +93,16 @@ jobs:
           start: "false"
       - run: logos-devnet --version | grep -q '^logos-devnet 0.1.0$'
 
+  # The install path on macOS, which only installs: there's no Docker to start the devnet.
+  action-install-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./
+        with:
+          version: v0.3.0
+          start: "false"
+      - run: logos-devnet --version | grep -q '^logos-devnet 0.3.0$'
+

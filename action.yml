@@ -7,8 +7,9 @@ branding:
 inputs:
   version:
     description: >-
-      The logos-devnet release to install, e.g. v0.2.0. Empty installs the release this action
-      was used at (`uses: drptbl/logos-devnet@v0.2.0`), or uses a logos-devnet already on PATH.
+      The logos-devnet release to install, e.g. v0.3.1. Empty installs the release this action
+      was used at (`uses: drptbl/logos-devnet@v0.3.1`), or uses a logos-devnet already on PATH,
+      or, pinned to a commit, installs the release that commit's Cargo.toml names.
     required: false
     default: ""
   config:
@@ -26,7 +27,7 @@ inputs:
     required: false
     default: ""
   start:
-    description: Start the devnet. "false" only installs logos-devnet.
+    description: Start the devnet. "false" only installs logos-devnet, which works on macOS too.
     required: false
     default: "true"
 
@@ -43,32 +44,35 @@ runs:
       env:
         VERSION: ${{ inputs.version }}
         ACTION_REF: ${{ github.action_ref }}
+        START: ${{ inputs.start }}
       run: |
         set -euo pipefail
-        if [ "$RUNNER_OS" != "Linux" ]; then
-          echo "::error::the logos-devnet action runs on Linux runners: it needs Docker"
+        if [ "$RUNNER_OS" != "Linux" ] && [ "$START" = "true" ]; then
+          echo "::error::the devnet runs on Linux runners: it needs Docker. start: \"false\" only installs logos-devnet"
           exit 1
         fi
         v="$VERSION"
         if [ -z "$v" ] && [[ "$ACTION_REF" =~ ^v[0-9] ]]; then
           v="$ACTION_REF"
         fi
-        if [ -z "$v" ]; then
-          if ! command -v logos-devnet >/dev/null; then
-            echo "::error::set the version input, or put logos-devnet on PATH first"
-            exit 1
-          fi
+        if [ -z "$v" ] && command -v logos-devnet >/dev/null; then
           echo "Using $(command -v logos-devnet): $(logos-devnet --version)"
           exit 0
+        fi
+        if [ -z "$v" ]; then
+          # Pinned to a commit: the release that commit's Cargo.toml names.
+          v="v$(sed -n 's/^version = "\(.*\)"$/\1/p' "$GITHUB_ACTION_PATH/Cargo.toml" | head -1)"
         fi
         if [[ ! "$v" =~ ^v[0-9]+(\.[0-9]+)*(-[A-Za-z0-9.]+)?$ ]]; then
           echo "::error::not a logos-devnet version: $v"
           exit 1
         fi
-        case "$(uname -m)" in
-          x86_64) target=x86_64-unknown-linux-musl ;;
-          aarch64 | arm64) target=aarch64-unknown-linux-musl ;;
-          *) echo "::error::no logos-devnet build for $(uname -m)"; exit 1 ;;
+        case "$RUNNER_OS-$(uname -m)" in
+          Linux-x86_64) target=x86_64-unknown-linux-musl ;;
+          Linux-aarch64 | Linux-arm64) target=aarch64-unknown-linux-musl ;;
+          macOS-x86_64) target=x86_64-apple-darwin ;;
+          macOS-arm64) target=aarch64-apple-darwin ;;
+          *) echo "::error::no logos-devnet build for $RUNNER_OS on $(uname -m)"; exit 1 ;;
         esac
         name="logos-devnet-$v-$target"
         dir="$RUNNER_TEMP/logos-devnet"
@@ -77,7 +81,11 @@ runs:
         url="https://github.com/drptbl/logos-devnet/releases/download/$v/$name.tar.gz"
         curl -fsSL --retry 3 -o "$name.tar.gz" "$url"
         curl -fsSL --retry 3 -o "$name.tar.gz.sha256" "$url.sha256"
-        sha256sum -c "$name.tar.gz.sha256"
+        if command -v sha256sum >/dev/null; then
+          sha256sum -c "$name.tar.gz.sha256"
+        else
+          shasum -a 256 -c "$name.tar.gz.sha256"
+        fi
         tar -xzf "$name.tar.gz"
         echo "$dir/$name" >> "$GITHUB_PATH"
         "$dir/$name/logos-devnet" --version
