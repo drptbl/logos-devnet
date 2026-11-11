@@ -63,7 +63,7 @@ pub struct UpOptions {
     #[arg(long, num_args = 0..=1, default_missing_value = "true", value_name = "BOOL")]
     pub dev_mode: Option<bool>,
     /// The sequencer's log filter, as `RUST_LOG` takes it: e.g. `debug`, or
-    /// `info,sequencer_core=debug`. The default is `info,kameo=warn`.
+    /// `info,sequencer_core=debug`.
     #[arg(long)]
     pub log_filter: Option<String>,
     /// Build the image or binaries even if they exist. Not remembered.
@@ -256,7 +256,7 @@ impl Devnet {
             self.write_env(&self.read_env().unwrap_or_default())?;
             let applied = self.apply_project();
             let resumed = self.resume_sessions(false);
-            return with_status(self.status(), all_of([applied, resumed]));
+            return with_status(self.status(), after_start([applied, resumed]));
         }
         // The running sequencer holds its own port, and gives it up when it stops.
         if !(running && settings.port == self.settings.port) {
@@ -298,7 +298,7 @@ impl Devnet {
         // A new chain starts every session's account at zero.
         let resumed = next.resume_sessions(!continuing);
         let applied = next.apply_project();
-        with_status(next.status(), all_of([resumed, applied]))
+        with_status(next.status(), after_start([resumed, applied]))
     }
 
     /// The stored settings with the project's `[devnet]` section applied. A shared devnet that
@@ -406,7 +406,7 @@ impl Devnet {
             }
         }
         if !failed.is_empty() {
-            bail!("the devnet is up, but these failed: {}", failed.join(", "));
+            bail!("these failed: {}", failed.join(", "));
         }
         Ok(())
     }
@@ -538,8 +538,8 @@ impl Devnet {
                 self.write_session_wallet_config(&session)?;
                 let ctl = session.logosctl();
                 session.start_daemon(&ctl, self.settings.dev_mode)?;
-                ctl.load(&info.modules)?;
-                ctl.ensure_wallet(
+                ctl.resume(
+                    &info.modules,
                     &session.wallet_config(),
                     &session.wallet_storage(),
                     &self.settings.sequencer_url(),
@@ -553,7 +553,7 @@ impl Devnet {
         }
         if !failed.is_empty() {
             bail!(
-                "the devnet is up, but sessions {} failed. If one keeps failing, \
+                "sessions {} failed. If one keeps failing, \
                  `logos-devnet session rm <name>` and make it again",
                 failed.join(", ")
             );
@@ -1041,21 +1041,25 @@ impl Devnet {
     }
 }
 
-/// `status` when everything worked. When something failed, the status goes to stderr (stdout
-/// stays clean for `--json`) and the error is returned.
-/// Every failure among `outcomes`, one per line, or success.
-fn all_of<const N: usize>(outcomes: [Result<()>; N]) -> Result<()> {
+/// `up`'s outcome once the devnet runs: every failure among `outcomes`, after one note that the
+/// devnet itself is up.
+fn after_start<const N: usize>(outcomes: [Result<()>; N]) -> Result<()> {
     let failures: Vec<String> = outcomes
         .into_iter()
         .filter_map(|outcome| outcome.err().map(|e| format!("{e:#}")))
         .collect();
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!(failures.join("\n")))
+    match failures.as_slice() {
+        [] => Ok(()),
+        [one] => Err(anyhow::anyhow!("the devnet is up, but {one}")),
+        many => Err(anyhow::anyhow!(
+            "the devnet is up, but:\n- {}",
+            many.join("\n- ")
+        )),
     }
 }
 
+/// `status` when everything worked. When something failed, the status goes to stderr (stdout
+/// stays clean for `--json`) and the error is returned.
 fn with_status(status: Status, outcome: Result<()>) -> Result<Status> {
     match outcome {
         Ok(()) => Ok(status),
@@ -1440,16 +1444,22 @@ mod tests {
 
     #[test]
     fn reports_every_failure_not_only_the_first() {
-        assert!(all_of([Ok(()), Ok(())]).is_ok());
-        let one = all_of([Ok(()), Err(anyhow::anyhow!("sessions alice failed"))]);
-        assert_eq!(one.unwrap_err().to_string(), "sessions alice failed");
-        let both = all_of([
+        assert!(after_start([Ok(()), Ok(())]).is_ok());
+        let one = after_start([Ok(()), Err(anyhow::anyhow!("sessions alice failed"))]);
+        assert_eq!(
+            one.unwrap_err().to_string(),
+            "the devnet is up, but sessions alice failed"
+        );
+        let both = after_start([
             Err(anyhow::anyhow!("these failed: program shop")),
             Err(anyhow::anyhow!("sessions alice failed")),
         ])
         .unwrap_err()
         .to_string();
-        assert_eq!(both, "these failed: program shop\nsessions alice failed");
+        assert_eq!(
+            both,
+            "the devnet is up, but:\n- these failed: program shop\n- sessions alice failed"
+        );
     }
 
     #[test]
