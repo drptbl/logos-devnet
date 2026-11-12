@@ -1,0 +1,11 @@
+# Two logosctl sessions sharing a file through a local Logos Storage network. See README.md.
+home = ".logos-devnet"
+
+[devnet]
+port = 3045       # its own port, so it runs next to the shared devnet on 3040
+
+[storage]         # a storage node in the hub, which every session's node bootstraps from
+
+[sessions.alice]
+
+[sessions.bob]
