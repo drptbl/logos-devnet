@@ -87,6 +87,29 @@ enum Command {
     WalletConfig { dir: PathBuf },
     /// Print the env file: `source <(logos-devnet env)`.
     Env,
+    /// Run a command with the devnet's env, and a session's with --session:
+    /// `logos-devnet exec -- cargo test`.
+    Exec {
+        /// Add this session's variables, e.g. LOGOSCTL_CONFIG_DIR.
+        #[arg(long)]
+        session: Option<String>,
+        /// The command and its arguments, after `--`.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        command: Vec<String>,
+    },
+    /// Show where a transaction landed, by its 64-hex hash.
+    Tx {
+        hash: String,
+        /// Wait until a block holds it, and fail after --timeout.
+        #[arg(long)]
+        wait: bool,
+        /// Seconds --wait waits.
+        #[arg(long, default_value_t = 60)]
+        timeout: u64,
+    },
+    /// Show an account: balance, nonce and data, its id in base58 and hex. Takes
+    /// `Public/<id>`, base58, hex or a deployed program's name.
+    Account { account: String },
     /// Print the sequencer's log, or a session's or the hub's.
     Logs {
         #[arg(short, long)]
@@ -157,6 +180,9 @@ impl Command {
                 | Command::Doctor
                 | Command::WalletConfig { .. }
                 | Command::Env
+                | Command::Exec { .. }
+                | Command::Tx { .. }
+                | Command::Account { .. }
                 | Command::Logs { .. }
                 | Command::Accounts(AccountsCommand::Ls)
                 | Command::Session(SessionCommand::Ls | SessionCommand::Env { .. })
@@ -217,6 +243,22 @@ fn main() -> Result<()> {
         },
         Command::WalletConfig { dir } => emit(&devnet.write_project_wallet_config(&dir)?, json),
         Command::Env => emit(&devnet.env_vars()?, json),
+        Command::Exec { session, command } => {
+            // Replaces this process, so the command gets Ctrl-C and its exit status as if run
+            // directly. `exec` only returns when it couldn't start the command.
+            use std::os::unix::process::CommandExt;
+            let mut cmd = devnet.exec_command(session.as_deref(), &command)?;
+            Err(anyhow::Error::from(cmd.exec()).context(format!("could not run {}", command[0])))
+        }
+        Command::Tx {
+            hash,
+            wait,
+            timeout,
+        } => emit(
+            &devnet.tx(&hash, wait.then(|| std::time::Duration::from_secs(timeout)))?,
+            json,
+        ),
+        Command::Account { account } => emit(&devnet.account(&account)?, json),
         Command::Logs {
             follow,
             session,

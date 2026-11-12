@@ -33,8 +33,8 @@ Alice sends Bob 1000 lepta. Amounts go in as 16 little-endian bytes, in hex:
 
 ```bash
 amount=e8030000000000000000000000000000
-call transfer_public "str:$alice" "str:$bob" "str:$amount"
-sleep 2
+hash=$(call transfer_public "str:$alice" "str:$bob" "str:$amount" | jq -r .tx_hash)
+logos-devnet tx --wait "$hash"   # <hash>  in block <n>
 call get_balance "str:$bob" true   # 10000001000
 ```
 
@@ -42,11 +42,9 @@ Then she shields 1000 lepta into a new private account of her own. Her session p
 
 ```bash
 private=$(call create_account_private)
-call transfer_shielded_owned "str:$alice" "str:$private" "str:$amount"
-sleep 2
-head=$(curl -fsS "$LOGOS_DEVNET_SEQUENCER" -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"getLastBlockId","params":[]}' | jq -r .result)
-call sync_to_block "$head"
+hash=$(call transfer_shielded_owned "str:$alice" "str:$private" "str:$amount" | jq -r .tx_hash)
+block=$(logos-devnet tx --wait --json "$hash" | jq .block)
+call sync_to_block "$block"
 call get_balance "str:$private" false   # 1000
 ```
 

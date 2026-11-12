@@ -1,6 +1,7 @@
 //! What each command reports: printed for people, or as JSON with `--json` for scripts and
 //! agents. Field names are part of the CLI's interface; the README lists them.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::Serialize;
@@ -72,6 +73,27 @@ pub struct Sequencer {
 }
 
 #[derive(Debug, Serialize)]
+pub struct Transaction {
+    pub hash: String,
+    /// The block that holds it, once one does.
+    pub block: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Account {
+    /// `Public/<base58>`.
+    pub account: String,
+    /// The same id as 64 hex digits, as `lez_core` takes it.
+    pub hex: String,
+    pub balance: u128,
+    pub nonce: u128,
+    /// Whether it signed a transaction or holds data: a fresh account does neither.
+    pub in_use: bool,
+    /// The bytes each program keeps in it, by program id. The native token's is the balance.
+    pub data: BTreeMap<String, usize>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct Balance {
     /// `Public/<base58>`.
     pub account: String,
@@ -135,6 +157,10 @@ pub struct EnvVars(Vec<(String, String)>);
 impl EnvVars {
     pub fn new(vars: Vec<(String, String)>) -> Self {
         Self(vars)
+    }
+
+    pub fn vars(&self) -> &[(String, String)] {
+        &self.0
     }
 }
 
@@ -230,6 +256,31 @@ impl Report for Status {
         }
         if let Some(env) = &self.env_file {
             out += &format!("env        {}\n", env.display());
+        }
+        out
+    }
+}
+
+impl Report for Transaction {
+    fn human(&self) -> String {
+        match self.block {
+            Some(block) => format!("{}  in block {block}\n", self.hash),
+            None => format!("{}  in no block yet\n", self.hash),
+        }
+    }
+}
+
+impl Report for Account {
+    fn human(&self) -> String {
+        let mut out = format!(
+            "{}\n  hex      {}\n  balance  {} lepta\n  nonce    {}\n",
+            self.account, self.hex, self.balance, self.nonce
+        );
+        for (program, bytes) in &self.data {
+            out += &format!("  data     {program}: {bytes} bytes\n");
+        }
+        if !self.in_use {
+            out += "  unused: no transaction signed, no data held\n";
         }
         out
     }

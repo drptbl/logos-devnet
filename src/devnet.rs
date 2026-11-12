@@ -1276,6 +1276,103 @@ impl Devnet {
         Ok(labelled(&list, label))
     }
 
+    /// Where the transaction whose hash is `hash` landed. With `wait`, polls until a block
+    /// holds it, and fails once `wait` has passed.
+    pub fn tx(&self, hash: &str, wait: Option<Duration>) -> Result<report::Transaction> {
+        let hash = hash.trim_start_matches("0x").to_ascii_lowercase();
+        if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+            bail!(
+                "a transaction hash is 64 hex digits, as lez_core's tx_hash and the wallet print it"
+            );
+        }
+        let rpc = self.rpc();
+        let Some(wait) = wait else {
+            let block = rpc.transaction_block(&hash)?;
+            return Ok(report::Transaction { hash, block });
+        };
+        // A failed request is tried again until the deadline, like a block that's still to come.
+        let deadline = Instant::now() + wait;
+        loop {
+            let last = match rpc.transaction_block(&hash) {
+                Ok(Some(block)) => {
+                    return Ok(report::Transaction {
+                        hash,
+                        block: Some(block),
+                    });
+                }
+                Ok(None) => format!("transaction {hash} is in no block"),
+                Err(e) => format!("{e:#}"),
+            };
+            if Instant::now() > deadline {
+                bail!("{last} after {} s", wait.as_secs());
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+
+    /// An account's state. `account` is `Public/<base58>`, base58, 64 hex digits as
+    /// `lez_core` prints ids, or a deployed program's name.
+    pub fn account(&self, account: &str) -> Result<report::Account> {
+        let id = self.account_id(account)?;
+        let rpc = self.rpc();
+        let state = rpc.account(&id)?;
+        let data = state["data"]["shards"]
+            .as_object()
+            .map(|shards| {
+                shards
+                    .iter()
+                    .map(|(program, bytes)| (program.clone(), bytes.as_array().map_or(0, Vec::len)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(report::Account {
+            account: id.wallet_form(),
+            hex: id.hex(),
+            balance: rpc.balance(&id)?,
+            nonce: state["nonce"].as_u64().map_or(0, u128::from),
+            in_use: crate::rpc::in_use(&state),
+            data,
+        })
+    }
+
+    /// The id `account` names: a deployed program's name, 64 hex digits (`0x` allowed), or
+    /// `Public/<base58>` or base58. A 32-byte id is at most 44 base58 digits, so the forms
+    /// can't be mistaken for each other.
+    fn account_id(&self, account: &str) -> Result<PublicId> {
+        if let Some(id) = self
+            .read_env()
+            .ok()
+            .and_then(|env| env.programs.get(account).cloned())
+        {
+            return Ok(id);
+        }
+        let hex = account.trim_start_matches("0x");
+        if hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return PublicId::from_hex(hex);
+        }
+        PublicId::parse(account)
+    }
+
+    /// `command` with the devnet's env, plus `session`'s when given, so scripts and Makefiles
+    /// need no `source`.
+    pub fn exec_command(
+        &self,
+        session: Option<&str>,
+        command: &[String],
+    ) -> Result<std::process::Command> {
+        let vars = match session {
+            Some(name) => self.session_env(name)?,
+            None => self.env_vars()?,
+        };
+        let (program, args) = command
+            .split_first()
+            .context("exec needs a command after --")?;
+        let mut cmd = std::process::Command::new(program);
+        cmd.args(args)
+            .envs(vars.vars().iter().map(|(var, value)| (var, value)));
+        Ok(cmd)
+    }
+
     pub fn env_vars(&self) -> Result<EnvVars> {
         Ok(EnvVars::new(self.read_env()?.vars()))
     }
@@ -1637,6 +1734,74 @@ mod tests {
             &format!("token = {{ url = \"https://example.com/t.bin\", sha256 = \"{sha}\" }}"),
         );
         assert!(released.needs_curl());
+    }
+
+    #[test]
+    fn refuses_what_isnt_a_transaction_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let devnet = devnet_in(&dir.path().join("home"));
+        for bad in ["zz", "abc", &"g".repeat(64), &"a".repeat(63)] {
+            let err = devnet.tx(bad, None).unwrap_err();
+            assert!(err.to_string().contains("64 hex digits"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn exec_runs_a_command_with_the_devnets_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let devnet = devnet_in(&dir.path().join("home"));
+        std::fs::create_dir_all(dir.path().join("home")).unwrap();
+        devnet.write_env(&Env::default()).unwrap();
+        let command = vec!["sh".to_owned(), "-c".to_owned(), "exit 7".to_owned()];
+        let mut cmd = devnet.exec_command(None, &command).unwrap();
+        let sequencer = devnet.settings.sequencer_url();
+        assert!(
+            cmd.get_envs()
+                .any(|(var, value)| var == "LOGOS_DEVNET_SEQUENCER"
+                    && value == Some(std::ffi::OsStr::new(&sequencer)))
+        );
+        assert!(
+            cmd.get_envs().any(|(var, _)| var == "RISC0_DEV_MODE"),
+            "always set"
+        );
+        assert_eq!(cmd.status().unwrap().code(), Some(7));
+        assert!(devnet.exec_command(Some("nobody"), &command).is_err());
+        assert!(devnet.exec_command(None, &[]).is_err());
+    }
+
+    #[test]
+    fn names_an_account_by_program_hex_or_base58() {
+        let dir = tempfile::tempdir().unwrap();
+        let devnet = devnet_in(&dir.path().join("home"));
+        std::fs::create_dir_all(dir.path().join("home")).unwrap();
+        let id = PublicId::parse(ID).unwrap();
+        let mut env = Env::default();
+        env.programs.insert("escrow".into(), id.clone());
+        devnet.write_env(&env).unwrap();
+        for form in [
+            "escrow".to_owned(),
+            ID.to_owned(),
+            format!("Public/{ID}"),
+            id.hex(),
+            format!("0x{}", id.hex()),
+        ] {
+            assert_eq!(devnet.account_id(&form).unwrap(), id, "{form}");
+        }
+        assert!(devnet.account_id("nothing").is_err());
+    }
+
+    #[test]
+    fn tx_wait_gives_up_after_its_time_even_without_an_rpc() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut devnet = devnet_in(&dir.path().join("home"));
+        // A port nothing listens on: every request fails, and the wait tries again.
+        devnet.settings.port = free_port().unwrap();
+        let started = Instant::now();
+        let err = devnet
+            .tx(&"ab".repeat(32), Some(Duration::from_secs(1)))
+            .unwrap_err();
+        assert!(err.to_string().contains("after 1 s"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]
