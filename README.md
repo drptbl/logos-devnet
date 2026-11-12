@@ -13,7 +13,7 @@ cargo install --locked logos-devnet
 Or take a binary from the [latest release](https://github.com/drptbl/logos-devnet/releases/latest), built for macOS (`aarch64-apple-darwin`, `x86_64-apple-darwin`) and Linux (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, static, so any distribution), and check it against its `.sha256`:
 
 ```bash
-v=v0.4.4 t=aarch64-apple-darwin
+v=v0.4.5 t=aarch64-apple-darwin
 curl -fsSL --remote-name-all https://github.com/drptbl/logos-devnet/releases/download/$v/logos-devnet-$v-$t.tar.gz{,.sha256}
 shasum -a 256 -c logos-devnet-$v-$t.tar.gz.sha256 \
   && tar -xzf logos-devnet-$v-$t.tar.gz \
@@ -253,7 +253,7 @@ With `--json`, a command prints one JSON document and nothing else on stdout. No
 The repo is a GitHub Action. On a Linux runner it installs `logos-devnet`, starts the devnet from your project file and exports the env into the job:
 
 ```yaml
-- uses: drptbl/logos-devnet@v0.4.4
+- uses: drptbl/logos-devnet@v0.4.5
   with:
     args: --max-txs-per-block 100     # optional, more options for up
 - run: cargo test                     # LOGOS_DEVNET_SEQUENCER, LOGOS_PROGRAM_*, LOGOS_DEVNET_ACCOUNTS_*, RISC0_DEV_MODE are set
