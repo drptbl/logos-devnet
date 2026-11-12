@@ -410,8 +410,8 @@ impl Devnet {
             bail!(
                 "sessions and the messaging hub need logosctl, the Logos Core CLI, on your PATH. \
                  Install it, or drop what you no longer need: a session with `logos-devnet \
-                 session rm <name>` and from [sessions] in the project file, the hub from \
-                 [messaging] and, after `down`, the home's messaging/ directory"
+                 session rm <name>` and from [sessions] in the project file, and the hub \
+                 from [messaging], then `logos-devnet messaging rm`"
             );
         }
         let hub = self.hub();
@@ -420,8 +420,8 @@ impl Devnet {
                 if port_free(port).is_err() {
                     bail!(
                         "port {port} on 127.0.0.1, which the messaging hub keeps, is taken. Free \
-                         it, or delete {} to give the hub new ports and peer ids",
-                        self.home.messaging_dir().display()
+                         it, or `logos-devnet messaging rm` and `up` give the hub new ports and \
+                         peer ids"
                     );
                 }
             }
@@ -1054,6 +1054,34 @@ impl Devnet {
         })
     }
 
+    /// Stops the messaging hub and deletes it, and drops its variables from the env file.
+    pub fn messaging_rm(&self) -> Result<Done> {
+        let env = if self.home.env_file().exists() {
+            Some(self.read_env()?)
+        } else {
+            None
+        };
+        let exported = env.as_ref().is_some_and(|env| env.messaging.is_some());
+        if !self.home.messaging_dir().exists() && !exported {
+            bail!("this devnet has no messaging hub");
+        }
+        if self.home.messaging_dir().exists() {
+            self.hub().remove()?;
+        }
+        if let Some(env) = env {
+            self.write_env(&env)?;
+        }
+        let message = match self.project.as_ref().filter(|p| p.messaging) {
+            Some(project) => format!(
+                "Removed the messaging hub. {} asks for one, so the next `up` starts a new hub, \
+                 with new ports and peer ids.",
+                project.path.display()
+            ),
+            None => "Removed the messaging hub.".to_owned(),
+        };
+        Ok(Done { message })
+    }
+
     fn existing_session(&self, name: &str) -> Result<Session> {
         let session = Session::new(&self.home.sessions_dir(), name)?;
         if !session.exists() {
@@ -1512,6 +1540,50 @@ mod tests {
         let hub = env.messaging.expect("the hub's addresses");
         assert_eq!(hub.delivery, "/ip4/127.0.0.1/tcp/1/p2p/A");
         assert_eq!(hub.discovery, "/ip4/127.0.0.1/tcp/2/p2p/B");
+    }
+
+    #[test]
+    fn removing_the_hub_drops_its_variables() {
+        let dir = tempfile::tempdir().unwrap();
+        let devnet = devnet_with_file(dir.path(), "");
+        std::fs::create_dir_all(devnet.home.messaging_dir()).unwrap();
+        // Ports nothing holds, as after the hub's daemon stopped.
+        let free = || {
+            std::net::TcpListener::bind(("127.0.0.1", 0))
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port()
+        };
+        let (a, b) = (free(), free());
+        std::fs::write(
+            devnet.home.messaging_dir().join("hub.json"),
+            format!(
+                r#"{{"delivery_port":{a},"discovery_port":{b},"delivery_key":"","discovery_key":"",
+                    "addresses":{{"delivery":"/ip4/127.0.0.1/tcp/{a}/p2p/A","discovery":"/ip4/127.0.0.1/tcp/{b}/p2p/B"}}}}"#
+            ),
+        )
+        .unwrap();
+        devnet.write_env(&Env::default()).unwrap();
+        assert!(devnet.read_env().unwrap().messaging.is_some());
+        devnet.messaging_rm().unwrap();
+        assert!(!devnet.home.messaging_dir().exists());
+        assert!(devnet.read_env().unwrap().messaging.is_none());
+        assert!(devnet.messaging_rm().is_err(), "nothing left to remove");
+    }
+
+    #[test]
+    fn says_when_the_next_up_makes_a_new_hub() {
+        let dir = tempfile::tempdir().unwrap();
+        let devnet = devnet_with_file(dir.path(), "[messaging]\n");
+        std::fs::create_dir_all(devnet.home.messaging_dir()).unwrap();
+        let done = devnet.messaging_rm().unwrap();
+        assert!(
+            done.message.contains("the next `up` starts a new hub"),
+            "{}",
+            done.message
+        );
+        assert!(!devnet.home.messaging_dir().exists());
     }
 
     #[test]

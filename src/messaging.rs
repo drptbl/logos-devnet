@@ -152,6 +152,24 @@ impl Hub {
         }
     }
 
+    /// Stops the hub and deletes it: its ports, keys and message store. A daemon that still
+    /// holds the hub's ports after `stop` keeps it, since nothing could stop it once deleted.
+    pub fn remove(&self) -> Result<()> {
+        self.stop()?;
+        for port in self.ports().into_iter().flatten() {
+            if crate::devnet::port_free(port).is_err() {
+                bail!(
+                    "port {port} on 127.0.0.1, which the messaging hub listens on, is still \
+                     taken, so its daemon may still run. Stop it with \
+                     `LOGOSCTL_CONFIG_DIR={} logosctl daemon stop`, then try again",
+                    self.dir.join("logosctl").display()
+                );
+            }
+        }
+        std::fs::remove_dir_all(&self.dir)
+            .with_context(|| format!("deleting {}", self.dir.display()))
+    }
+
     /// Makes the hub run: picks its ports and keys the first time, starts its daemon, and
     /// creates each node that isn't there yet, e.g. after the daemon restarted.
     pub fn ensure(&self, dev_mode: bool) -> Result<Addresses> {
@@ -464,6 +482,32 @@ esac"#
                 discovery: false
             }
         );
+    }
+
+    #[test]
+    fn keeps_a_hub_whose_ports_are_still_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub(dir.path(), true);
+        let held = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        hub.save(&State {
+            delivery_port: held.local_addr().unwrap().port(),
+            ..state()
+        })
+        .unwrap();
+        let err = hub.remove().unwrap_err();
+        assert!(err.to_string().contains("still taken"), "{err}");
+        assert!(hub.exists());
+    }
+
+    #[test]
+    fn removing_it_deletes_its_keys_and_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub(dir.path(), true);
+        std::fs::write(hub.dir.join("store.sqlite3"), "").unwrap();
+        hub.remove().unwrap();
+        assert!(!hub.dir.exists());
+        assert!(!hub.exists());
+        assert!(calls(dir.path()).contains("daemon stop"), "stopped first");
     }
 
     #[test]

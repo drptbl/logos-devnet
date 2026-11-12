@@ -182,7 +182,7 @@ An empty `[messaging]` table in the project file gives the devnet a local messag
 
 Create your app's delivery node from `LOGOS_DEVNET_DELIVERY_CONFIG` before anything else in that daemon creates one: the first `createNode` decides a daemon's network, and a module that creates its own uses the public one. Two apps whose nodes use the hub exchange messages through it. With only the hub as a peer, their nodes report `PartiallyConnected`.
 
-The hub keeps its ports and peer ids, so the variables stay the same across `down`, `up` and `reset`. `reset` keeps its message store too. `up` brings the hub's nodes back when its daemon restarted, and `down` stops it. `status` shows whether each node runs. Once a devnet has a hub, `up` runs it for every project sharing that devnet. To remove it, drop `[messaging]` from every project file, `down`, and delete the home's `messaging/`.
+The hub keeps its ports and peer ids, so the variables stay the same across `down`, `up` and `reset`. `reset` keeps its message store too. `up` brings the hub's nodes back when its daemon restarted, and `down` stops it. `status` shows whether each node runs. Once a devnet has a hub, `up` runs it for every project sharing that devnet: `logos-devnet messaging rm` stops and deletes it, and the next `up` of a project that asks for one starts a new hub, with new ports and peer ids.
 
 Chat isn't fully local yet. `chat_module` 0.3.0 runs over the hub's delivery node once your app created it, but it still looks up keys at a hard-coded public registry.
 
