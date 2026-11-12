@@ -13,7 +13,7 @@ cargo install --locked logos-devnet
 Or take a binary from the [latest release](https://github.com/drptbl/logos-devnet/releases/latest), built for macOS (`aarch64-apple-darwin`, `x86_64-apple-darwin`) and Linux (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, static, so any distribution), and check it against its `.sha256`:
 
 ```bash
-v=v0.6.1 t=aarch64-apple-darwin
+v=v0.7.0 t=aarch64-apple-darwin
 curl -fsSL --remote-name-all https://github.com/drptbl/logos-devnet/releases/download/$v/logos-devnet-$v-$t.tar.gz{,.sha256}
 shasum -a 256 -c logos-devnet-$v-$t.tar.gz.sha256 \
   && tar -xzf logos-devnet-$v-$t.tar.gz \
@@ -46,6 +46,9 @@ source ~/.logos-devnet/env                         # LOGOS_DEVNET_SEQUENCER, LOG
 | `deploy <name> <bin> [--mutable]` | Deploys a program, from its `.bin` (what `cargo risczero build` makes, not the bare ELF), and adds `LOGOS_PROGRAM_<NAME>` and `LOGOS_PROGRAM_<NAME>_HEX` to the env file. Names are lower-case letters, digits and `-`. With `--mutable`, a new build updates it in place. |
 | `wallet-config <dir>` | Writes a `wallet_config.json` pointing at the devnet into a new wallet directory. |
 | `env` | Prints the env file. |
+| `exec [--session <name>] -- <cmd>` | Runs a command with the devnet's env, and a session's with `--session`, and exits with its code: no `source` in Makefiles and scripts. |
+| `tx <hash> [--wait] [--timeout <s>]` | Shows which block holds a transaction, by its 64-hex hash. `--wait` waits until one does, instead of a `sleep`, and fails after 60 s. |
+| `account <id>` | Shows an account's balance, nonce and data, and its id in base58 and hex. Takes `Public/<id>`, base58, hex as `lez_core` prints it, or a deployed program's name. |
 | `logs [-f] [--session <name> \| --hub]` | Prints the sequencer's log, or a session's or the hub's daemon log, with its modules' output. |
 | `session new <name> [--module <m>]` | Makes a `logosctl` session with a funded devnet wallet, see below. |
 | `session ls`, `session env <name>`, `session rm <name>` | Lists sessions, prints one's env to `source`, deletes one. |
@@ -258,6 +261,8 @@ With `--json`, a command prints one JSON document and nothing else on stdout. No
 | `up`, `reset`, `status` | `lez`, `runtime`, `sequencer` (`url`, `running`, `runtime_answered`, `block`, `max_txs_per_block`, `block_time`, `dev_mode`), `faucet` (`account`, `balance`), `programs`, `account_groups`, `sessions`, `messaging` (`running`, `delivery_node`, `discovery_node`, `delivery`, `discovery`, or `null` without a hub), `storage` (`running`, or `null` until a project asks for `[storage]`), `env_file` |
 | `deploy` | `name`, `id`, `hex`, `var`, `deployed_now`, `updated` |
 | `fund` | `account`, `balance` |
+| `tx` | `hash`, `block` (or `null` while no block holds it) |
+| `account` | `account`, `hex`, `balance`, `nonce`, `in_use`, `data` (each program's data, as a byte count, by program id) |
 | `accounts new`, `accounts ls` | `name`, `accounts`, `amount`, `file`, `wallet`, `var` (a list for `ls`) |
 | `session new` | `name`, `modules`, `vars` |
 | `session ls` | a list of `name`, `running`, `account`, `balance`, `error` |
@@ -271,7 +276,7 @@ With `--json`, a command prints one JSON document and nothing else on stdout. No
 The repo is a GitHub Action. On a Linux runner it installs `logos-devnet`, starts the devnet from your project file and exports the env into the job:
 
 ```yaml
-- uses: drptbl/logos-devnet@v0.6.1
+- uses: drptbl/logos-devnet@v0.7.0
   with:
     args: --max-txs-per-block 100     # optional, more options for up
 - run: cargo test                     # LOGOS_DEVNET_SEQUENCER, LOGOS_PROGRAM_*, LOGOS_DEVNET_ACCOUNTS_*, RISC0_DEV_MODE are set

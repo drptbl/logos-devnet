@@ -54,8 +54,26 @@ impl Rpc {
     /// Whether anything was written to the account: a deployed program header has a nonce and
     /// data, a fresh account has neither.
     pub fn account_in_use(&self, account: &PublicId) -> Result<bool> {
-        let value = self.call("getAccount", json!([account.as_str()]))?;
-        Ok(in_use(&value))
+        Ok(in_use(&self.account(account)?))
+    }
+
+    /// The block that holds the transaction whose hash is `hash` (64 hex digits), or `None`
+    /// while none does: not yet, or never.
+    pub fn transaction_block(&self, hash: &str) -> Result<Option<u64>> {
+        let value = self.call("getTransaction", json!([hash]))?;
+        if value.is_null() {
+            return Ok(None);
+        }
+        value
+            .get(1)
+            .and_then(Value::as_u64)
+            .map(Some)
+            .with_context(|| format!("getTransaction returned {value}"))
+    }
+
+    /// An account's state: its `nonce` and its `data` shards, by program id.
+    pub fn account(&self, account: &PublicId) -> Result<Value> {
+        self.call("getAccount", json!([account.as_str()]))
     }
 }
 
@@ -69,7 +87,7 @@ fn result_of(reply: Value, method: &str) -> Result<Value> {
         .with_context(|| format!("{method} returned no result: {reply}"))
 }
 
-fn in_use(account: &Value) -> bool {
+pub(crate) fn in_use(account: &Value) -> bool {
     let nonce = account["nonce"].as_u64().unwrap_or(0);
     let has_data = account["data"]["shards"]
         .as_object()
@@ -80,6 +98,36 @@ fn in_use(account: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An Rpc against a one-request server that answers `body`.
+    fn answering(body: &'static str) -> Rpc {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request);
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(head.as_bytes()).unwrap();
+            stream.write_all(body.as_bytes()).unwrap();
+        });
+        Rpc::new(url)
+    }
+
+    #[test]
+    fn reads_a_transactions_block() {
+        let in_block = answering(r#"{"jsonrpc":"2.0","id":1,"result":["EgAAAA",83]}"#);
+        assert_eq!(
+            in_block.transaction_block(&"ab".repeat(32)).unwrap(),
+            Some(83)
+        );
+        let pending = answering(r#"{"jsonrpc":"2.0","id":1,"result":null}"#);
+        assert_eq!(pending.transaction_block(&"ab".repeat(32)).unwrap(), None);
+    }
 
     #[test]
     fn reads_results_and_errors() {

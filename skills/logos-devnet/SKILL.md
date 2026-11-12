@@ -33,11 +33,12 @@ Pass `--json` to every command: on success stdout holds one JSON document, and n
    - `LOGOS_DEVNET_ACCOUNTS_<NAME>_WALLET`: the group's LEZ wallet, for `LEE_WALLET_HOME_DIR`.
    - `RISC0_DEV_MODE`: `1` or `0`, matching the chain.
    - With `[messaging]`: `LOGOS_DEVNET_DELIVERY_CONFIG`, the `delivery_module.createNode` config of a node that uses the local hub, `LOGOS_DEVNET_DELIVERY_ENTRY_NODE`, `LOGOS_DEVNET_DISCOVERY_BOOTSTRAP`, a `libp2p_module` bootstrap node, and `LOGOS_DEVNET_DISCOVERY_CONFIG`, its node's config.
-5. `logos-devnet status --json` shows what runs: chain head, faucet, programs, groups, sessions. `.sequencer.runtime_answered` is false when Docker didn't answer within 10 s: Docker is stuck, so restart it rather than running `up`. The RPC answers anything else, e.g. an account's balance by its base58 id:
-   ```bash
-   curl -fsS "$LOGOS_DEVNET_SEQUENCER" -H 'content-type: application/json' \
-     -d '{"jsonrpc":"2.0","id":1,"method":"getAccountBalance","params":["<base58 id>"]}'
-   ```
+5. `logos-devnet status --json` shows what runs: chain head, faucet, programs, groups, sessions. `.sequencer.runtime_answered` is false when Docker didn't answer within 10 s: Docker is stuck, so restart it rather than running `up`.
+6. Check the chain instead of sleeping:
+   - `logos-devnet tx --wait <hash>` returns once a block holds the transaction (`lez_core`'s `tx_hash`), with the block in `--json`'s `.block`, and fails after `--timeout` (60 s).
+   - `logos-devnet account <id>` shows an account's balance, nonce and data. It takes `Public/<id>`, base58, the 64-hex form `lez_core` uses, or a deployed program's name, and prints both forms.
+   - `logos-devnet exec [--session <name>] -- <command>` runs a command with the devnet's env, and a session's, without `source`.
+   - For anything else, the RPC at `$LOGOS_DEVNET_SEQUENCER` answers JSON-RPC, e.g. `getAccountBalance` with a base58 id.
 
 ## Choices
 
