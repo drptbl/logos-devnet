@@ -103,6 +103,17 @@ jobs:
           logosctl --version
           logos-devnet --config .github/ci/sessions.toml session ls --json \
             | jq -e '.[0].name == "alice" and .[0].running and .[0].balance > 0'
+      # The container runs a few seconds before its sequencer answers, as after an `up` that
+      # was stopped while a long chain loaded: the next `up` waits for it.
+      - name: up waits for a sequencer that's still starting
+        run: |
+          set -euo pipefail
+          logos-devnet --config .github/ci/sessions.toml down
+          docker compose --file ~/.logos-devnet/compose.yaml up --detach sequencer
+          logos-devnet --config .github/ci/sessions.toml up --json \
+            | jq -e '.sequencer.running and .sequencer.block > 0'
+          logos-devnet --config .github/ci/sessions.toml session ls --json \
+            | jq -e '.[0].running'
 
   # The action's install path, against a published release.
   action-install:
