@@ -24,6 +24,9 @@ use crate::session::Logosctl;
 
 const DELIVERY: &str = "delivery_module";
 const DISCOVERY: &str = "libp2p_module";
+const STORAGE: &str = "storage_module";
+/// How long the hub's storage node gets to start with its daemon.
+const STORAGE_START_TIMEOUT: Duration = Duration::from_secs(30);
 /// A cluster no public network uses, so a node that ends up on the public fleet can't join it.
 const CLUSTER: u32 = 77;
 const SHARDS: u32 = 8;
@@ -47,6 +50,30 @@ struct State {
     /// The addresses the running nodes reported, once they have.
     #[serde(default)]
     addresses: Option<Addresses>,
+    /// Whether the hub runs the delivery and discovery nodes: hubs from before `[storage]`
+    /// all did.
+    #[serde(default = "runs_messaging")]
+    messaging: bool,
+    /// The storage node's port, once a project asked for local storage.
+    #[serde(default)]
+    storage_port: Option<u16>,
+    /// The storage node's signed peer record, which sessions bootstrap from.
+    #[serde(default)]
+    storage_spr: Option<String>,
+    /// The storage node's peer id, which stays across its restarts while its record changes.
+    #[serde(default)]
+    storage_peer: Option<String>,
+}
+
+fn runs_messaging() -> bool {
+    true
+}
+
+/// What a project asks the hub to run. What any project asked for stays on.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Wants {
+    pub messaging: bool,
+    pub storage: bool,
 }
 
 /// Where apps reach the hub.
@@ -80,6 +107,7 @@ pub struct Health {
     pub daemon: bool,
     pub delivery: bool,
     pub discovery: bool,
+    pub storage: bool,
 }
 
 impl Hub {
@@ -122,15 +150,44 @@ impl Hub {
     }
 
     /// The ports the hub listens on, once it has some.
-    pub fn ports(&self) -> Option<[u16; 2]> {
-        self.state()
-            .ok()
-            .map(|s| [s.delivery_port, s.discovery_port])
+    pub fn ports(&self) -> Vec<u16> {
+        let Ok(state) = self.state() else {
+            return Vec::new();
+        };
+        let mut ports = Vec::new();
+        if state.messaging {
+            ports.extend([state.delivery_port, state.discovery_port]);
+        }
+        ports.extend(state.storage_port);
+        ports
+    }
+
+    /// Whether the hub runs the delivery and discovery nodes.
+    pub fn runs_messaging(&self) -> bool {
+        self.state().is_ok_and(|s| s.messaging)
+    }
+
+    /// Whether the hub runs a storage node for the sessions.
+    pub fn runs_storage(&self) -> bool {
+        self.state().is_ok_and(|s| s.storage_port.is_some())
+    }
+
+    /// The storage config of a session that bootstraps from the hub's storage node, when the
+    /// hub runs one.
+    pub fn storage_client(&self) -> Option<crate::storage::Config> {
+        let state = self.state().ok()?;
+        Some(crate::storage::client(
+            state.storage_spr.as_deref()?,
+            state.storage_peer.as_deref()?,
+        ))
     }
 
     /// The addresses the hub's nodes last reported.
     pub fn addresses(&self) -> Option<Addresses> {
-        self.state().ok().and_then(|s| s.addresses)
+        self.state()
+            .ok()
+            .filter(|s| s.messaging)
+            .and_then(|s| s.addresses)
     }
 
     pub fn running(&self) -> bool {
@@ -152,17 +209,26 @@ impl Hub {
                 .ok()
                 .and_then(module_value)
         };
-        let delivery = state.is_some()
+        let messaging = state.as_ref().is_some_and(|s| s.messaging);
+        let delivery = messaging
             && ask(DELIVERY, "getNodeInfo", &["IsRunning"])
                 .is_some_and(|running| running == "true");
-        let discovery = state.is_some_and(|state| {
-            ask(DISCOVERY, "peerInfo", &[])
-                .is_some_and(|peer| listens_on(&peer, state.discovery_port))
-        });
+        let discovery = messaging
+            && state.as_ref().is_some_and(|state| {
+                ask(DISCOVERY, "peerInfo", &[])
+                    .is_some_and(|peer| listens_on(&peer, state.discovery_port))
+            });
+        // `isRunning` answers a bare boolean, not the `{"success", "value"}` of other calls.
+        let storage = state.as_ref().is_some_and(|s| s.storage_port.is_some())
+            && self
+                .ctl
+                .call_within(STORAGE, "isRunning", &[], self.status_timeout)
+                .is_ok_and(|running| running == true);
         Health {
             daemon,
             delivery,
             discovery,
+            storage,
         }
     }
 
@@ -170,7 +236,7 @@ impl Hub {
     /// holds the hub's ports after `stop` keeps it, since nothing could stop it once deleted.
     pub fn remove(&self) -> Result<()> {
         self.stop()?;
-        for port in self.ports().into_iter().flatten() {
+        for port in self.ports() {
             if crate::devnet::port_free(port).is_err() {
                 bail!(
                     "port {port} on 127.0.0.1, which the messaging hub listens on, is still \
@@ -184,37 +250,88 @@ impl Hub {
             .with_context(|| format!("deleting {}", self.dir.display()))
     }
 
-    /// Makes the hub run: picks its ports and keys the first time, starts its daemon, and
-    /// creates each node that isn't there yet, e.g. after the daemon restarted.
-    pub fn ensure(&self, dev_mode: bool) -> Result<Addresses> {
+    /// Makes the hub run what `wants` asks for, and what it ran before: picks its ports and
+    /// keys the first time, starts its daemon, and creates each node that isn't there yet, e.g.
+    /// after the daemon restarted.
+    pub fn ensure(&self, dev_mode: bool, wants: Wants) -> Result<()> {
         let mut state = if self.exists() {
             self.state()?
         } else {
             std::fs::create_dir_all(&self.dir)?;
-            let state = State::new()?;
-            self.save(&state)?;
-            state
+            State::new()?
         };
+        state.messaging |= wants.messaging;
+        if wants.storage && state.storage_port.is_none() {
+            let taken = [state.delivery_port, state.discovery_port];
+            let mut port = free_port()?;
+            while taken.contains(&port) {
+                port = free_port()?;
+            }
+            state.storage_port = Some(port);
+        }
+        self.save(&state)?;
         let modules = [DELIVERY.to_owned(), DISCOVERY.to_owned()];
-        if !state.installed {
+        if state.messaging && !state.installed {
             eprintln!("Starting the messaging hub and installing {DELIVERY}, {DISCOVERY}...");
         }
-        self.ctl.start(dev_mode)?;
-        if !state.installed {
-            self.ctl.install(&modules)?;
-            state.installed = true;
-            self.save(&state)?;
+        let storage = state
+            .storage_port
+            .map_or_else(crate::storage::isolated, crate::storage::hub);
+        self.ctl.start_with_storage(dev_mode, &storage)?;
+        if state.messaging {
+            if !state.installed {
+                self.ctl.install(&modules)?;
+                state.installed = true;
+                self.save(&state)?;
+            }
+            self.ctl.load(&modules)?;
+            let addresses = Addresses {
+                delivery: self.ensure_delivery(&state)?,
+                discovery: self.ensure_discovery(&state)?,
+            };
+            if state.addresses.as_ref() != Some(&addresses) {
+                state.addresses = Some(addresses);
+                self.save(&state)?;
+            }
         }
-        self.ctl.load(&modules)?;
-        let addresses = Addresses {
-            delivery: self.ensure_delivery(&state)?,
-            discovery: self.ensure_discovery(&state)?,
+        if state.storage_port.is_some() {
+            let (spr, peer) = self.started_storage_node()?;
+            if state.storage_spr.as_ref() != Some(&spr)
+                || state.storage_peer.as_ref() != Some(&peer)
+            {
+                state.storage_spr = Some(spr);
+                state.storage_peer = Some(peer);
+                self.save(&state)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The storage node's signed peer record and peer id, once the node runs: the daemon
+    /// starts it on its own, a moment after it starts. Until then the module may not answer.
+    fn started_storage_node(&self) -> Result<(String, String)> {
+        let deadline = std::time::Instant::now() + STORAGE_START_TIMEOUT;
+        let ask = |method| {
+            self.ctl
+                .call_within(STORAGE, method, &[], Duration::from_secs(5))
+                .ok()
+                .and_then(module_value)
+                .and_then(|value| value.as_str().map(str::to_owned))
         };
-        if state.addresses.as_ref() != Some(&addresses) {
-            state.addresses = Some(addresses.clone());
-            self.save(&state)?;
+        loop {
+            let spr = ask("spr").filter(|spr| spr.starts_with("spr:"));
+            if let (Some(spr), Some(peer)) = (spr, ask("peerId").filter(|p| !p.is_empty())) {
+                return Ok((spr, peer));
+            }
+            if std::time::Instant::now() > deadline {
+                bail!(
+                    "the hub's storage node didn't start within {} s. See {}",
+                    STORAGE_START_TIMEOUT.as_secs(),
+                    self.dir.join("logosctl").join("logs").display()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(500));
         }
-        Ok(addresses)
     }
 
     /// Creates the delivery node unless it exists, and starts it: starting a started node
@@ -284,6 +401,10 @@ impl State {
             discovery_key: format!("{SECP256K1_KEY_HEADER}{}", crate::devnet::random_key()?),
             installed: false,
             addresses: None,
+            messaging: false,
+            storage_port: None,
+            storage_spr: None,
+            storage_peer: None,
         })
     }
 }
@@ -364,6 +485,11 @@ mod tests {
     use super::*;
     use crate::session::tests::{calls, fake_logosctl};
 
+    const MESSAGING: Wants = Wants {
+        messaging: true,
+        storage: false,
+    };
+
     const DELIVERY_ADDR: &str = "/ip4/127.0.0.1/tcp/61310/p2p/16Uiu2HAmDelivery";
     const PEER: &str = "16Uiu2HAmDiscovery";
 
@@ -375,6 +501,10 @@ mod tests {
             discovery_key: format!("{SECP256K1_KEY_HEADER}{}", "bb".repeat(32)),
             installed: true,
             addresses: None,
+            messaging: true,
+            storage_port: None,
+            storage_spr: None,
+            storage_peer: None,
         }
     }
 
@@ -396,6 +526,10 @@ mod tests {
 case "$2 $3 $4" in
   "daemon status "*) [ ! -e '{made}/stopped' ] ;;
   "daemon stop "*) touch '{made}/stopped' ;;
+  "daemon start "*) rm -f '{made}/stopped'; echo "$HOME" > '{made}/home' ;;
+  "call storage_module spr") ok '{{"success":true,"value":"spr:hub"}}' ;;
+  "call storage_module peerId") ok '{{"success":true,"value":"16Uiu2HAmHub"}}' ;;
+  "call storage_module isRunning") ok true ;;
   "module ls "*) echo '[{{"name":"{DELIVERY}","status":"loaded"}},{{"name":"{DISCOVERY}","status":"loaded"}}]' ;;
   *" createNode") touch '{made}'/"$3"; ok '{{"success":true,"value":null}}' ;;
   *" getNodeInfo") [ -e '{made}/{DELIVERY}' ] \
@@ -418,10 +552,59 @@ esac"#
     }
 
     #[test]
+    fn a_storage_hub_records_its_bootstrap_and_runs_no_messaging_nodes() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub(dir.path(), false);
+        hub.save(&State {
+            messaging: false,
+            installed: false,
+            ..state()
+        })
+        .unwrap();
+        hub.ensure(
+            false,
+            Wants {
+                messaging: false,
+                storage: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            hub.storage_client(),
+            Some(crate::storage::client("spr:hub", "16Uiu2HAmHub"))
+        );
+        assert!(hub.runs_storage() && !hub.runs_messaging());
+        let log = calls(dir.path());
+        assert!(
+            !log.contains("createNode") && !log.contains("package install"),
+            "{log}"
+        );
+        let port = hub.state().unwrap().storage_port.unwrap();
+        assert_eq!(hub.ports(), [port], "only the storage port is the hub's");
+        assert!(!crate::storage::differs(
+            &hub.ctl.home(),
+            &crate::storage::hub(port)
+        ));
+        assert!(hub.health().storage);
+        // The port stays across ensures, and storage stays on for a project without it.
+        hub.ensure(false, Wants::default()).unwrap();
+        assert_eq!(hub.state().unwrap().storage_port, Some(port));
+    }
+
+    #[test]
+    fn a_hub_from_before_storage_still_runs_messaging() {
+        let old = r#"{"delivery_port":1,"discovery_port":2,"delivery_key":"","discovery_key":""}"#;
+        let state: State = serde_json::from_str(old).unwrap();
+        assert!(state.messaging);
+        assert_eq!(state.storage_port, None);
+    }
+
+    #[test]
     fn creates_and_starts_both_nodes_on_a_fresh_daemon() {
         let dir = tempfile::tempdir().unwrap();
         let hub = hub(dir.path(), false);
-        let addresses = hub.ensure(false).unwrap();
+        hub.ensure(false, MESSAGING).unwrap();
+        let addresses = hub.addresses().unwrap();
         assert_eq!(addresses.delivery, DELIVERY_ADDR);
         let log = calls(dir.path());
         let order: Vec<&str> = log
@@ -448,7 +631,7 @@ esac"#
     #[test]
     fn starts_nodes_that_exist_but_may_not_run() {
         let dir = tempfile::tempdir().unwrap();
-        hub(dir.path(), true).ensure(false).unwrap();
+        hub(dir.path(), true).ensure(false, MESSAGING).unwrap();
         let log = calls(dir.path());
         assert!(!log.contains("createNode"), "{log}");
         for start in [
@@ -467,6 +650,7 @@ esac"#
             daemon: true,
             delivery: true,
             discovery: true,
+            storage: false,
         };
         assert_eq!(hub(dir.path(), true).health(), all);
         let dir = tempfile::tempdir().unwrap();
@@ -497,7 +681,8 @@ esac"#
             Health {
                 daemon: false,
                 delivery: false,
-                discovery: false
+                discovery: false,
+                storage: false,
             }
         );
     }
@@ -547,6 +732,13 @@ esac"#,
     fn removing_it_deletes_its_keys_and_store() {
         let dir = tempfile::tempdir().unwrap();
         let hub = hub(dir.path(), true);
+        // Ports 0, which nothing holds: the fixed ones may be another program's here.
+        hub.save(&State {
+            delivery_port: 0,
+            discovery_port: 0,
+            ..state()
+        })
+        .unwrap();
         std::fs::write(hub.dir.join("store.sqlite3"), "").unwrap();
         hub.remove().unwrap();
         assert!(!hub.dir.exists());
@@ -568,7 +760,7 @@ esac"#,
         let hub = Hub::with_logosctl(dir.path().join("messaging"), ctl);
         std::fs::create_dir_all(&hub.dir).unwrap();
         hub.save(&state()).unwrap();
-        let err = hub.ensure(false).unwrap_err();
+        let err = hub.ensure(false, MESSAGING).unwrap_err();
         assert!(format!("{err:#}").contains("no listener"), "{err:#}");
         assert!(!calls(dir.path()).contains("createNode"));
     }
@@ -577,7 +769,8 @@ esac"#,
     fn leaves_running_nodes_alone_and_records_their_addresses() {
         let dir = tempfile::tempdir().unwrap();
         let hub = hub(dir.path(), true);
-        let addresses = hub.ensure(false).unwrap();
+        hub.ensure(false, MESSAGING).unwrap();
+        let addresses = hub.addresses().unwrap();
         assert_eq!(addresses.delivery, DELIVERY_ADDR);
         assert_eq!(
             addresses.discovery,
@@ -596,7 +789,7 @@ esac"#,
             ..state()
         })
         .unwrap();
-        let err = hub.ensure(false).unwrap_err();
+        let err = hub.ensure(false, MESSAGING).unwrap_err();
         assert!(err.to_string().contains("other settings"), "{err}");
     }
 
@@ -609,8 +802,8 @@ esac"#,
             ..state()
         })
         .unwrap();
-        hub.ensure(false).unwrap();
-        hub.ensure(false).unwrap();
+        hub.ensure(false, MESSAGING).unwrap();
+        hub.ensure(false, MESSAGING).unwrap();
         let log = calls(dir.path());
         assert_eq!(log.matches("package install").count(), 2, "{log}");
         assert!(

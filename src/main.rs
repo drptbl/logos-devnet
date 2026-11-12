@@ -20,6 +20,7 @@ mod report;
 mod rpc;
 mod runtime;
 mod session;
+mod storage;
 mod wallet_storage;
 
 use devnet::{DEFAULT_FUND, Devnet, UpOptions};

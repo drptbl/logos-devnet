@@ -49,12 +49,18 @@ struct ProjectFile {
     #[serde(default)]
     sessions: BTreeMap<String, SessionSpec>,
     messaging: Option<MessagingSection>,
+    storage: Option<StorageSection>,
 }
 
 /// `[messaging]`: an empty table that asks for the local messaging hub.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MessagingSection {}
+
+/// `[storage]`: an empty table that asks for a local storage network between sessions.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StorageSection {}
 
 /// A `[programs]` entry: the binary's path, or a table that can name a release instead and make
 /// it mutable.
@@ -187,6 +193,8 @@ pub struct Project {
     pub sessions: BTreeMap<String, SessionSpec>,
     /// Whether it asks for the local messaging hub.
     pub messaging: bool,
+    /// Whether it asks for a local storage network between sessions.
+    pub storage: bool,
 }
 
 /// The nearest `logos-devnet.toml` in `start` or a directory above it.
@@ -275,6 +283,7 @@ impl Project {
             accounts: file.accounts,
             sessions: file.sessions,
             messaging: file.messaging.is_some(),
+            storage: file.storage.is_some(),
         })
     }
 }
@@ -287,6 +296,15 @@ mod tests {
         let path = dir.join(FILE_NAME);
         std::fs::write(&path, text).unwrap();
         Project::load(&path)
+    }
+
+    #[test]
+    fn an_empty_storage_table_asks_for_local_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = project_in(dir.path(), "[storage]\n").unwrap();
+        assert!(project.storage && !project.messaging);
+        assert!(!project_in(dir.path(), "").unwrap().storage);
+        assert!(project_in(dir.path(), "[storage]\nport = 1\n").is_err());
     }
 
     #[test]

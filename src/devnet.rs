@@ -16,7 +16,7 @@ use crate::envfile::{self, Env};
 use crate::fetch;
 use crate::groups::{self, Group, GroupInfo};
 use crate::home::{Home, RuntimeKind, Settings, write_json};
-use crate::messaging::Hub;
+use crate::messaging::{Hub, Wants};
 use crate::project::{ProgramSource, ProgramSpec, Project};
 use crate::report::{
     self, Balance, Done, EnvVars, GroupSummary, Groups, Program, Report, SessionMade, SessionRow,
@@ -200,21 +200,39 @@ impl Devnet {
         Hub::new(self.home.messaging_dir())
     }
 
-    /// Whether `up` runs the messaging hub: the project asks for it, or the devnet has one.
-    /// Another project's file that leaves it out doesn't stop it.
-    fn wants_hub(&self) -> bool {
-        self.project.as_ref().is_some_and(|p| p.messaging) || self.hub().exists()
+    /// What the project asks the hub to run.
+    fn hub_wants(&self) -> Wants {
+        self.project
+            .as_ref()
+            .map_or_else(Wants::default, |p| Wants {
+                messaging: p.messaging,
+                storage: p.storage,
+            })
     }
 
-    /// Starts the messaging hub, or brings back what it lacks, when `up` runs it.
+    /// Whether `up` runs the hub: the project asks for messaging or storage, or the devnet has
+    /// a hub. Another project's file that leaves them out doesn't stop it.
+    fn wants_hub(&self) -> bool {
+        let wants = self.hub_wants();
+        wants.messaging || wants.storage || self.hub().exists()
+    }
+
+    /// Starts the hub, or brings back what it lacks, when `up` runs it.
     fn ensure_hub(&self) -> Result<()> {
         if !self.wants_hub() {
             return Ok(());
         }
         self.hub()
-            .ensure(self.settings.dev_mode)
-            .map(drop)
+            .ensure(self.settings.dev_mode, self.hub_wants())
             .context("the messaging hub")
+    }
+
+    /// The storage config of a session's daemon: the hub's storage node as its only bootstrap
+    /// node when the hub runs one, or else a node of its own that joins no network.
+    fn session_storage(&self) -> crate::storage::Config {
+        self.hub()
+            .storage_client()
+            .unwrap_or_else(crate::storage::isolated)
     }
 
     /// Runs the LEZ wallet on the dev wallet. Its config is rewritten first: the wallet would
@@ -419,7 +437,7 @@ impl Devnet {
         }
         let hub = self.hub();
         if self.wants_hub() && !hub.running() {
-            for port in hub.ports().into_iter().flatten() {
+            for port in hub.ports() {
                 if port_free(port).is_err() {
                     bail!(
                         "port {port} on 127.0.0.1, which the messaging hub keeps, is taken. Free \
@@ -665,7 +683,7 @@ impl Devnet {
                 session.forget_old_chain()?;
                 self.write_session_wallet_config(&session)?;
                 let ctl = session.logosctl();
-                session.start_daemon(&ctl, self.settings.dev_mode)?;
+                session.start_daemon(&ctl, self.settings.dev_mode, &self.session_storage())?;
                 ctl.resume(
                     &info.modules,
                     &session.wallet_config(),
@@ -852,13 +870,14 @@ impl Devnet {
             account_groups: self.group_summaries().unwrap_or_default(),
             sessions: self.sessions().into_iter().map(|s| s.name).collect(),
             messaging: self.hub_status(),
+            storage: self.storage_status(),
             env_file: env.map(|_| self.home.env_file()),
         }
     }
 
     fn hub_status(&self) -> Option<report::Messaging> {
         let hub = self.hub();
-        hub.exists().then(|| {
+        hub.runs_messaging().then(|| {
             let health = hub.health();
             report::Messaging {
                 running: health.daemon,
@@ -866,6 +885,13 @@ impl Devnet {
                 discovery_node: health.discovery,
                 addresses: hub.addresses(),
             }
+        })
+    }
+
+    fn storage_status(&self) -> Option<report::Storage> {
+        let hub = self.hub();
+        hub.runs_storage().then(|| report::Storage {
+            running: hub.health().storage,
         })
     }
 
@@ -970,7 +996,15 @@ impl Devnet {
             return Ok(missing);
         }
         let ctl = session.logosctl();
-        session.start_daemon(&ctl, self.settings.dev_mode)?;
+        if session.start_daemon(&ctl, self.settings.dev_mode, &self.session_storage())? {
+            // A daemon that started now has nothing loaded: bring the session back first.
+            ctl.resume(
+                &info.modules,
+                &session.wallet_config(),
+                &session.wallet_storage(),
+                &self.settings.sequencer_url(),
+            )?;
+        }
         // Recorded one at a time, so a module that fails keeps the ones before it.
         for module in &missing {
             let one = std::slice::from_ref(module);
@@ -996,7 +1030,7 @@ impl Devnet {
             session.name,
             modules.join(", ")
         );
-        session.start_daemon(&ctl, self.settings.dev_mode)?;
+        session.start_daemon(&ctl, self.settings.dev_mode, &self.session_storage())?;
         ctl.install(&modules)?;
         ctl.load(&modules)?;
         ctl.create_wallet(&session.wallet_config(), &session.wallet_storage())?;
@@ -1089,7 +1123,7 @@ impl Devnet {
         if let Some(env) = env {
             self.write_env(&env)?;
         }
-        let message = match self.project.as_ref().filter(|p| p.messaging) {
+        let message = match self.project.as_ref().filter(|p| p.messaging || p.storage) {
             Some(project) => format!(
                 "Removed the messaging hub. {} asks for one, so the next `up` starts a new hub, \
                  with new ports and peer ids.",
@@ -1543,6 +1577,24 @@ mod tests {
     }
 
     #[test]
+    fn sessions_bootstrap_from_the_hubs_storage_node_when_it_runs_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let devnet = devnet_in(&dir.path().join("home"));
+        assert_eq!(devnet.session_storage(), crate::storage::isolated());
+        std::fs::create_dir_all(devnet.home.messaging_dir()).unwrap();
+        std::fs::write(
+            devnet.home.messaging_dir().join("hub.json"),
+            r#"{"delivery_port":1,"discovery_port":2,"delivery_key":"","discovery_key":"",
+                "messaging":false,"storage_port":3,"storage_spr":"spr:hub","storage_peer":"peer"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            devnet.session_storage(),
+            crate::storage::client("spr:hub", "peer")
+        );
+    }
+
+    #[test]
     fn the_env_file_points_at_the_hubs_nodes() {
         let dir = tempfile::tempdir().unwrap();
         let devnet = devnet_in(&dir.path().join("home"));
@@ -1842,6 +1894,7 @@ mod tests {
             account_groups: vec![],
             sessions: vec![],
             messaging: None,
+            storage: None,
             env_file: None,
         };
         status.programs = vec![
