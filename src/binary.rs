@@ -24,6 +24,27 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// A file's SHA-256, in lower-case hex, read in pieces: packages run to hundreds of MB.
+pub fn file_sha256(path: &std::path::Path) -> Result<String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 1 << 20];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
+
 /// How many segment accounts the loader needs for `binary`.
 pub fn segments(binary: &[u8]) -> Result<usize> {
     Ok(user_elf_len(binary)?.div_ceil(SEGMENT_LEN))

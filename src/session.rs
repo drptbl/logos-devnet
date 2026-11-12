@@ -340,19 +340,94 @@ impl Logosctl {
     }
 
     /// Installs `modules` from the catalog, unsigned ones included (`lez_core` is unsigned).
-    /// `lez_core` is pinned to `LEZ_CORE_VERSION`, the others are the catalog's latest.
-    pub fn install(&self, modules: &[String]) -> Result<()> {
+    /// `lez_core` is pinned to `LEZ_CORE_VERSION`, the others are the catalog's latest. Each
+    /// package a module needs, dependencies included, is downloaded once into `packages` and
+    /// installed from there, so the next daemon that needs it doesn't download it again.
+    pub fn install(&self, modules: &[String], packages: &Path) -> Result<()> {
         self.run(&["catalog", "refresh"])?;
+        std::fs::create_dir_all(packages)
+            .with_context(|| format!("creating {}", packages.display()))?;
         for module in modules {
-            let mut args = vec!["package", "install", module.as_str()];
-            if module == LEZ_CORE {
-                args.extend(["--version", LEZ_CORE_VERSION]);
-            }
-            args.push("--yes");
-            self.run(&args)
+            self.install_one(module, packages)
                 .with_context(|| format!("installing {module}"))?;
         }
         Ok(())
+    }
+
+    /// Installs what `package install <module>` would, package by package, from `packages`.
+    fn install_one(&self, module: &str, packages: &Path) -> Result<()> {
+        let mut plan = vec!["package", "install", module];
+        if module == LEZ_CORE {
+            plan.extend(["--version", LEZ_CORE_VERSION]);
+        }
+        plan.push("--dry-run");
+        let plan = self.run(&plan)?;
+        let changes = plan["changes"]
+            .as_array()
+            .with_context(|| format!("logosctl planned no changes: {plan}"))?;
+        for change in changes {
+            let (Some(name), Some(version)) =
+                (change["name"].as_str(), change["toVersion"].as_str())
+            else {
+                continue;
+            };
+            check_module(name)?;
+            check_version(version)?;
+            let file = self.cached_package(name, version, packages)?;
+            self.run(&["package", "install", &path_text(&file), "--yes"])?;
+        }
+        Ok(())
+    }
+
+    /// `<packages>/<name>-<version>.lgx`, checked against the catalog's SHA-256: a file that
+    /// doesn't match is downloaded again. A download lands in a directory of its own first, so
+    /// an interrupted one never takes the file's place.
+    fn cached_package(&self, name: &str, version: &str, packages: &Path) -> Result<PathBuf> {
+        let file_name = format!("{name}-{version}.lgx");
+        let file = packages.join(&file_name);
+        let sha256 = self.catalog_sha256(name, version)?;
+        let matches = |path: &Path| match &sha256 {
+            Some(wanted) => crate::binary::file_sha256(path).is_ok_and(|got| &got == wanted),
+            None => path.exists(),
+        };
+        if matches(&file) {
+            return Ok(file);
+        }
+        let part = packages.join(format!(".part-{}-{file_name}", std::process::id()));
+        std::fs::create_dir_all(&part).with_context(|| format!("creating {}", part.display()))?;
+        let downloaded = part.join(&file_name);
+        let fetched = self
+            .run(&[
+                "package",
+                "download",
+                name,
+                "--version",
+                version,
+                "-o",
+                &path_text(&part),
+            ])
+            .and_then(|_| {
+                if !matches(&downloaded) {
+                    bail!("{name} {version} downloaded, but not with the catalog's SHA-256");
+                }
+                std::fs::rename(&downloaded, &file)
+                    .with_context(|| format!("keeping {}", file.display()))
+            });
+        let _ = std::fs::remove_dir_all(&part);
+        fetched?;
+        Ok(file)
+    }
+
+    /// The SHA-256 the catalog gives for `name`'s package at `version`, when it gives one.
+    fn catalog_sha256(&self, name: &str, version: &str) -> Result<Option<String>> {
+        let shown = self.run(&["package", "show", name])?;
+        Ok(shown["versions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|v| v["manifest"]["version"] == version || v["version"] == version)
+            .and_then(|v| v["sha256"].as_str())
+            .map(str::to_ascii_lowercase))
     }
 
     /// The modules loaded in the daemon, declared or loaded for another one.
@@ -472,6 +547,22 @@ fn install_hint(e: anyhow::Error) -> anyhow::Error {
     } else {
         e
     }
+}
+
+/// A package version as the catalog gives it, e.g. `0.5.1`: it reaches logosctl's argv and a
+/// file name, so never a flag or a path.
+fn check_version(version: &str) -> Result<()> {
+    let ok = version
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric())
+        && version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'));
+    if !ok {
+        bail!("the catalog gave an odd version: {version}");
+    }
+    Ok(())
 }
 
 /// `logosctl call`'s arguments, each of `args` as a string.
@@ -908,21 +999,123 @@ esac"#,
         assert!(modules_with(&["--yes".into()]).is_err(), "never a flag");
     }
 
+    /// A logosctl whose catalog plans `lez_core` alone and `chat_module` with
+    /// `delivery_module`, lists each package's SHA-256 as that of `<name>-<version>`, and
+    /// whose downloads write `download` into the package file, by default what the catalog
+    /// lists.
+    fn package_manager(dir: &Path, download: Option<&str>) -> Logosctl {
+        let packages = [
+            ("lez_core", "0.5.1"),
+            ("chat_module", "0.3.0"),
+            ("delivery_module", "0.3.3"),
+        ];
+        let shows: String = packages
+            .iter()
+            .map(|(name, version)| {
+                let sha = crate::binary::sha256_hex(format!("{name}-{version}").as_bytes());
+                format!(
+                    "  \"package show {name}\") echo '{{\"versions\":[{{\"manifest\":{{\"version\":\"{version}\"}},\"sha256\":\"{sha}\"}}]}}' ;;\n"
+                )
+            })
+            .collect();
+        let content = download.map_or("$4-$6".to_owned(), str::to_owned);
+        fake_logosctl(
+            dir,
+            &format!(
+                r#"case "$2 $3 $4" in
+  "package install lez_core") echo '{{"changes":[{{"name":"lez_core","toVersion":"0.5.1"}}]}}' ;;
+  "package install chat_module") echo '{{"changes":[{{"name":"chat_module","toVersion":"0.3.0"}},{{"name":"delivery_module","toVersion":"0.3.3"}}]}}' ;;
+{shows}  "package download "*) printf '%s' "{content}" > "$8/$4-$6.lgx"; echo '{{"status":"ok"}}' ;;
+  *) echo '{{"status":"ok"}}' ;;
+esac"#
+            ),
+        )
+    }
+
     #[test]
     fn pins_lez_core_to_the_v0_3_line() {
         let dir = tempfile::tempdir().unwrap();
-        let ctl = fake_logosctl(dir.path(), r#"echo '{"status":"ok"}'"#);
-        ctl.install(&["lez_core".into(), "chat_module".into()])
+        let ctl = package_manager(dir.path(), None);
+        ctl.install(&["lez_core".into()], &dir.path().join("packages"))
             .unwrap();
         let log = calls(dir.path());
         assert!(
-            log.contains("--json package install lez_core --version 0.5.1 --yes\n"),
+            log.contains("--json package install lez_core --version 0.5.1 --dry-run\n"),
             "{log}"
         );
         assert!(
-            log.contains("--json package install chat_module --yes\n"),
+            log.contains("package download lez_core --version 0.5.1 -o"),
             "{log}"
         );
+    }
+
+    #[test]
+    fn downloads_each_package_once_for_every_daemon() {
+        let dir = tempfile::tempdir().unwrap();
+        let packages = dir.path().join("packages");
+        let modules = ["lez_core".to_owned(), "chat_module".to_owned()];
+        package_manager(dir.path(), None)
+            .install(&modules, &packages)
+            .unwrap();
+        let first = calls(dir.path());
+        assert_eq!(first.matches("package download").count(), 3, "{first}");
+        for package in [
+            "lez_core-0.5.1",
+            "chat_module-0.3.0",
+            "delivery_module-0.3.3",
+        ] {
+            let file = packages.join(format!("{package}.lgx"));
+            assert!(first.contains(&format!("package install {} --yes", file.display())));
+        }
+        // Another daemon, the same devnet: everything comes from the files.
+        std::fs::remove_file(dir.path().join("calls.log")).unwrap();
+        package_manager(dir.path(), None)
+            .install(&modules, &packages)
+            .unwrap();
+        let second = calls(dir.path());
+        assert!(!second.contains("package download"), "{second}");
+        assert_eq!(second.matches(".lgx --yes").count(), 3, "{second}");
+    }
+
+    #[test]
+    fn downloads_again_a_package_that_doesnt_match_the_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let packages = dir.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        // Left half-written by an interrupted run.
+        std::fs::write(packages.join("lez_core-0.5.1.lgx"), "lez_c").unwrap();
+        package_manager(dir.path(), None)
+            .install(&["lez_core".into()], &packages)
+            .unwrap();
+        assert!(calls(dir.path()).contains("package download lez_core"));
+        assert_eq!(
+            std::fs::read_to_string(packages.join("lez_core-0.5.1.lgx")).unwrap(),
+            "lez_core-0.5.1"
+        );
+    }
+
+    #[test]
+    fn keeps_no_download_that_doesnt_match_the_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let packages = dir.path().join("packages");
+        let err = package_manager(dir.path(), Some("tampered"))
+            .install(&["lez_core".into()], &packages)
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("catalog's SHA-256"), "{err:#}");
+        assert_eq!(
+            std::fs::read_dir(&packages).unwrap().count(),
+            0,
+            "nothing kept"
+        );
+    }
+
+    #[test]
+    fn takes_only_plain_versions() {
+        assert!(check_version("0.5.1").is_ok());
+        assert!(check_version("1.0.0-rc1+build").is_ok());
+        for odd in ["", "-x", "../x", "1/2", "0.5 1"] {
+            assert!(check_version(odd).is_err(), "{odd}");
+        }
     }
 
     #[test]

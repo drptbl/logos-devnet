@@ -246,7 +246,7 @@ Everything is in `~/.logos-devnet` (or `LOGOS_DEVNET_HOME`):
 | `sessions/` | one directory per session: its `logosctl` home, its daemon's `HOME` with its storage, wallet and `session.json` |
 | `accounts/` | one directory per account group: its wallet and `accounts.json` |
 | `programs.json` | the binary hash each program was deployed from |
-| `downloads/` | program binaries the project file names by URL, by SHA-256 |
+| `downloads/` | program binaries the project file names by URL, by SHA-256, and in `packages/` the module packages every daemon installs from, downloaded once and checked against the catalog's SHA-256 |
 | `messaging/` | the hub, for `[messaging]` and `[storage]`: its `logosctl` home, its daemon's `HOME`, message store, ports and node keys in `hub.json` |
 | `lock` | held while a command changes the devnet, so two projects sharing the home take turns |
 

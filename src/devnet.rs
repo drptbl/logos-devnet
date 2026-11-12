@@ -202,7 +202,7 @@ impl Devnet {
     }
 
     fn hub(&self) -> Hub {
-        Hub::new(self.home.messaging_dir())
+        Hub::new(self.home.messaging_dir(), self.home.packages_dir())
     }
 
     /// What the project asks the hub to run.
@@ -1042,7 +1042,7 @@ impl Devnet {
         // Recorded one at a time, so a module that fails keeps the ones before it.
         for module in &missing {
             let one = std::slice::from_ref(module);
-            ctl.install(one)?;
+            ctl.install(one, &self.home.packages_dir())?;
             // Recorded once installed: every `up` loads recorded modules that aren't loaded.
             info.modules.push(module.clone());
             session.save_info(&info)?;
@@ -1066,7 +1066,7 @@ impl Devnet {
             modules.join(", ")
         );
         session.start_daemon(&ctl, self.settings.dev_mode, &self.session_storage())?;
-        ctl.install(&modules)?;
+        ctl.install(&modules, &self.home.packages_dir())?;
         ctl.load(&modules)?;
         ctl.create_wallet(&session.wallet_config(), &session.wallet_storage())?;
         let account = ctl.call("lez_core", "create_account_public", &[])?;
