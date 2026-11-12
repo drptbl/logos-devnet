@@ -1246,8 +1246,35 @@ impl Devnet {
         Ok(EnvVars::new(self.read_env()?.vars()))
     }
 
-    pub fn logs(&self, follow: bool) -> Result<()> {
-        self.runtime.logs(follow)
+    /// Prints the last lines of the sequencer's log, or of a session's daemon or the hub's
+    /// when `session` or `hub` says so, and follows it with `follow`.
+    pub fn logs(&self, follow: bool, session: Option<&str>, hub: bool) -> Result<()> {
+        let daemon = match session {
+            Some(name) => self.existing_session(name)?.logosctl_dir(),
+            None if hub => {
+                if !self.home.messaging_dir().exists() {
+                    bail!(
+                        "this devnet has no hub: a project's [messaging] or [storage] starts one"
+                    );
+                }
+                self.home.messaging_dir().join("logosctl")
+            }
+            None => return self.runtime.logs(follow),
+        };
+        let log = daemon.join("logs").join("daemon.log");
+        if !log.exists() {
+            bail!(
+                "{} doesn't exist yet: the daemon hasn't started",
+                log.display()
+            );
+        }
+        let mut cmd = std::process::Command::new("tail");
+        cmd.args(["-n", "200"]);
+        if follow {
+            // By name, so it keeps following after a daemon restart starts a new log.
+            cmd.arg("-F");
+        }
+        crate::runtime::run_attached(cmd.arg(&log))
     }
 
     /// Writes `<dir>/wallet_config.json` for a project's own wallet (`lez_core` or the LEZ
@@ -1563,6 +1590,19 @@ mod tests {
     /// A devnet in `dir/home` for a project file in `dir` holding `programs`.
     fn devnet_with_programs(dir: &Path, programs: &str) -> Devnet {
         devnet_with_file(dir, &format!("[programs]\n{programs}\n"))
+    }
+
+    #[test]
+    fn logs_name_what_they_cant_show() {
+        let dir = tempfile::tempdir().unwrap();
+        let devnet = devnet_in(&dir.path().join("home"));
+        let err = devnet.logs(false, None, true).unwrap_err();
+        assert!(err.to_string().contains("no hub"), "{err}");
+        let err = devnet.logs(false, Some("alice"), false).unwrap_err();
+        assert!(err.to_string().contains("no session alice"), "{err}");
+        std::fs::create_dir_all(devnet.home.sessions_dir().join("alice")).unwrap();
+        let err = devnet.logs(false, Some("alice"), false).unwrap_err();
+        assert!(err.to_string().contains("hasn't started"), "{err}");
     }
 
     #[test]

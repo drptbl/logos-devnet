@@ -87,10 +87,16 @@ enum Command {
     WalletConfig { dir: PathBuf },
     /// Print the env file: `source <(logos-devnet env)`.
     Env,
-    /// Print the sequencer's log.
+    /// Print the sequencer's log, or a session's or the hub's.
     Logs {
         #[arg(short, long)]
         follow: bool,
+        /// A session's logosctl daemon log, with its modules' output.
+        #[arg(long, conflicts_with = "hub")]
+        session: Option<String>,
+        /// The hub's logosctl daemon log, for `[messaging]` and `[storage]`.
+        #[arg(long)]
+        hub: bool,
     },
     /// Throwaway logosctl sessions with a funded devnet wallet, for apps and agents.
     #[command(subcommand)]
@@ -211,7 +217,11 @@ fn main() -> Result<()> {
         },
         Command::WalletConfig { dir } => emit(&devnet.write_project_wallet_config(&dir)?, json),
         Command::Env => emit(&devnet.env_vars()?, json),
-        Command::Logs { follow } => devnet.logs(follow),
+        Command::Logs {
+            follow,
+            session,
+            hub,
+        } => devnet.logs(follow, session.as_deref(), hub),
         Command::Session(command) => match command {
             SessionCommand::New {
                 name,

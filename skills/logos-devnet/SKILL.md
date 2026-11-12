@@ -74,5 +74,5 @@ Each refusal changes nothing. `up` prefixes a program's refusal with `program <n
 
 ## Debugging
 
-- `logos-devnet logs` prints the last 200 lines of the sequencer's log, and `logs -f` follows it. `up --log-filter debug`, or `[devnet] log_filter`, raises its level for guest failures.
+- `logos-devnet logs` prints the last 200 lines of the sequencer's log, and `logs -f` follows it. `logs --session <name>` and `logs --hub` show a session's or the hub's daemon, where module errors (lez_core, delivery, storage) land. `up --log-filter debug`, or `[devnet] log_filter`, raises its level for guest failures.
 - The RPC has no authentication and listens on `127.0.0.1` only. Keep it there.
