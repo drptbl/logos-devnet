@@ -303,9 +303,18 @@ impl Hub {
                 self.save(&state)?;
             }
             self.ctl.load(&modules)?;
-            let addresses = Addresses {
-                delivery: self.ensure_delivery(&state)?,
-                discovery: self.ensure_discovery(&state)?,
+            let addresses = match self.ensure_nodes(&state) {
+                Ok(addresses) => addresses,
+                // A node that exists but won't answer can't be made again in that daemon: a
+                // new daemon gets new nodes, at the same addresses, from the same keys.
+                Err(e) if e.chain().any(|cause| cause.is::<BrokenNode>()) => {
+                    eprintln!("The messaging hub's {e:#}. Restarting the hub...");
+                    self.ctl.stop()?;
+                    self.ctl.start_with_storage(dev_mode, &storage)?;
+                    self.ctl.load(&modules)?;
+                    self.ensure_nodes(&state)?
+                }
+                Err(e) => return Err(e),
             };
             if state.addresses.as_ref() != Some(&addresses) {
                 state.addresses = Some(addresses);
@@ -350,6 +359,14 @@ impl Hub {
             }
             std::thread::sleep(Duration::from_millis(500));
         }
+    }
+
+    /// The hub's delivery and discovery nodes, made and started where they aren't yet.
+    fn ensure_nodes(&self, state: &State) -> Result<Addresses> {
+        Ok(Addresses {
+            delivery: self.ensure_delivery(state)?,
+            discovery: self.ensure_discovery(state)?,
+        })
     }
 
     /// Creates the delivery node unless it exists, and starts it: starting a started node
@@ -397,11 +414,35 @@ impl Hub {
     }
 }
 
-/// A module's info about its node, or `None` when the module says it has none yet. A failing
-/// `logosctl` is an error, not a missing node.
+/// What the modules answer before their node exists: libp2p_module's, then delivery_module's.
+const NO_NODE: [&str; 2] = ["No libp2p context", "Context not initialized"];
+
+/// A module's info about its node, or `None` when the module says it has none yet. Any other
+/// failure is an error, not a missing node: a node that stopped answering still exists, and
+/// can't be created again.
 fn node_info(ctl: &Logosctl, module: &str, method: &str, args: &[&str]) -> Result<Option<Value>> {
-    Ok(module_value(ctl.call(module, method, args)?))
+    let reply = ctl.call(module, method, args)?;
+    if reply["success"] == true {
+        return Ok(Some(reply["value"].clone()));
+    }
+    let error = reply["error"].as_str().unwrap_or("no error message");
+    if NO_NODE.iter().any(|no_node| error.contains(no_node)) {
+        return Ok(None);
+    }
+    Err(BrokenNode(format!("{module}.{method} failed: {error}")).into())
 }
+
+/// A node that exists but fails to answer about itself.
+#[derive(Debug)]
+struct BrokenNode(String);
+
+impl std::fmt::Display for BrokenNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for BrokenNode {}
 
 /// Calls a module that answers `{"success", "value", "error"}`, and returns its value.
 fn module_call(ctl: &Logosctl, module: &str, method: &str, args: &[&str]) -> Result<Value> {
@@ -631,25 +672,29 @@ mod tests {
 case "$2 $3 $4" in
   "daemon status "*) [ ! -e '{made}/stopped' ] ;;
   "daemon stop "*) touch '{made}/stopped' ;;
-  "daemon start "*) rm -f '{made}/stopped'; echo "$HOME" > '{made}/home' ;;
+  "daemon start "*) rm -f '{made}/stopped' '{made}/{DELIVERY}' '{made}/{DISCOVERY}' '{made}/wedged'; echo "$HOME" > '{made}/home' ;;
   "call storage_module spr") ok '{{"success":true,"value":"spr:hub"}}' ;;
   "call storage_module peerId") ok '{{"success":true,"value":"16Uiu2HAmHub"}}' ;;
   "call storage_module isRunning") ok true ;;
   "module ls "*) echo '[{{"name":"{DELIVERY}","status":"loaded"}},{{"name":"{DISCOVERY}","status":"loaded"}}]' ;;
-  *" createNode") touch '{made}'/"$3"; ok '{{"success":true,"value":null}}' ;;
+  *" createNode") [ -e '{made}'/"$3" ] && {{ ok '{{"success":false,"error":"createNode: node already created"}}'; exit 0; }}
+      touch '{made}'/"$3"; ok '{{"success":true,"value":null}}' ;;
   *" getNodeInfo") [ -e '{made}/{DELIVERY}' ] \
       && {{ [ "$5" = str:IsRunning ] && ok '{{"success":true,"value":"true"}}' \
         || ok '{{"success":true,"value":"{DELIVERY_ADDR}"}}'; }} \
       || ok '{{"success":false,"error":"Context not initialized"}}' ;;
-  *" peerInfo") [ -e '{made}/{DISCOVERY}' ] \
+  *" peerInfo") [ -e '{made}/wedged' ] && {{ ok '{{"success":false,"error":"Failed to get peer info: timed out"}}'; exit 0; }}
+      [ -e '{made}/{DISCOVERY}' ] \
       && ok '{{"success":true,"value":{{"addrs":["/ip4/127.0.0.1/tcp/61320"],"peerId":"{PEER}"}}}}' \
       || ok '{{"success":false,"error":"No libp2p context"}}' ;;
   *) ok '{{"success":true,"value":null}}' ;;
 esac"#
             ),
         );
-        // The daemon's directory, as `start` makes it.
+        // The daemon's directory, as `start` makes it, and its home with the storage config
+        // the hub starts with, so nothing restarts it unasked.
         std::fs::create_dir_all(dir.join("session")).unwrap();
+        crate::storage::write(&ctl.home(), &crate::storage::isolated()).unwrap();
         let hub = Hub::with_logosctl(dir.join("messaging"), ctl);
         std::fs::create_dir_all(&hub.dir).unwrap();
         hub.save(&state()).unwrap();
@@ -821,6 +866,21 @@ esac"#,
             json!([{ "peerId": PEER, "addrs": ["/ip4/127.0.0.1/tcp/61320"] }])
         );
         assert_eq!(config["mountServiceDiscovery"], true);
+    }
+
+    #[test]
+    fn restarts_a_hub_whose_node_stopped_answering() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub(dir.path(), true);
+        // The discovery node exists but has hung: it answers with an error, not "no node".
+        std::fs::write(dir.path().join("made").join("wedged"), "").unwrap();
+        hub.ensure(false, MESSAGING).unwrap();
+        let log = calls(dir.path());
+        assert!(log.contains("daemon stop"), "restarted: {log}");
+        assert_eq!(
+            hub.addresses().unwrap().discovery,
+            format!("/ip4/127.0.0.1/tcp/61320/p2p/{PEER}")
+        );
     }
 
     #[test]
