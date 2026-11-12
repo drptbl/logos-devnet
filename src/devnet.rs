@@ -113,7 +113,12 @@ pub struct Devnet {
 
 impl Devnet {
     pub fn open(home: Home, project: Option<Project>) -> Result<Self> {
-        let settings = home.load_settings()?;
+        let mut settings = home.load_settings()?;
+        // `port = 0`: a devnet that hasn't run yet takes a free port, which `up` keeps.
+        let auto_port = project.as_ref().is_some_and(|p| p.devnet.port == Some(0));
+        if auto_port && !home.settings_file().exists() {
+            settings.port = free_port()?;
+        }
         Ok(Self::with(home, settings, project))
     }
 
@@ -212,7 +217,7 @@ impl Devnet {
 
     /// Whether `up` runs the hub: the project asks for messaging or storage, or the devnet has
     /// a hub. Another project's file that leaves them out doesn't stop it.
-    fn wants_hub(&self) -> bool {
+    pub fn wants_hub(&self) -> bool {
         let wants = self.hub_wants();
         wants.messaging || wants.storage || self.hub().exists()
     }
@@ -225,6 +230,19 @@ impl Devnet {
         self.hub()
             .ensure(self.settings.dev_mode, self.hub_wants())
             .context("the messaging hub")
+    }
+
+    /// Puts a session daemon's delivery and discovery nodes on the hub, when it runs
+    /// messaging (see `messaging::join_hub`).
+    /// Nothing happens while the hub doesn't run: `up` reports that on its own.
+    fn join_hub(&self, ctl: &session::Logosctl) -> Result<()> {
+        let hub = self.hub();
+        match hub.addresses() {
+            Some(addresses) if hub.running() => {
+                crate::messaging::join_hub(ctl, &addresses).context("joining the messaging hub")
+            }
+            _ => Ok(()),
+        }
     }
 
     /// The storage config of a session's daemon: the hub's storage node as its only bootstrap
@@ -435,6 +453,12 @@ impl Devnet {
                  from [messaging], then `logos-devnet messaging rm`"
             );
         }
+        self.check_hub_ports()
+    }
+
+    /// Fails when a port the hub keeps is taken while the hub doesn't run, so `up` couldn't
+    /// start it there.
+    pub fn check_hub_ports(&self) -> Result<()> {
         let hub = self.hub();
         if self.wants_hub() && !hub.running() {
             for port in hub.ports() {
@@ -448,6 +472,15 @@ impl Devnet {
             }
         }
         Ok(())
+    }
+
+    /// Whether `up` downloads a program, which takes `curl`.
+    pub fn needs_curl(&self) -> bool {
+        self.project.as_ref().is_some_and(|p| {
+            p.programs
+                .values()
+                .any(|program| matches!(program.source, ProgramSource::Release { .. }))
+        })
     }
 
     /// Makes every account group's wallet that's marked as on a new chain forget the old one:
@@ -690,6 +723,7 @@ impl Devnet {
                     &session.wallet_storage(),
                     &self.settings.sequencer_url(),
                 )?;
+                self.join_hub(&ctl)?;
                 funded
             });
             if let Err(e) = resumed {
@@ -1014,6 +1048,7 @@ impl Devnet {
             session.save_info(&info)?;
             ctl.load(one)?;
         }
+        self.join_hub(&ctl)?;
         Ok(missing)
     }
 
@@ -1045,6 +1080,10 @@ impl Devnet {
         };
         session.save_info(&info)?;
         self.send(&info.account, amount)?;
+        // The session is made and funded either way: the next `up` joins it again.
+        if let Err(e) = self.join_hub(&ctl) {
+            eprintln!("session {}: {e:#}", session.name);
+        }
         Ok(info)
     }
 
@@ -1241,8 +1280,35 @@ impl Devnet {
         Ok(EnvVars::new(self.read_env()?.vars()))
     }
 
-    pub fn logs(&self, follow: bool) -> Result<()> {
-        self.runtime.logs(follow)
+    /// Prints the last lines of the sequencer's log, or of a session's daemon or the hub's
+    /// when `session` or `hub` says so, and follows it with `follow`.
+    pub fn logs(&self, follow: bool, session: Option<&str>, hub: bool) -> Result<()> {
+        let daemon = match session {
+            Some(name) => self.existing_session(name)?.logosctl_dir(),
+            None if hub => {
+                if !self.home.messaging_dir().exists() {
+                    bail!(
+                        "this devnet has no hub: a project's [messaging] or [storage] starts one"
+                    );
+                }
+                self.home.messaging_dir().join("logosctl")
+            }
+            None => return self.runtime.logs(follow),
+        };
+        let log = daemon.join("logs").join("daemon.log");
+        if !log.exists() {
+            bail!(
+                "{} doesn't exist yet: the daemon hasn't started",
+                log.display()
+            );
+        }
+        let mut cmd = std::process::Command::new("tail");
+        cmd.args(["-n", "200"]);
+        if follow {
+            // By name, so it keeps following after a daemon restart starts a new log.
+            cmd.arg("-F");
+        }
+        crate::runtime::run_attached(cmd.arg(&log))
     }
 
     /// Writes `<dir>/wallet_config.json` for a project's own wallet (`lez_core` or the LEZ
@@ -1431,6 +1497,12 @@ pub(crate) fn random_key() -> Result<String> {
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// A port on 127.0.0.1 that nothing listens on now.
+pub(crate) fn free_port() -> Result<u16> {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).context("finding a free port")?;
+    Ok(listener.local_addr()?.port())
+}
+
 /// Fails when something listens on `port` on 127.0.0.1.
 pub(crate) fn port_free(port: u16) -> Result<()> {
     std::net::TcpListener::bind(("127.0.0.1", port))
@@ -1552,6 +1624,49 @@ mod tests {
     /// A devnet in `dir/home` for a project file in `dir` holding `programs`.
     fn devnet_with_programs(dir: &Path, programs: &str) -> Devnet {
         devnet_with_file(dir, &format!("[programs]\n{programs}\n"))
+    }
+
+    #[test]
+    fn only_programs_from_a_release_need_curl() {
+        let dir = tempfile::tempdir().unwrap();
+        let built = devnet_with_programs(dir.path(), "counter = \"counter.bin\"");
+        assert!(!built.needs_curl());
+        let sha = binary::sha256_hex(b"x");
+        let released = devnet_with_programs(
+            dir.path(),
+            &format!("token = {{ url = \"https://example.com/t.bin\", sha256 = \"{sha}\" }}"),
+        );
+        assert!(released.needs_curl());
+    }
+
+    #[test]
+    fn logs_name_what_they_cant_show() {
+        let dir = tempfile::tempdir().unwrap();
+        let devnet = devnet_in(&dir.path().join("home"));
+        let err = devnet.logs(false, None, true).unwrap_err();
+        assert!(err.to_string().contains("no hub"), "{err}");
+        let err = devnet.logs(false, Some("alice"), false).unwrap_err();
+        assert!(err.to_string().contains("no session alice"), "{err}");
+        std::fs::create_dir_all(devnet.home.sessions_dir().join("alice")).unwrap();
+        let err = devnet.logs(false, Some("alice"), false).unwrap_err();
+        assert!(err.to_string().contains("hasn't started"), "{err}");
+    }
+
+    #[test]
+    fn port_zero_takes_a_free_port_once_and_keeps_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let devnet = devnet_with_file(dir.path(), "home = \"home\"\n[devnet]\nport = 0\n");
+        let first = devnet.settings_for_up().port;
+        assert_ne!(first, 0);
+        // Once `up` saved it (or `--port` changed it), the file's 0 keeps it.
+        let mut saved = devnet.settings.clone();
+        saved.port = 4567;
+        devnet.home.save_settings(&saved).unwrap();
+        let again = devnet_with_file(dir.path(), "home = \"home\"\n[devnet]\nport = 0\n");
+        assert_eq!(again.settings_for_up().port, 4567);
+        // A fixed port in the file still wins.
+        let fixed = devnet_with_file(dir.path(), "home = \"home\"\n[devnet]\nport = 4100\n");
+        assert_eq!(fixed.settings_for_up().port, 4100);
     }
 
     #[test]

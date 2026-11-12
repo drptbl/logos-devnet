@@ -355,6 +355,20 @@ impl Logosctl {
         Ok(())
     }
 
+    /// The modules loaded in the daemon, declared or loaded for another one.
+    pub fn loaded_modules(&self) -> Result<Vec<String>> {
+        let listed = self.run(&["module", "ls"])?;
+        Ok(listed
+            .as_array()
+            .map(|all| {
+                all.iter()
+                    .filter(|m| m["status"] == "loaded")
+                    .filter_map(|m| m["name"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
     /// Loads the `modules` that aren't loaded yet.
     pub fn load(&self, modules: &[String]) -> Result<()> {
         let listed = self.run(&["module", "ls"])?;

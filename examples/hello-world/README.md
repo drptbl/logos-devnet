@@ -2,7 +2,7 @@
 
 LEZ's own program deployment tutorial on a devnet: you build its `hello_world` program, then deploy it and call it, paid by a funded test account. Once everything is built, a run takes about 15 s.
 
-`logos-devnet.toml` here gives the example a devnet of its own on port 3041, next to a shared one on 3040, with a group of two funded accounts. The first pays for the deploy and the call, and the second gets the greeting.
+`logos-devnet.toml` here gives the example a devnet of its own on a free port, next to a shared one on 3040, with a group of two funded accounts. The first pays for the deploy and the call, and the second gets the greeting.
 
 ## What you need
 

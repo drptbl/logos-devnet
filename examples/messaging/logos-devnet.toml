@@ -3,7 +3,7 @@
 home = ".logos-devnet"
 
 [devnet]
-port = 3044       # its own port, so it runs next to the shared devnet on 3040
+port = 0       # a free port, taken on the first `up` and kept, next to a shared devnet on 3040
 
 [messaging]       # the hub: a delivery node and a discovery bootstrap on 127.0.0.1
 

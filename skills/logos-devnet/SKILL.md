@@ -15,7 +15,7 @@ Pass `--json` to every command: on success stdout holds one JSON document, and n
    ```toml
    home = ".logos-devnet"   # a devnet of this project's own
    [devnet]
-   port = 3041              # its own port: the shared devnet uses 3040
+   port = 0                 # a free port of its own, kept: the shared devnet uses 3040
    dev_mode = true          # only if something makes private calls
    [programs]
    counter = "target/riscv32im-risc0-zkvm-elf/docker/counter.bin"
@@ -32,7 +32,7 @@ Pass `--json` to every command: on success stdout holds one JSON document, and n
    - `LOGOS_DEVNET_ACCOUNTS_<NAME>`: the group's `accounts.json`, `{"amount": ..., "accounts": [{"index", "id", "hex"}]}` with `id` in base58.
    - `LOGOS_DEVNET_ACCOUNTS_<NAME>_WALLET`: the group's LEZ wallet, for `LEE_WALLET_HOME_DIR`.
    - `RISC0_DEV_MODE`: `1` or `0`, matching the chain.
-   - With `[messaging]`: `LOGOS_DEVNET_DELIVERY_CONFIG`, the `delivery_module.createNode` config of a node that uses the local hub, `LOGOS_DEVNET_DELIVERY_ENTRY_NODE`, and `LOGOS_DEVNET_DISCOVERY_BOOTSTRAP`, a `libp2p_module` bootstrap node.
+   - With `[messaging]`: `LOGOS_DEVNET_DELIVERY_CONFIG`, the `delivery_module.createNode` config of a node that uses the local hub, `LOGOS_DEVNET_DELIVERY_ENTRY_NODE`, `LOGOS_DEVNET_DISCOVERY_BOOTSTRAP`, a `libp2p_module` bootstrap node, and `LOGOS_DEVNET_DISCOVERY_CONFIG`, its node's config.
 5. `logos-devnet status --json` shows what runs: chain head, faucet, programs, groups, sessions. `.sequencer.runtime_answered` is false when Docker didn't answer within 10 s: Docker is stuck, so restart it rather than running `up`. The RPC answers anything else, e.g. an account's balance by its base58 id:
    ```bash
    curl -fsS "$LOGOS_DEVNET_SEQUENCER" -H 'content-type: application/json' \
@@ -41,11 +41,11 @@ Pass `--json` to every command: on success stdout holds one JSON document, and n
 
 ## Choices
 
-- **Home.** Without `home`, every project on the machine shares `~/.logos-devnet` on port 3040, and `up` refuses settings that disagree with what other projects run there. Tests, worktrees and parallel agents get `home = ".logos-devnet"` and a port of their own.
+- **Home.** Without `home`, every project on the machine shares `~/.logos-devnet` on port 3040, and `up` refuses settings that disagree with what other projects run there. Tests, worktrees and parallel agents get `home = ".logos-devnet"` and `[devnet] port = 0`, a free port of their own.
 - **Dev mode.** `dev_mode = true` makes private calls prove in about 1 s instead of about 2 min, with fake proofs. A chain keeps its dev mode for life: switching it takes `reset`. Use a chain without dev mode to check that real proofs verify.
 - **Programs.** A program can be a path, or a release: `{ url = "...", sha256 = "..." }`, downloaded once and deployed only if its SHA-256 matches. Programs deploy immutable, which undisclosed private calls require. While iterating on one, give it `{ path = "...", mutable = true }`: a rebuild then updates it in place with the same id on the next `up`. Its mutability is fixed per chain, so changing it takes `reset`. `.logos-devnet/programs.json` records each deployed program's binary SHA-256 and mutability: compare it with `shasum -a 256 <bin>` to show which build runs.
 - **Funding.** Groups that exist when a chain starts are funded at genesis, at once. A group added to a running chain is funded one transfer at a time, about 2.4 s per account. Every call holds about 1.6M lepta of fees up front, so an account that sends needs more than that. `logos-devnet fund Public/<id> [lepta]` tops one account up.
-- **Messaging.** An empty `[messaging]` table runs a local hub: a delivery node and a discovery bootstrap on `127.0.0.1`, so messages and service lookups skip the public fleet. Create the app's delivery node from `LOGOS_DEVNET_DELIVERY_CONFIG` first in its daemon: the first `createNode` picks the network. `chat_module` still reaches a public key registry. `status --json` shows whether each hub node runs, in `.messaging.delivery_node` and `.messaging.discovery_node`, and `messaging rm` deletes the hub: a project that asks for one gets a new hub, with new addresses, on its next `up`.
+- **Messaging.** An empty `[messaging]` table runs a local hub: a delivery node and a discovery bootstrap on `127.0.0.1`, so messages and service lookups skip the public fleet. Sessions with `delivery_module` or `libp2p_module` loaded (`chat_module` loads the first) get nodes on the hub from `up`; outside a session, create the app's nodes from `LOGOS_DEVNET_DELIVERY_CONFIG` and `LOGOS_DEVNET_DISCOVERY_CONFIG` first in its daemon: the first `createNode` picks the network. `chat_module` still reaches a public key registry. `status --json` shows whether each hub node runs, in `.messaging.delivery_node` and `.messaging.discovery_node`, and `messaging rm` deletes the hub: a project that asks for one gets a new hub, with new addresses, on its next `up`.
 - **Storage.** Each session runs a storage node of its own, on `127.0.0.1` and in no network. An empty `[storage]` table connects the sessions through a node in the hub, so one session downloads by CID what another uploaded. Sessions need nothing passed in.
 - **Sessions** need `logosctl` on `PATH`. They suit apps that talk to Logos through `logosctl` and `lez_core`. Before calling `lez_core` yourself, read [lez_core.md](lez_core.md): it takes ids and amounts in forms its errors don't explain.
 
@@ -65,7 +65,7 @@ Each refusal changes nothing. `up` prefixes a program's refusal with `program <n
 | `this chain runs LEZ <tag>` | `reset --lez <tag>`. |
 | `logos-devnet runs LEZ v0.3 tags` | Use a v0.3 tag, e.g. `--lez v0.3.1`. LEZ v0.4 isn't supported yet. |
 | `the shared devnet runs with ..., but <file> asks for ...` | Other projects use that devnet. Give this project its own `home` and port. |
-| `port <n> on 127.0.0.1 is taken` | `up --port <free port>`, which is remembered, or the file's `[devnet] port`. |
+| `port <n> on 127.0.0.1 is taken` | `up --port <free port>`, remembered unless the file sets a fixed `port`. A new project home with `[devnet] port = 0` takes a free one on its first `up`. |
 | `sessions and the messaging hub need logosctl` | Install the Logos Core CLI, or remove the sessions and `[messaging]`. |
 | `port <n> on 127.0.0.1, which the messaging hub keeps, is taken` | Stop what holds it, or `messaging rm` and `up` for new ports and peer ids. |
 | `not a RISC Zero program binary` | Deploy the guest's `.bin` from `cargo risczero build`, not its ELF. |
@@ -74,5 +74,5 @@ Each refusal changes nothing. `up` prefixes a program's refusal with `program <n
 
 ## Debugging
 
-- `logos-devnet logs` prints the last 200 lines of the sequencer's log, and `logs -f` follows it. `up --log-filter debug`, or `[devnet] log_filter`, raises its level for guest failures.
+- `logos-devnet logs` prints the last 200 lines of the sequencer's log, and `logs -f` follows it. `logs --session <name>` and `logs --hub` show a session's or the hub's daemon, where module errors (lez_core, delivery, storage) land. `up --log-filter debug`, or `[devnet] log_filter`, raises its level for guest failures.
 - The RPC has no authentication and listens on `127.0.0.1` only. Keep it there.

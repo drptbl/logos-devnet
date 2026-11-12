@@ -123,7 +123,8 @@ impl DevnetSection {
             docker: self.runtime == Some(RuntimeKind::Docker),
             native: self.runtime == Some(RuntimeKind::Native),
             lez: self.lez.clone(),
-            port: self.port,
+            // 0 keeps the port the devnet took the first time (see `Devnet::open`).
+            port: self.port.filter(|port| *port != 0),
             block_time: self.block_time.clone(),
             max_txs_per_block: self.max_txs_per_block,
             dev_mode: self.dev_mode,
@@ -230,8 +231,11 @@ impl Project {
         if let Some(filter) = &devnet.log_filter {
             crate::home::check_log_filter(filter).context("[devnet]")?;
         }
-        if devnet.port == Some(0) {
-            bail!("[devnet] port can't be 0");
+        if devnet.port == Some(0) && file.home.is_none() {
+            bail!(
+                "[devnet] port = 0 needs a home of the project's own, e.g. home = \".logos-devnet\": \
+                 the shared devnet keeps its port"
+            );
         }
         let mut programs = BTreeMap::new();
         for (name, entry) in file.programs {
@@ -296,6 +300,13 @@ mod tests {
         let path = dir.join(FILE_NAME);
         std::fs::write(&path, text).unwrap();
         Project::load(&path)
+    }
+
+    #[test]
+    fn port_zero_needs_a_home_of_the_projects_own() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(project_in(dir.path(), "[devnet]\nport = 0\n").is_err());
+        assert!(project_in(dir.path(), "home = \".logos-devnet\"\n[devnet]\nport = 0\n").is_ok());
     }
 
     #[test]
@@ -487,7 +498,6 @@ modules = ["chat_module"]
             "[sessions.alice]\nmodules = [\"--force\"]",
             "[devnet]\nblock_time = \"1\"",
             "[devnet]\nmax_txs_per_block = 0",
-            "[devnet]\nport = 0",
             "[devnet]\ncolour = \"blue\"",
             "unknown = 1",
         ] {

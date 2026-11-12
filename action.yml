@@ -204,7 +204,7 @@ runs:
         sequencer=$(jq -r .LOGOS_DEVNET_SEQUENCER <<< "$env_json")
         echo "sequencer=$sequencer" >> "$GITHUB_OUTPUT"
 
-    - name: Print the sequencer's log
+    - name: Print the devnet's logs
       if: failure() && steps.up.conclusion == 'failure'
       shell: bash
       working-directory: ${{ inputs.working-directory }}
@@ -215,4 +215,19 @@ runs:
         if [ -n "$CONFIG" ]; then
           config=(--config "$CONFIG")
         fi
+        echo "::group::sequencer"
         logos-devnet "${config[@]}" logs || true
+        echo "::endgroup::"
+        # A session or the hub can fail while the sequencer runs fine.
+        sessions=$(logos-devnet "${config[@]}" session ls --json 2>/dev/null | jq -r '.[].name' || true)
+        for session in $sessions; do
+          echo "::group::session $session"
+          logos-devnet "${config[@]}" logs --session "$session" || true
+          echo "::endgroup::"
+        done
+        hub_log="$RUNNER_TEMP/logos-devnet-hub.log"
+        if logos-devnet "${config[@]}" logs --hub > "$hub_log" 2>&1; then
+          echo "::group::hub"
+          cat "$hub_log"
+          echo "::endgroup::"
+        fi

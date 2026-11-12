@@ -13,7 +13,7 @@ cargo install --locked logos-devnet
 Or take a binary from the [latest release](https://github.com/drptbl/logos-devnet/releases/latest), built for macOS (`aarch64-apple-darwin`, `x86_64-apple-darwin`) and Linux (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, static, so any distribution), and check it against its `.sha256`:
 
 ```bash
-v=v0.5.0 t=aarch64-apple-darwin
+v=v0.6.0 t=aarch64-apple-darwin
 curl -fsSL --remote-name-all https://github.com/drptbl/logos-devnet/releases/download/$v/logos-devnet-$v-$t.tar.gz{,.sha256}
 shasum -a 256 -c logos-devnet-$v-$t.tar.gz.sha256 \
   && tar -xzf logos-devnet-$v-$t.tar.gz \
@@ -46,7 +46,7 @@ source ~/.logos-devnet/env                         # LOGOS_DEVNET_SEQUENCER, LOG
 | `deploy <name> <bin> [--mutable]` | Deploys a program, from its `.bin` (what `cargo risczero build` makes, not the bare ELF), and adds `LOGOS_PROGRAM_<NAME>` and `LOGOS_PROGRAM_<NAME>_HEX` to the env file. Names are lower-case letters, digits and `-`. With `--mutable`, a new build updates it in place. |
 | `wallet-config <dir>` | Writes a `wallet_config.json` pointing at the devnet into a new wallet directory. |
 | `env` | Prints the env file. |
-| `logs [-f]` | Prints the sequencer's log. |
+| `logs [-f] [--session <name> \| --hub]` | Prints the sequencer's log, or a session's or the hub's daemon log, with its modules' output. |
 | `session new <name> [--module <m>]` | Makes a `logosctl` session with a funded devnet wallet, see below. |
 | `session ls`, `session env <name>`, `session rm <name>` | Lists sessions, prints one's env to `source`, deletes one. |
 | `accounts new <name> --count <n> [--amount <a>]` | Makes a group of funded accounts, see below. |
@@ -98,7 +98,7 @@ A program can come from a release instead of a path: `up` downloads its `url` on
 
 `up` deploys missing programs, makes and funds missing accounts and sessions, and changes nothing the second time (0.6 s). A `mutable` program whose binary changed is updated in place, with the same id. An immutable one keeps its old build, and `up` and `deploy` fail saying so, so tests don't run against it: `reset` deploys the new build. A module added to a session's `modules` is installed into it. `up` checks the whole file before it touches the devnet.
 
-Projects share one devnet, `~/.logos-devnet` on port 3040, unless the file sets `home`, e.g. `home = ".logos-devnet"`, for a devnet of the project's own (give it its own `[devnet] port` too, if another one runs). On a shared devnet, a `[devnet]` section that disagrees with the running chain is refused rather than restarting the chain under the other projects: `down` and `up` apply it, or `reset` for `lez` and `dev_mode`, which only a new chain takes. A `reset` there funds every project's account groups again, and each project's next `up` deploys its programs on the new chain.
+Projects share one devnet, `~/.logos-devnet` on port 3040, unless the file sets `home`, e.g. `home = ".logos-devnet"`, for a devnet of the project's own. Give it `[devnet] port = 0` too: it takes a free port on the first `up` and keeps it, so it runs next to other devnets, and `logos-devnet env` shows it. With a fixed `port` in the file, `--port` applies for that run, and the next `up` goes back to the file's port. With `port = 0`, `--port` is remembered. On a shared devnet, a `[devnet]` section that disagrees with the running chain is refused rather than restarting the chain under the other projects: `down` and `up` apply it, or `reset` for `lez` and `dev_mode`, which only a new chain takes. A `reset` there funds every project's account groups again, and each project's next `up` deploys its programs on the new chain.
 
 ## Many accounts
 
@@ -179,9 +179,12 @@ An empty `[messaging]` table in the project file gives the devnet a local messag
 | --- | --- |
 | `LOGOS_DEVNET_DELIVERY_CONFIG` | the `delivery_module.createNode` config for your app's node: Edge mode, no preset, the hub as its only entry node |
 | `LOGOS_DEVNET_DELIVERY_ENTRY_NODE` | the hub's delivery node, `/ip4/127.0.0.1/tcp/<port>/p2p/<id>` |
-| `LOGOS_DEVNET_DISCOVERY_BOOTSTRAP` | the hub's discovery node, `/ip4/127.0.0.1/tcp/<port>/p2p/<id>`: in `libp2p_module`'s `bootstrapNodes`, its id is the `peerId` and the part before `/p2p/` the address |
+| `LOGOS_DEVNET_DISCOVERY_BOOTSTRAP` | the hub's discovery node, `/ip4/127.0.0.1/tcp/<port>/p2p/<id>` |
+| `LOGOS_DEVNET_DISCOVERY_CONFIG` | the `libp2p_module.createNode` config for your app's node: the hub as its only bootstrap node, service discovery on |
 
-Create your app's delivery node from `LOGOS_DEVNET_DELIVERY_CONFIG` before anything else in that daemon creates one: the first `createNode` decides a daemon's network, and a module that creates its own uses the public one. Two apps whose nodes use the hub exchange messages through it. With only the hub as a peer, their nodes report `PartiallyConnected`.
+Sessions join the hub on their own. When a session's daemon has `delivery_module` or `libp2p_module` loaded, `chat_module` included since it loads `delivery_module`, `up` gives it a node on the hub and starts it, unless an app already made one. That matters because the first `createNode` in a daemon decides its network, and a module that creates its own node uses the public one. `up` does it again after a daemon restart, which drops the nodes. Apps then use the node that's there, and `chat_module` adopts it.
+
+Outside a session, create your app's nodes from `LOGOS_DEVNET_DELIVERY_CONFIG` and `LOGOS_DEVNET_DISCOVERY_CONFIG` before anything else in that daemon does. Two apps whose nodes use the hub exchange messages through it. With only the hub as a peer, their nodes report `PartiallyConnected`.
 
 The hub keeps its ports and peer ids, so the variables stay the same across `down`, `up` and `reset`. `reset` keeps its message store too. `up` brings the hub's nodes back when its daemon restarted, and `down` stops it. `status` shows whether each node runs. Once a devnet has a hub, `up` runs it for every project sharing that devnet: `logos-devnet messaging rm` stops and deletes it, and the next `up` of a project that asks for one starts a new hub, with new ports and peer ids.
 
@@ -268,7 +271,7 @@ With `--json`, a command prints one JSON document and nothing else on stdout. No
 The repo is a GitHub Action. On a Linux runner it installs `logos-devnet`, starts the devnet from your project file and exports the env into the job:
 
 ```yaml
-- uses: drptbl/logos-devnet@v0.5.0
+- uses: drptbl/logos-devnet@v0.6.0
   with:
     args: --max-txs-per-block 100     # optional, more options for up
 - run: cargo test                     # LOGOS_DEVNET_SEQUENCER, LOGOS_PROGRAM_*, LOGOS_DEVNET_ACCOUNTS_*, RISC0_DEV_MODE are set
@@ -276,7 +279,7 @@ The repo is a GitHub Action. On a Linux runner it installs `logos-devnet`, start
   run: logos-devnet logs              # the sequencer's log, when a test fails
 ```
 
-Inputs: `version` (default: the release tag you use the action at, or, pinned to a commit, the release that commit's `Cargo.toml` names), `config`, `working-directory`, `args` (space-separated, without shell quoting. Set the home with `LOGOS_DEVNET_HOME`, not `--home`), `start: "false"` to only install, which also works on macOS runners, and `logosctl-version` (default `0.3.2`). When the project file has sessions, `[messaging]` or `[storage]` and no `logosctl` is on `PATH`, the action installs that release of the Logos Core CLI, checked against its SHA-256. Output: `sequencer`. When `up` itself fails, the action prints the sequencer's log. Starting the devnet needs a Linux runner, for Docker.
+Inputs: `version` (default: the release tag you use the action at, or, pinned to a commit, the release that commit's `Cargo.toml` names), `config`, `working-directory`, `args` (space-separated, without shell quoting. Set the home with `LOGOS_DEVNET_HOME`, not `--home`), `start: "false"` to only install, which also works on macOS runners, and `logosctl-version` (default `0.3.2`). When the project file has sessions, `[messaging]` or `[storage]` and no `logosctl` is on `PATH`, the action installs that release of the Logos Core CLI, checked against its SHA-256. Output: `sequencer`. When `up` itself fails, the action prints the sequencer's log, each session's and the hub's. Starting the devnet needs a Linux runner, for Docker.
 
 ## The image
 
