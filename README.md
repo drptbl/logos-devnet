@@ -52,6 +52,7 @@ source ~/.logos-devnet/env                         # LOGOS_DEVNET_SEQUENCER, LOG
 | `logs [-f] [--session <name> \| --hub]` | Prints the sequencer's log, or a session's or the hub's daemon log, with its modules' output. |
 | `session new <name> [--module <m>]` | Makes a `logosctl` session with a funded devnet wallet, see below. |
 | `session ls`, `session env <name>`, `session rm <name>` | Lists sessions, prints one's env to `source`, deletes one. |
+| `session restart <name>` | Restarts a session's daemon and loads its modules again, keeping its packages, keys and funded wallet: a fresh start for a module that keeps state while loaded, safer than `logosctl module reload`. Calls in flight fail, and modules an app loaded itself need loading again. |
 | `accounts new <name> --count <n> [--amount <a>]` | Makes a group of funded accounts, see below. |
 | `accounts ls` | Lists account groups. |
 | `messaging rm` | Stops the messaging hub and deletes it, see below. |

@@ -707,28 +707,7 @@ impl Devnet {
         let mut failed = Vec::new();
         let sessions = self.sessions();
         for session in sessions {
-            let resumed = session.info().and_then(|info| {
-                // Funding only needs the dev wallet: a daemon that won't start doesn't cost the
-                // account its funds.
-                let funded = if new_chain {
-                    self.send(&info.account, info.funded).map(drop)
-                } else {
-                    Ok(())
-                };
-                session.forget_old_chain()?;
-                self.write_session_wallet_config(&session)?;
-                let ctl = session.logosctl();
-                session.start_daemon(&ctl, self.settings.dev_mode, &self.session_storage())?;
-                ctl.resume(
-                    &info.modules,
-                    &session.wallet_config(),
-                    &session.wallet_storage(),
-                    &self.settings.sequencer_url(),
-                )?;
-                self.join_hub(&ctl)?;
-                funded
-            });
-            if let Err(e) = resumed {
+            if let Err(e) = self.resume_session(&session, new_chain) {
                 eprintln!("session {}: {e:#}", session.name);
                 failed.push(session.name);
             }
@@ -741,6 +720,48 @@ impl Devnet {
             );
         }
         Ok(())
+    }
+
+    /// Brings a session's daemon back to work: started, its modules loaded, its wallet open on
+    /// the devnet, its nodes on the hub. On a new chain its account is funded again first.
+    fn resume_session(&self, session: &Session, new_chain: bool) -> Result<()> {
+        let info = session.info()?;
+        // Funding only needs the dev wallet: a daemon that won't start doesn't cost the
+        // account its funds.
+        let funded = if new_chain {
+            self.send(&info.account, info.funded).map(drop)
+        } else {
+            Ok(())
+        };
+        session.forget_old_chain()?;
+        self.write_session_wallet_config(session)?;
+        let ctl = session.logosctl();
+        session.start_daemon(&ctl, self.settings.dev_mode, &self.session_storage())?;
+        ctl.resume(
+            &info.modules,
+            &session.wallet_config(),
+            &session.wallet_storage(),
+            &self.settings.sequencer_url(),
+        )?;
+        self.join_hub(&ctl)?;
+        funded
+    }
+
+    /// Restarts a session's daemon and brings it back as `up` does: a fresh start for modules
+    /// that keep state while loaded, e.g. `libp2p_module`, which advertises one service per load.
+    /// Its packages, keys and funded wallet stay.
+    pub fn session_restart(&self, name: &str) -> Result<Done> {
+        let session = self.existing_session(name)?;
+        self.require_running()?;
+        // A session that can't come back stays as it is.
+        session.info()?;
+        session.logosctl().stop()?;
+        self.resume_session(&session, false)?;
+        Ok(Done {
+            message: format!(
+                "Restarted session {name}: its modules are loaded and its wallet open."
+            ),
+        })
     }
 
     /// The sessions, or none (with a note) when their directory can't be read.
@@ -1765,6 +1786,17 @@ mod tests {
             &format!("token = {{ url = \"https://example.com/t.bin\", sha256 = \"{sha}\" }}"),
         );
         assert!(released.needs_curl());
+    }
+
+    #[test]
+    fn restarts_only_a_session_on_a_running_devnet() {
+        let dir = tempfile::tempdir().unwrap();
+        let devnet = devnet_in(&dir.path().join("home"));
+        let err = devnet.session_restart("nobody").unwrap_err();
+        assert!(err.to_string().contains("no session nobody"), "{err}");
+        std::fs::create_dir_all(devnet.home.sessions_dir().join("alice")).unwrap();
+        let err = devnet.session_restart("alice").unwrap_err();
+        assert!(err.to_string().contains("not running"), "{err}");
     }
 
     #[test]
