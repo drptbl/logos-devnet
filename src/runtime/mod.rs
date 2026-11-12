@@ -70,6 +70,10 @@ pub trait Runtime {
     fn stop(&self) -> Result<()>;
     /// Whether the sequencer runs. False when the runtime can't be asked (Docker is down).
     fn running(&self) -> bool;
+    /// `running`, for `status`: an error when the runtime doesn't answer within `timeout`.
+    fn running_within(&self, _timeout: Duration) -> Result<bool> {
+        Ok(self.running())
+    }
     /// Deletes the chain's data, keeping the chain directory. Only while stopped.
     fn wipe_chain(&self) -> Result<()>;
     /// Runs the LEZ `wallet` on the wallet in `home` and returns everything it printed (it
@@ -94,16 +98,36 @@ pub(crate) fn stdout_of(cmd: &mut Command) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// A command `stdout_within` gave up on.
+#[derive(Debug)]
+pub(crate) struct TimedOut {
+    program: std::ffi::OsString,
+    timeout: Duration,
+}
+
+impl std::fmt::Display for TimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:?} didn't answer within {} s",
+            self.program,
+            self.timeout.as_secs_f32()
+        )
+    }
+}
+
+impl std::error::Error for TimedOut {}
+
 /// `stdout_of`, giving up on a `cmd` that hasn't answered within `timeout`: it's killed, and
 /// the error says so. A process it leaves holding its output open doesn't hold this up either.
 pub(crate) fn stdout_within(cmd: &mut Command, timeout: Duration) -> Result<String> {
     let deadline = Instant::now() + timeout;
     let program = cmd.get_program().to_owned();
     let timed_out = || {
-        anyhow::anyhow!(
-            "{program:?} didn't answer within {} s",
-            timeout.as_secs_f32()
-        )
+        anyhow::Error::new(TimedOut {
+            program: program.clone(),
+            timeout,
+        })
     };
     let mut child = cmd
         .stdin(Stdio::null())
@@ -315,6 +339,7 @@ mod tests {
         let err =
             stdout_within(Command::new("sleep").arg("30"), Duration::from_millis(200)).unwrap_err();
         assert!(err.to_string().contains("didn't answer within"), "{err}");
+        assert!(err.is::<TimedOut>(), "callers can tell a timeout apart");
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "killed, not waited for"
