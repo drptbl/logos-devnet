@@ -251,6 +251,9 @@ impl Devnet {
         let unchanged = settings == self.settings && self.home.settings_file().exists();
         if !wipe && unchanged && !opts.rebuild && running {
             eprintln!("Already running.");
+            // Its container may run before the sequencer answers: a long chain takes a while to
+            // load, and an `up` stopped while waiting leaves it starting.
+            self.wait_ready()?;
             self.make_project_groups()?;
             self.write_env(&self.read_env().unwrap_or_default())?;
             let mut deployed = Vec::new();
