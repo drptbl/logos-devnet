@@ -1,3 +1,6 @@
-# A project with a session and the messaging hub: the action installs logosctl for them.
+# A project with sessions, the messaging hub and local storage: the action installs logosctl
+# for them.
 [sessions.alice]
+[sessions.bob]
 [messaging]
+[storage]

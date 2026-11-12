@@ -32,8 +32,16 @@ pub struct Status {
     pub sessions: Vec<String>,
     /// The local messaging hub, when the devnet has one.
     pub messaging: Option<Messaging>,
+    /// The hub's storage node, when a project asked for local storage.
+    pub storage: Option<Storage>,
     /// The env file to `source`, once the devnet has run.
     pub env_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Storage {
+    /// Whether the hub's storage node, the sessions' bootstrap node, runs.
+    pub running: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -213,6 +221,13 @@ impl Report for Status {
                 out += &format!("           discovery  {}\n", a.discovery);
             }
         }
+        if let Some(s) = &self.storage {
+            out += if s.running {
+                "storage    running, the sessions' bootstrap node\n"
+            } else {
+                "storage    stopped. `logos-devnet up` starts it\n"
+            };
+        }
         if let Some(env) = &self.env_file {
             out += &format!("env        {}\n", env.display());
         }
@@ -350,6 +365,7 @@ mod tests {
                     discovery: "/ip4/127.0.0.1/tcp/61320/p2p/16Uiu2HAmB".into(),
                 }),
             }),
+            storage: None,
             env_file: None,
         };
         let json = serde_json::to_value(&status).unwrap();
@@ -404,6 +420,7 @@ mod tests {
             account_groups: vec![],
             sessions: vec![],
             messaging: None,
+            storage: None,
             env_file: None,
         };
         assert!(

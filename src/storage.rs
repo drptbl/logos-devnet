@@ -2,7 +2,9 @@
 //! `storage_module`, which reads `$HOME/.logos_storage/config.json` and keeps its data next to
 //! it: one store per user, which a second daemon can't open while the first runs. So each daemon
 //! gets a `HOME` of its own, with a config written there before it starts: a node on
-//! 127.0.0.1 that joins no public network.
+//! 127.0.0.1 that joins no public network. With `[storage]`, the messaging hub's daemon runs a
+//! storage node on a fixed port, and every session's node takes it as its only bootstrap node,
+//! so the sessions form a storage network of their own.
 //!
 //! logos-devnet never calls `storage_module.init`: the module saves the config it's given into
 //! the daemon's `HOME`, and outside a devnet daemon that's the user's own.
@@ -38,6 +40,23 @@ pub fn isolated() -> Value {
     })
 }
 
+/// The hub's storage node: on 127.0.0.1 at `port`, with no bootstrap node of its own.
+pub fn hub(port: u16) -> Value {
+    let mut config = isolated();
+    config["listen-port"] = json!(port);
+    config
+}
+
+/// A session's storage node, which joins the network of the node whose signed peer record is
+/// `spr`, the hub's, and no other.
+pub fn client(spr: &str) -> Value {
+    let mut config = isolated();
+    let fields = config.as_object_mut().expect("a JSON object");
+    fields.remove("no-bootstrap-node");
+    fields.insert("bootstrap-node".into(), json!([spr]));
+    config
+}
+
 /// Where the module reads its config in a daemon whose `HOME` is `home`.
 pub fn config_file(home: &Path) -> PathBuf {
     home.join(".logos_storage").join("config.json")
@@ -48,22 +67,34 @@ pub fn data_dir(home: &Path) -> PathBuf {
     home.join(".logos_storage").join("data")
 }
 
-/// Writes `config` into `home` unless the file there already holds its keys. True when they
-/// differed, so a running daemon has to restart to take them.
+/// Writes `config` into `home` unless the file there already holds its keys. True when a
+/// running daemon has to restart to take it. A new record of the same bootstrap node needs
+/// none: the hub's record changes on each of its restarts, and the old one still reaches it.
 pub fn write_config(home: &Path, config: &Value) -> Result<bool> {
     let path = config_file(home);
     let current: Value = std::fs::read_to_string(&path)
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or(Value::Null);
-    if OWNED.iter().all(|key| current.get(key) == config.get(key)) {
+    let differs = |key: &&str| current.get(*key) != config.get(*key);
+    if !OWNED.iter().any(differs) {
         return Ok(false);
     }
+    let bootstraps = |config: &Value| {
+        config
+            .get("bootstrap-node")
+            .map(|b| b.as_array().map(Vec::len))
+    };
+    let restart = OWNED
+        .iter()
+        .filter(|key| **key != "bootstrap-node")
+        .any(differs)
+        || bootstraps(&current) != bootstraps(config);
     let dir = path.parent().expect("a config file has a directory");
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     std::fs::write(&path, config.to_string())
         .with_context(|| format!("writing {}", path.display()))?;
-    Ok(true)
+    Ok(restart)
 }
 
 #[cfg(test)]
@@ -78,6 +109,37 @@ mod tests {
         assert_eq!(config["mix-enabled"], false);
         assert!(config.get("network").is_none(), "no preset network");
         assert_eq!(config["config-version"], 3);
+    }
+
+    #[test]
+    fn sessions_bootstrap_from_the_hub_alone() {
+        let hub = hub(4041);
+        assert_eq!(hub["listen-port"], 4041);
+        assert_eq!(hub["no-bootstrap-node"], true);
+        let client = client("spr:hub");
+        assert_eq!(client["bootstrap-node"], json!(["spr:hub"]));
+        assert!(client.get("no-bootstrap-node").is_none());
+        assert!(client.get("network").is_none(), "no preset network");
+        assert_eq!(client["listen-ip"], "127.0.0.1");
+    }
+
+    #[test]
+    fn a_new_record_of_the_same_hub_needs_no_restart() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(write_config(home.path(), &client("spr:first")).unwrap());
+        assert!(
+            !write_config(home.path(), &client("spr:after-a-restart")).unwrap(),
+            "same hub"
+        );
+        let saved = std::fs::read_to_string(config_file(home.path())).unwrap();
+        assert!(
+            saved.contains("spr:after-a-restart"),
+            "the file has the new one"
+        );
+        assert!(
+            write_config(home.path(), &isolated()).unwrap(),
+            "leaving the hub's network"
+        );
     }
 
     #[test]
