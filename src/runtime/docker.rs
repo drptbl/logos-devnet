@@ -5,13 +5,14 @@
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 use super::{
-    Runtime, WalletArg, all_output_of, batch_script, redact_recovery_phrase, redacted,
-    run_attached, sequencer_env, split_batch, stdout_of,
+    Runtime, TimedOut, WalletArg, all_output_of, batch_script, redact_recovery_phrase, redacted,
+    run_attached, sequencer_env, split_batch, stdout_of, stdout_within,
 };
 use crate::home::{Home, Settings, write_json};
 
@@ -32,6 +33,22 @@ pub struct Docker {
 }
 
 impl Docker {
+    /// Whether `docker compose ps`, run through `run`, lists the sequencer as running. Docker
+    /// failing counts as no, and only `run` giving up is an error.
+    fn running_by(&self, run: impl FnOnce(&mut Command) -> Result<String>) -> Result<bool> {
+        if !self.home.compose_file().exists() {
+            return Ok(false);
+        }
+        let listed =
+            run(self
+                .compose()
+                .args(["ps", "--status", "running", "--quiet", "sequencer"]));
+        match listed {
+            Err(e) if e.is::<TimedOut>() => Err(e),
+            listed => Ok(listed.is_ok_and(|ids| !ids.trim().is_empty())),
+        }
+    }
+
     pub fn new(home: Home, settings: Settings) -> Self {
         Self { home, settings }
     }
@@ -208,12 +225,11 @@ impl Runtime for Docker {
     }
 
     fn running(&self) -> bool {
-        self.home.compose_file().exists()
-            && stdout_of(
-                self.compose()
-                    .args(["ps", "--status", "running", "--quiet", "sequencer"]),
-            )
-            .is_ok_and(|ids| !ids.trim().is_empty())
+        self.running_by(stdout_of).unwrap_or(false)
+    }
+
+    fn running_within(&self, timeout: Duration) -> Result<bool> {
+        self.running_by(|cmd| stdout_within(cmd, timeout))
     }
 
     fn wallet(&self, home: &Path, args: Vec<WalletArg>) -> Result<String> {
@@ -421,6 +437,34 @@ mod tests {
         assert_eq!(
             spec["services"]["sequencer"]["environment"]["RISC0_DEV_MODE"],
             "1"
+        );
+    }
+
+    #[test]
+    fn only_a_docker_that_doesnt_answer_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Home::locate(Some(dir.path().to_path_buf())).unwrap();
+        let docker = Docker::new(home.clone(), Settings::default());
+        let listing = |out: &'static str| move |_: &mut Command| Ok(out.to_owned());
+        assert!(
+            !docker.running_by(listing("abc\n")).unwrap(),
+            "no compose file yet"
+        );
+        std::fs::write(home.compose_file(), "{}").unwrap();
+        assert!(docker.running_by(listing("abc\n")).unwrap());
+        assert!(!docker.running_by(listing("")).unwrap());
+        assert!(!docker.running_by(|_| bail!("no daemon")).unwrap());
+        let stuck = docker.running_by(|_| {
+            Err(anyhow::Error::new(TimedOut {
+                program: "docker".into(),
+                timeout: Duration::from_secs(10),
+            }))
+        });
+        assert!(
+            stuck
+                .unwrap_err()
+                .to_string()
+                .contains("didn't answer within 10 s")
         );
     }
 

@@ -34,6 +34,8 @@ const FAUCET_LABEL: &str = "faucet";
 pub const DEFAULT_FUND: u64 = 10_000_000_000;
 /// How long `up` waits for the first block.
 const READY_TIMEOUT: Duration = Duration::from_secs(180);
+/// How long `status` waits for the runtime to say whether the sequencer runs.
+const RUNTIME_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 /// How often wallets poll the devnet for a transaction: a block or two.
 const WALLET_POLL_TIMEOUT: &str = "2s";
 
@@ -285,7 +287,7 @@ impl Devnet {
             let forgot = self.forget_group_chains();
             let resumed = self.resume_sessions(false);
             return with_status(
-                with_deploys(self.status(), &deployed),
+                with_deploys(self.report(true), &deployed),
                 after_start([forgot, applied, resumed, messaging]),
             );
         }
@@ -339,7 +341,7 @@ impl Devnet {
         let mut deployed = Vec::new();
         let applied = next.apply_project(&mut deployed);
         with_status(
-            with_deploys(next.status(), &deployed),
+            with_deploys(next.report(true), &deployed),
             after_start([marked, forgot, resumed, applied, messaging]),
         )
     }
@@ -801,9 +803,22 @@ impl Devnet {
         })
     }
 
+    /// What runs. A runtime that doesn't answer within `RUNTIME_CHECK_TIMEOUT` shows the
+    /// sequencer as stopped, and a note says why.
     pub fn status(&self) -> Status {
+        let running = self
+            .runtime
+            .running_within(RUNTIME_CHECK_TIMEOUT)
+            .unwrap_or_else(|e| {
+                eprintln!("{e:#}, so the sequencer shows as stopped, though it may be running.");
+                false
+            });
+        self.report(running)
+    }
+
+    /// `status`, with whether the sequencer runs already known: `up` has just seen it serve.
+    fn report(&self, running: bool) -> Status {
         let s = &self.settings;
-        let running = self.runtime.running();
         let head = running.then(|| self.rpc().last_block_id().ok()).flatten();
         let env = self.read_env().ok();
         let programs = env
