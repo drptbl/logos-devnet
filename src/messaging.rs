@@ -547,6 +547,13 @@ esac"#,
     fn removing_it_deletes_its_keys_and_store() {
         let dir = tempfile::tempdir().unwrap();
         let hub = hub(dir.path(), true);
+        // Ports 0, which nothing holds: the fixed ones may be another program's here.
+        hub.save(&State {
+            delivery_port: 0,
+            discovery_port: 0,
+            ..state()
+        })
+        .unwrap();
         std::fs::write(hub.dir.join("store.sqlite3"), "").unwrap();
         hub.remove().unwrap();
         assert!(!hub.dir.exists());
