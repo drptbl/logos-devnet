@@ -21,7 +21,7 @@ use serde_json::Value;
 use crate::account::PublicId;
 use crate::envfile::{DEV_MODE_VAR, dev_mode_value};
 use crate::home::{read_dir_if_present, write_json};
-use crate::runtime::stdout_of;
+use crate::runtime::{stdout_of, stdout_within};
 use crate::wallet_storage;
 
 const LEZ_CORE: &str = "lez_core";
@@ -246,17 +246,7 @@ impl Logosctl {
 
     /// `output` for a command built from `cmd`.
     fn output_of(&self, cmd: &mut Command) -> Result<String> {
-        stdout_of(cmd).map_err(|e| {
-            let missing = e
-                .root_cause()
-                .downcast_ref::<std::io::Error>()
-                .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound);
-            if missing {
-                e.context("sessions and the messaging hub need logosctl, the Logos Core CLI, on your PATH")
-            } else {
-                e
-            }
-        })
+        stdout_of(cmd).map_err(install_hint)
     }
 
     /// Runs a logosctl command that answers in JSON.
@@ -332,10 +322,27 @@ impl Logosctl {
 
     /// Calls `method` on `module` with string arguments and returns its result.
     pub fn call(&self, module: &str, method: &str, args: &[&str]) -> Result<Value> {
-        let args: Vec<String> = args.iter().map(|a| format!("str:{a}")).collect();
-        let mut argv = vec!["call", module, method];
-        argv.extend(args.iter().map(String::as_str));
+        let argv = call_argv(module, method, args);
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
         call_result(self.run(&argv)?, &format!("{module}.{method}"))
+    }
+
+    /// `call`, giving up after `timeout`, for a caller that must not hang on a stuck daemon.
+    pub fn call_within(
+        &self,
+        module: &str,
+        method: &str,
+        args: &[&str],
+        timeout: Duration,
+    ) -> Result<Value> {
+        let out = stdout_within(self.cmd().args(call_argv(module, method, args)), timeout)
+            .map_err(install_hint)?;
+        call_result(last_json(&out)?, &format!("{module}.{method}"))
+    }
+
+    /// Whether the daemon answers within `timeout`.
+    pub fn answers_within(&self, timeout: Duration) -> bool {
+        self.dir.exists() && stdout_within(self.cmd().args(["daemon", "status"]), timeout).is_ok()
     }
 
     /// Creates the wallet with an empty password. `create_new` answers with the recovery
@@ -393,6 +400,26 @@ impl Logosctl {
         }
         Ok(())
     }
+}
+
+/// `e`, saying to install logosctl when it wasn't found.
+fn install_hint(e: anyhow::Error) -> anyhow::Error {
+    let missing = e
+        .root_cause()
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound);
+    if missing {
+        e.context("sessions and the messaging hub need logosctl, the Logos Core CLI, on your PATH")
+    } else {
+        e
+    }
+}
+
+/// `logosctl call`'s arguments, each of `args` as a string.
+fn call_argv(module: &str, method: &str, args: &[&str]) -> Vec<String> {
+    let mut argv = vec!["call".to_owned(), module.to_owned(), method.to_owned()];
+    argv.extend(args.iter().map(|a| format!("str:{a}")));
+    argv
 }
 
 /// Whether `module ls` (`listed`) shows `name` loaded.
