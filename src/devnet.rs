@@ -1346,7 +1346,7 @@ pub(crate) fn random_key() -> Result<String> {
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// The env file after `up`: a chain that carries on keeps its programs, a new one has none.
+/// Fails when something listens on `port` on 127.0.0.1.
 pub(crate) fn port_free(port: u16) -> Result<()> {
     std::net::TcpListener::bind(("127.0.0.1", port))
         .map(drop)
@@ -1382,6 +1382,7 @@ fn check_chain_keeps(chain: &Settings, next: &Settings) -> Result<()> {
     }
 }
 
+/// The env file after `up`: a chain that carries on keeps its programs, a new one has none.
 fn carried_env(continuing: bool, existing: Option<&str>, sequencer: String) -> Result<Env> {
     let mut env = match existing {
         Some(text) if continuing => Env::parse(text)
