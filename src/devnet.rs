@@ -1546,26 +1546,17 @@ mod tests {
     fn removing_the_hub_drops_its_variables() {
         let dir = tempfile::tempdir().unwrap();
         let devnet = devnet_with_file(dir.path(), "");
+        // A hub with no ports recorded yet, so removing it needs none free.
         std::fs::create_dir_all(devnet.home.messaging_dir()).unwrap();
-        // Ports nothing holds, as after the hub's daemon stopped.
-        let free = || {
-            std::net::TcpListener::bind(("127.0.0.1", 0))
-                .unwrap()
-                .local_addr()
-                .unwrap()
-                .port()
+        let env = Env {
+            sequencer: devnet.settings.sequencer_url(),
+            messaging: Some(crate::messaging::Addresses {
+                delivery: "/ip4/127.0.0.1/tcp/1/p2p/A".into(),
+                discovery: "/ip4/127.0.0.1/tcp/2/p2p/B".into(),
+            }),
+            ..Env::default()
         };
-        let (a, b) = (free(), free());
-        std::fs::write(
-            devnet.home.messaging_dir().join("hub.json"),
-            format!(
-                r#"{{"delivery_port":{a},"discovery_port":{b},"delivery_key":"","discovery_key":"",
-                    "addresses":{{"delivery":"/ip4/127.0.0.1/tcp/{a}/p2p/A","discovery":"/ip4/127.0.0.1/tcp/{b}/p2p/B"}}}}"#
-            ),
-        )
-        .unwrap();
-        devnet.write_env(&Env::default()).unwrap();
-        assert!(devnet.read_env().unwrap().messaging.is_some());
+        std::fs::write(devnet.home.env_file(), env.render()).unwrap();
         devnet.messaging_rm().unwrap();
         assert!(!devnet.home.messaging_dir().exists());
         assert!(devnet.read_env().unwrap().messaging.is_none());
