@@ -35,6 +35,23 @@ pub const DEFAULT_MAX_TXS_PER_BLOCK: u32 = 20;
 /// The sequencer's log filter (`RUST_LOG`): its own progress, without its actor framework's.
 pub const DEFAULT_LOG_FILTER: &str = "info,kameo=warn";
 
+/// A LEZ tag logos-devnet runs: one of the v0.3 line, e.g. `v0.3.1`. LEZ v0.4 changes the
+/// sequencer's config and commands, the wallet's format and how accounts are funded.
+pub fn check_lez(tag: &str) -> Result<()> {
+    let patch = tag.strip_prefix("v0.3.").unwrap_or_default();
+    let numbered = patch
+        .split(['-', '.'])
+        .next()
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    if !numbered {
+        anyhow::bail!(
+            "logos-devnet runs LEZ v0.3 tags, and {tag} isn't one: use `--lez {DEFAULT_LEZ}` or \
+             another v0.3 tag. LEZ v0.4 changes the sequencer and wallet, and isn't supported yet"
+        );
+    }
+    Ok(())
+}
+
 /// A log filter the sequencer takes: `RUST_LOG` syntax, e.g. `debug` or
 /// `info,sequencer_core=debug`.
 pub fn check_log_filter(filter: &str) -> Result<()> {
@@ -322,6 +339,25 @@ pub fn write_json(path: &Path, value: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runs_only_lez_v0_3_tags() {
+        for tag in ["v0.3.1", "v0.3.2", "v0.3.10", "v0.3.2-rc1"] {
+            assert!(check_lez(tag).is_ok(), "{tag}");
+        }
+        for tag in [
+            "v0.4.0-rc3",
+            "v0.4.0",
+            "v0.3",
+            "v0.3.",
+            "v0.3.x",
+            "0.3.1",
+            "main",
+        ] {
+            assert!(check_lez(tag).is_err(), "{tag}");
+        }
+        assert!(check_lez(DEFAULT_LEZ).is_ok());
+    }
 
     #[test]
     fn refuses_an_empty_log_filter() {

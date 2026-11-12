@@ -262,6 +262,7 @@ impl Devnet {
     fn launch(self, opts: &UpOptions, wipe: bool) -> Result<Status> {
         let running = self.runtime.running();
         let settings = opts.apply(self.with_project_settings(opts, running && !wipe)?);
+        crate::home::check_lez(&settings.lez)?;
         chain_config::block_time_secs(&settings.block_time)?;
         chain_config::check_max_txs_per_block(settings.max_txs_per_block)?;
         crate::home::check_log_filter(&settings.log_filter)?;
@@ -2150,19 +2151,35 @@ mod tests {
     }
 
     #[test]
-    fn up_refuses_another_lez_tag_on_an_existing_chain() {
+    fn up_refuses_a_lez_tag_outside_v0_3_before_saving_anything() {
         let dir = tempfile::tempdir().unwrap();
         let home = Home::locate(Some(dir.path().into())).unwrap();
-        std::fs::create_dir_all(home.chain_dir().join("rocksdb-0101")).unwrap();
         let opts = UpOptions {
-            lez: Some("v9.9.9".into()),
+            lez: Some("v0.4.0-rc3".into()),
             ..UpOptions::default()
         };
         let err = Devnet::open(home.clone(), None)
             .unwrap()
             .up(&opts)
             .unwrap_err();
-        assert!(err.to_string().contains("reset --lez v9.9.9"), "{err}");
+        assert!(err.to_string().contains("--lez v0.3.1"), "{err}");
+        assert!(!home.settings_file().exists(), "nothing saved");
+    }
+
+    #[test]
+    fn up_refuses_another_lez_tag_on_an_existing_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Home::locate(Some(dir.path().into())).unwrap();
+        std::fs::create_dir_all(home.chain_dir().join("rocksdb-0101")).unwrap();
+        let opts = UpOptions {
+            lez: Some("v0.3.9".into()),
+            ..UpOptions::default()
+        };
+        let err = Devnet::open(home.clone(), None)
+            .unwrap()
+            .up(&opts)
+            .unwrap_err();
+        assert!(err.to_string().contains("reset --lez v0.3.9"), "{err}");
         assert!(!home.settings_file().exists(), "nothing saved");
     }
 
