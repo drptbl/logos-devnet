@@ -252,7 +252,7 @@ impl Logosctl {
                 .downcast_ref::<std::io::Error>()
                 .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound);
             if missing {
-                e.context("sessions need logosctl, the Logos Core CLI, on your PATH")
+                e.context("sessions and the messaging hub need logosctl, the Logos Core CLI, on your PATH")
             } else {
                 e
             }
@@ -429,7 +429,7 @@ fn call_result(reply: Value, what: &str) -> Result<Value> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::wallet_storage::tests::SYNCED_STORAGE;
     use serde_json::json;
@@ -438,7 +438,7 @@ mod tests {
     const PHRASE: &str = "amused river fossil";
 
     /// A logosctl stand-in: records its arguments, one call per line, and answers per `script`.
-    fn fake_logosctl(dir: &Path, script: &str) -> Logosctl {
+    pub(crate) fn fake_logosctl(dir: &Path, script: &str) -> Logosctl {
         let program = dir.join("logosctl");
         let source = dir.join("logosctl.sh");
         let log = dir.join("calls.log");
@@ -463,7 +463,7 @@ mod tests {
         }
     }
 
-    fn calls(dir: &Path) -> String {
+    pub(crate) fn calls(dir: &Path) -> String {
         std::fs::read_to_string(dir.join("calls.log")).unwrap_or_default()
     }
 

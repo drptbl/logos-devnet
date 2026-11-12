@@ -16,6 +16,7 @@ use crate::envfile::{self, Env};
 use crate::fetch;
 use crate::groups::{self, Group, GroupInfo};
 use crate::home::{Home, RuntimeKind, Settings, write_json};
+use crate::messaging::Hub;
 use crate::project::{ProgramSource, ProgramSpec, Project};
 use crate::report::{
     self, Balance, Done, EnvVars, GroupSummary, Groups, Program, Report, SessionMade, SessionRow,
@@ -190,6 +191,28 @@ impl Devnet {
                 .project
                 .as_ref()
                 .is_some_and(|p| !p.sessions.is_empty())
+            || self.wants_hub()
+    }
+
+    fn hub(&self) -> Hub {
+        Hub::new(self.home.messaging_dir())
+    }
+
+    /// Whether `up` runs the messaging hub: the project asks for it, or the devnet has one.
+    /// Another project's file that leaves it out doesn't stop it.
+    fn wants_hub(&self) -> bool {
+        self.project.as_ref().is_some_and(|p| p.messaging) || self.hub().exists()
+    }
+
+    /// Starts the messaging hub, or brings back what it lacks, when `up` runs it.
+    fn ensure_hub(&self) -> Result<()> {
+        if !self.wants_hub() {
+            return Ok(());
+        }
+        self.hub()
+            .ensure(self.settings.dev_mode)
+            .map(drop)
+            .context("the messaging hub")
     }
 
     /// Runs the LEZ wallet on the dev wallet. Its config is rewritten first: the wallet would
@@ -255,6 +278,7 @@ impl Devnet {
             // load, and an `up` stopped while waiting leaves it starting.
             self.wait_ready()?;
             self.make_project_groups()?;
+            let messaging = self.ensure_hub();
             self.write_env(&self.read_env().unwrap_or_default())?;
             let mut deployed = Vec::new();
             let applied = self.apply_project(&mut deployed);
@@ -262,7 +286,7 @@ impl Devnet {
             let resumed = self.resume_sessions(false);
             return with_status(
                 with_deploys(self.status(), &deployed),
-                after_start([forgot, applied, resumed]),
+                after_start([forgot, applied, resumed, messaging]),
             );
         }
         // The running sequencer holds its own port, and gives it up when it stops.
@@ -300,6 +324,7 @@ impl Devnet {
         };
         next.runtime.start()?;
         next.wait_ready()?;
+        let messaging = next.ensure_hub();
 
         let existing = std::fs::read_to_string(next.home.env_file()).ok();
         let env = carried_env(
@@ -315,7 +340,7 @@ impl Devnet {
         let applied = next.apply_project(&mut deployed);
         with_status(
             with_deploys(next.status(), &deployed),
-            after_start([marked, forgot, resumed, applied]),
+            after_start([marked, forgot, resumed, applied, messaging]),
         )
     }
 
@@ -383,10 +408,23 @@ impl Devnet {
         }
         if self.needs_logosctl() && !logosctl_on_path() {
             bail!(
-                "sessions need logosctl, the Logos Core CLI, on your PATH. Install it, or drop \
-                 the sessions you no longer need: `logos-devnet session rm <name>`, and from \
-                 [sessions] in the project file"
+                "sessions and the messaging hub need logosctl, the Logos Core CLI, on your PATH. \
+                 Install it, or drop what you no longer need: a session with `logos-devnet \
+                 session rm <name>` and from [sessions] in the project file, the hub from \
+                 [messaging] and, after `down`, the home's messaging/ directory"
             );
+        }
+        let hub = self.hub();
+        if self.wants_hub() && !hub.running() {
+            for port in hub.ports().into_iter().flatten() {
+                if port_free(port).is_err() {
+                    bail!(
+                        "port {port} on 127.0.0.1, which the messaging hub keeps, is taken. Free \
+                         it, or delete {} to give the hub new ports and peer ids",
+                        self.home.messaging_dir().display()
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -732,6 +770,7 @@ impl Devnet {
             programs: env.programs.clone(),
             groups: BTreeMap::new(),
             dev_mode: self.settings.dev_mode,
+            messaging: self.hub().addresses(),
         };
         for group in groups::list(&self.home.groups_dir())? {
             env.groups.insert(group.name.clone(), group.manifest());
@@ -751,6 +790,9 @@ impl Devnet {
             if let Err(e) = session.logosctl().stop() {
                 eprintln!("session {}: {e:#}", session.name);
             }
+        }
+        if let Err(e) = self.hub().stop() {
+            eprintln!("messaging hub: {e:#}");
         }
         self.runtime.stop()?;
         Ok(Done {
@@ -791,8 +833,17 @@ impl Devnet {
             programs,
             account_groups: self.group_summaries().unwrap_or_default(),
             sessions: self.sessions().into_iter().map(|s| s.name).collect(),
+            messaging: self.hub_status(),
             env_file: env.map(|_| self.home.env_file()),
         }
+    }
+
+    fn hub_status(&self) -> Option<report::Messaging> {
+        let hub = self.hub();
+        hub.exists().then(|| report::Messaging {
+            running: hub.running(),
+            addresses: hub.addresses(),
+        })
     }
 
     pub fn fund(&self, account: &str, amount: u128) -> Result<Balance> {
@@ -1286,7 +1337,7 @@ fn deploy_step(
 }
 
 /// A fresh private key: 32 random bytes as hex, the form `account import` takes.
-fn random_key() -> Result<String> {
+pub(crate) fn random_key() -> Result<String> {
     use std::io::Read;
     let mut bytes = [0u8; 32];
     std::fs::File::open("/dev/urandom")
@@ -1404,12 +1455,78 @@ mod tests {
         assert!(format!("{err:#}").contains("holds a `:`"), "{err:#}");
     }
 
-    /// A devnet in `dir/home` for a project file in `dir` holding `programs`.
-    fn devnet_with_programs(dir: &Path, programs: &str) -> Devnet {
+    /// A devnet in `dir/home` for a project file in `dir` holding `text`.
+    fn devnet_with_file(dir: &Path, text: &str) -> Devnet {
         let file = dir.join(crate::project::FILE_NAME);
-        std::fs::write(&file, format!("[programs]\n{programs}\n")).unwrap();
+        std::fs::write(&file, text).unwrap();
         let home = Home::locate(Some(dir.join("home"))).unwrap();
         Devnet::open(home, Some(Project::load(&file).unwrap())).unwrap()
+    }
+
+    /// A devnet in `dir/home` for a project file in `dir` holding `programs`.
+    fn devnet_with_programs(dir: &Path, programs: &str) -> Devnet {
+        devnet_with_file(dir, &format!("[programs]\n{programs}\n"))
+    }
+
+    #[test]
+    fn the_messaging_hub_needs_logosctl_before_the_devnet_is_touched() {
+        let dir = tempfile::tempdir().unwrap();
+        let devnet = devnet_with_file(dir.path(), "[messaging]\n");
+        let err = devnet.check_needs(|| false).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("messaging hub need logosctl"),
+            "{err:#}"
+        );
+        assert!(devnet.check_needs(|| true).is_ok());
+    }
+
+    #[test]
+    fn a_hub_left_by_another_project_keeps_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let devnet = devnet_with_file(dir.path(), "");
+        assert!(!devnet.wants_hub());
+        std::fs::create_dir_all(devnet.home.messaging_dir()).unwrap();
+        std::fs::write(devnet.home.messaging_dir().join("hub.json"), "{}").unwrap();
+        assert!(devnet.wants_hub());
+    }
+
+    #[test]
+    fn the_env_file_points_at_the_hubs_nodes() {
+        let dir = tempfile::tempdir().unwrap();
+        let devnet = devnet_in(&dir.path().join("home"));
+        std::fs::create_dir_all(devnet.home.messaging_dir()).unwrap();
+        std::fs::write(
+            devnet.home.messaging_dir().join("hub.json"),
+            r#"{"delivery_port":1,"discovery_port":2,"delivery_key":"","discovery_key":"",
+                "addresses":{"delivery":"/ip4/127.0.0.1/tcp/1/p2p/A","discovery":"/ip4/127.0.0.1/tcp/2/p2p/B"}}"#,
+        )
+        .unwrap();
+        devnet.write_env(&Env::default()).unwrap();
+        let env = devnet.read_env().unwrap();
+        let hub = env.messaging.expect("the hub's addresses");
+        assert_eq!(hub.delivery, "/ip4/127.0.0.1/tcp/1/p2p/A");
+        assert_eq!(hub.discovery, "/ip4/127.0.0.1/tcp/2/p2p/B");
+    }
+
+    #[test]
+    fn refuses_a_taken_hub_port_before_touching_the_devnet() {
+        let dir = tempfile::tempdir().unwrap();
+        let devnet = devnet_with_file(dir.path(), "[messaging]\n");
+        let taken = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = taken.local_addr().unwrap().port();
+        std::fs::create_dir_all(devnet.home.messaging_dir()).unwrap();
+        std::fs::write(
+            devnet.home.messaging_dir().join("hub.json"),
+            format!(
+                r#"{{"delivery_port":{port},"discovery_port":1,"delivery_key":"","discovery_key":""}}"#
+            ),
+        )
+        .unwrap();
+        let err = devnet.check_needs(|| true).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("the messaging hub keeps"),
+            "{err:#}"
+        );
     }
 
     #[test]
@@ -1636,6 +1753,7 @@ mod tests {
             programs: vec![],
             account_groups: vec![],
             sessions: vec![],
+            messaging: None,
             env_file: None,
         };
         status.programs = vec![

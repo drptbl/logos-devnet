@@ -1,7 +1,9 @@
 //! `<home>/env`: what a project needs to point at the devnet, as `export` lines it can
 //! `source`. `LOGOS_DEVNET_SEQUENCER` is the RPC URL, each deployed program adds
 //! `LOGOS_PROGRAM_<NAME>` (base58) and `LOGOS_PROGRAM_<NAME>_HEX`, and each account group
-//! `LOGOS_DEVNET_ACCOUNTS_<NAME>`, the path of its `accounts.json`.
+//! `LOGOS_DEVNET_ACCOUNTS_<NAME>`, the path of its `accounts.json`. A messaging hub adds
+//! `LOGOS_DEVNET_DELIVERY_CONFIG`, `LOGOS_DEVNET_DELIVERY_ENTRY_NODE` and
+//! `LOGOS_DEVNET_DISCOVERY_BOOTSTRAP`.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -9,12 +11,16 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 
 use crate::account::PublicId;
+use crate::messaging::Addresses;
 use crate::runtime::sh_quote;
 
 pub const SEQUENCER_VAR: &str = "LOGOS_DEVNET_SEQUENCER";
 pub const HEADER: &str = "# Written by logos-devnet. Load it with: source <this file>\n";
 const PROGRAM_PREFIX: &str = "LOGOS_PROGRAM_";
 const GROUP_PREFIX: &str = "LOGOS_DEVNET_ACCOUNTS_";
+const DELIVERY_CONFIG_VAR: &str = "LOGOS_DEVNET_DELIVERY_CONFIG";
+const DELIVERY_ENTRY_NODE_VAR: &str = "LOGOS_DEVNET_DELIVERY_ENTRY_NODE";
+const DISCOVERY_BOOTSTRAP_VAR: &str = "LOGOS_DEVNET_DISCOVERY_BOOTSTRAP";
 /// RISC Zero's switch for fake proofs, read by every prover and verifier of the devnet.
 pub const DEV_MODE_VAR: &str = "RISC0_DEV_MODE";
 
@@ -33,6 +39,18 @@ pub struct Env {
     pub groups: BTreeMap<String, PathBuf>,
     /// Whether the chain runs in dev mode, so provers make fake proofs too.
     pub dev_mode: bool,
+    /// Where apps reach the messaging hub, when the devnet has one.
+    pub messaging: Option<Addresses>,
+}
+
+/// The messaging hub's variables: an app's delivery node config, the hub's delivery node and
+/// its discovery bootstrap node.
+fn messaging_vars(hub: &Addresses) -> [(&'static str, String); 3] {
+    [
+        (DELIVERY_CONFIG_VAR, hub.client_config()),
+        (DELIVERY_ENTRY_NODE_VAR, hub.delivery.clone()),
+        (DISCOVERY_BOOTSTRAP_VAR, hub.discovery.clone()),
+    ]
 }
 
 /// The wallet directory of the group whose `accounts.json` is `manifest`, for
@@ -107,6 +125,9 @@ impl Env {
             vars.push((var.clone(), path.to_string_lossy().into_owned()));
             vars.push((format!("{var}_WALLET"), group_wallet(path)));
         }
+        for (var, value) in self.messaging.iter().flat_map(messaging_vars) {
+            vars.push((var.to_owned(), value));
+        }
         vars
     }
 
@@ -128,6 +149,12 @@ impl Env {
             out += &export_line(&var, &path.to_string_lossy());
             out += &export_line(&format!("{var}_WALLET"), &group_wallet(path));
         }
+        if let Some(hub) = &self.messaging {
+            out += "# messaging hub\n";
+            for (var, value) in messaging_vars(hub) {
+                out += &export_line(var, &value);
+            }
+        }
         out
     }
 
@@ -137,6 +164,7 @@ impl Env {
         let mut env = Env::default();
         let mut pending: Option<String> = None;
         let mut pending_group: Option<String> = None;
+        let (mut entry_node, mut bootstrap) = (None, None);
         for line in text.lines() {
             if let Some(name) = line.strip_prefix("# program ") {
                 pending = Some(name.trim().to_owned());
@@ -160,11 +188,21 @@ impl Env {
                     env.programs.insert(name, PublicId::parse(&value)?);
                 } else if let Some(name) = pending_group.take_if(|n| group_var(n) == var) {
                     env.groups.insert(name, PathBuf::from(value));
+                } else if var == DELIVERY_ENTRY_NODE_VAR {
+                    entry_node = Some(value);
+                } else if var == DISCOVERY_BOOTSTRAP_VAR {
+                    bootstrap = Some(value);
                 }
             }
         }
         if env.sequencer.is_empty() {
             bail!("the env file has no {SEQUENCER_VAR}");
+        }
+        if let (Some(delivery), Some(discovery)) = (entry_node, bootstrap) {
+            env.messaging = Some(Addresses {
+                delivery,
+                discovery,
+            });
         }
         Ok(env)
     }
@@ -270,6 +308,35 @@ mod tests {
             "/h/it's here/accounts/users/accounts.json".into(),
         );
         assert_eq!(Env::parse(&env.render()).unwrap(), env);
+    }
+
+    #[test]
+    fn exports_the_messaging_hub_so_a_shell_reads_its_json_intact() {
+        let hub = Addresses {
+            delivery: "/ip4/127.0.0.1/tcp/61310/p2p/16Uiu2HAmA".into(),
+            discovery: "/ip4/127.0.0.1/tcp/61320/p2p/16Uiu2HAmB".into(),
+        };
+        let env = Env {
+            sequencer: "http://127.0.0.1:3041".into(),
+            messaging: Some(hub.clone()),
+            ..Env::default()
+        };
+        assert_eq!(Env::parse(&env.render()).unwrap(), env);
+        let vars = env.vars();
+        assert!(vars.contains(&(DELIVERY_ENTRY_NODE_VAR.into(), hub.delivery.clone())));
+        assert!(vars.contains(&(DISCOVERY_BOOTSTRAP_VAR.into(), hub.discovery.clone())));
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("env");
+        std::fs::write(&file, env.render()).unwrap();
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                ". '{}' && printf %s \"${DELIVERY_CONFIG_VAR}\"",
+                file.display()
+            ))
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8(out.stdout).unwrap(), hub.client_config());
     }
 
     #[test]

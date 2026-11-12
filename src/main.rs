@@ -14,6 +14,7 @@ mod envfile;
 mod fetch;
 mod groups;
 mod home;
+mod messaging;
 mod project;
 mod report;
 mod rpc;

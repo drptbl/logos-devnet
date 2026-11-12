@@ -103,6 +103,15 @@ jobs:
           logosctl --version
           logos-devnet --config .github/ci/sessions.toml session ls --json \
             | jq -e '.[0].name == "alice" and .[0].running and .[0].balance > 0'
+      - name: the messaging hub runs and its addresses are exported
+        run: |
+          set -euo pipefail
+          logos-devnet --config .github/ci/sessions.toml status --json \
+            | jq -e '.messaging.running and (.messaging.delivery | test("^/ip4/127\\.0\\.0\\.1/tcp/[0-9]+/p2p/"))'
+          jq -e --arg entry "$LOGOS_DEVNET_DELIVERY_ENTRY_NODE" \
+            '.mode == "Edge" and .messagingOverrides["entry-node"] == [$entry]' \
+            <<< "$LOGOS_DEVNET_DELIVERY_CONFIG"
+          [[ "$LOGOS_DEVNET_DISCOVERY_BOOTSTRAP" == /ip4/127.0.0.1/tcp/*/p2p/* ]]
       # The container runs a few seconds before its sequencer answers, as after an `up` that
       # was stopped while a long chain loaded: the next `up` waits for it.
       - name: up waits for a sequencer that's still starting

@@ -48,7 +48,13 @@ struct ProjectFile {
     accounts: BTreeMap<String, GroupSpec>,
     #[serde(default)]
     sessions: BTreeMap<String, SessionSpec>,
+    messaging: Option<MessagingSection>,
 }
+
+/// `[messaging]`: an empty table that asks for the local messaging hub.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MessagingSection {}
 
 /// A `[programs]` entry: the binary's path, or a table that can name a release instead and make
 /// it mutable.
@@ -179,6 +185,8 @@ pub struct Project {
     pub programs: BTreeMap<String, ProgramSpec>,
     pub accounts: BTreeMap<String, GroupSpec>,
     pub sessions: BTreeMap<String, SessionSpec>,
+    /// Whether it asks for the local messaging hub.
+    pub messaging: bool,
 }
 
 /// The nearest `logos-devnet.toml` in `start` or a directory above it.
@@ -266,6 +274,7 @@ impl Project {
             programs,
             accounts: file.accounts,
             sessions: file.sessions,
+            messaging: file.messaging.is_some(),
         })
     }
 }
@@ -278,6 +287,14 @@ mod tests {
         let path = dir.join(FILE_NAME);
         std::fs::write(&path, text).unwrap();
         Project::load(&path)
+    }
+
+    #[test]
+    fn an_empty_messaging_table_asks_for_the_hub() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(project_in(dir.path(), "[messaging]\n").unwrap().messaging);
+        assert!(!project_in(dir.path(), "").unwrap().messaging);
+        assert!(project_in(dir.path(), "[messaging]\nport = 1\n").is_err());
     }
 
     #[test]

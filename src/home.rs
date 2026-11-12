@@ -12,6 +12,7 @@
 //! accounts/       account groups: many funded keys for tests (see groups)
 //! programs.json   the binary hash each program was deployed from
 //! downloads/      program binaries the project file names by URL
+//! messaging/      the local messaging hub, when a project asks for one (see messaging)
 //! lock            held by the command changing the home, so two take turns
 //! ```
 
@@ -206,6 +207,10 @@ impl Home {
     /// Program binaries downloaded from a URL, named by their SHA-256.
     pub fn downloads_dir(&self) -> PathBuf {
         self.root.join("downloads")
+    }
+    /// The local messaging hub's state and daemon.
+    pub fn messaging_dir(&self) -> PathBuf {
+        self.root.join("messaging")
     }
     /// Each deployed program's binary hash, to notice a changed build.
     pub fn programs_file(&self) -> PathBuf {
