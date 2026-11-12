@@ -7,8 +7,8 @@ branding:
 inputs:
   version:
     description: >-
-      The logos-devnet release to install, e.g. v0.3.1. Empty installs the release this action
-      was used at (`uses: drptbl/logos-devnet@v0.3.1`), or uses a logos-devnet already on PATH,
+      The logos-devnet release to install, as its tag. Empty installs the release this action
+      was used at (`uses: drptbl/logos-devnet@<tag>`), or uses a logos-devnet already on PATH,
       or, pinned to a commit, installs the release that commit's Cargo.toml names.
     required: false
     default: ""
