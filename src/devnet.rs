@@ -287,7 +287,7 @@ impl Devnet {
             let forgot = self.forget_group_chains();
             let resumed = self.resume_sessions(false);
             return with_status(
-                with_deploys(self.report(true), &deployed),
+                with_deploys(self.report(Some(true)), &deployed),
                 after_start([forgot, applied, resumed, messaging]),
             );
         }
@@ -341,7 +341,7 @@ impl Devnet {
         let mut deployed = Vec::new();
         let applied = next.apply_project(&mut deployed);
         with_status(
-            with_deploys(next.report(true), &deployed),
+            with_deploys(next.report(Some(true)), &deployed),
             after_start([marked, forgot, resumed, applied, messaging]),
         )
     }
@@ -803,22 +803,23 @@ impl Devnet {
         })
     }
 
-    /// What runs. A runtime that doesn't answer within `RUNTIME_CHECK_TIMEOUT` shows the
-    /// sequencer as stopped, and a note says why.
+    /// What runs. When the runtime doesn't answer within `RUNTIME_CHECK_TIMEOUT`, whether the
+    /// sequencer runs is unknown: `runtime_answered` is false, and a note says why.
     pub fn status(&self) -> Status {
         let running = self
             .runtime
             .running_within(RUNTIME_CHECK_TIMEOUT)
-            .unwrap_or_else(|e| {
-                eprintln!("{e:#}, so the sequencer shows as stopped, though it may be running.");
-                false
-            });
+            .map_err(|e| eprintln!("{e:#}, so whether the sequencer runs is unknown."))
+            .ok();
         self.report(running)
     }
 
     /// `status`, with whether the sequencer runs already known: `up` has just seen it serve.
-    fn report(&self, running: bool) -> Status {
+    /// `None` when the runtime didn't say.
+    fn report(&self, running: Option<bool>) -> Status {
         let s = &self.settings;
+        let runtime_answered = running.is_some();
+        let running = running.unwrap_or(false);
         let head = running.then(|| self.rpc().last_block_id().ok()).flatten();
         let env = self.read_env().ok();
         let programs = env
@@ -836,6 +837,7 @@ impl Devnet {
             sequencer: report::Sequencer {
                 url: s.sequencer_url(),
                 running,
+                runtime_answered,
                 block: head,
                 max_txs_per_block: s.max_txs_per_block,
                 block_time: s.block_time.clone(),
@@ -1828,6 +1830,7 @@ mod tests {
             sequencer: report::Sequencer {
                 url: "http://127.0.0.1:3040".into(),
                 running: true,
+                runtime_answered: true,
                 block: Some(1),
                 max_txs_per_block: 20,
                 block_time: "1s".into(),

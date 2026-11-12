@@ -33,7 +33,7 @@ Pass `--json` to every command: on success stdout holds one JSON document, and n
    - `LOGOS_DEVNET_ACCOUNTS_<NAME>_WALLET`: the group's LEZ wallet, for `LEE_WALLET_HOME_DIR`.
    - `RISC0_DEV_MODE`: `1` or `0`, matching the chain.
    - With `[messaging]`: `LOGOS_DEVNET_DELIVERY_CONFIG`, the `delivery_module.createNode` config of a node that uses the local hub, `LOGOS_DEVNET_DELIVERY_ENTRY_NODE`, and `LOGOS_DEVNET_DISCOVERY_BOOTSTRAP`, a `libp2p_module` bootstrap node.
-5. `logos-devnet status --json` shows what runs: chain head, faucet, programs, groups, sessions. The RPC answers anything else, e.g. an account's balance by its base58 id:
+5. `logos-devnet status --json` shows what runs: chain head, faucet, programs, groups, sessions. `.sequencer.runtime_answered` is false when Docker didn't answer within 10 s: Docker is stuck, so restart it rather than running `up`. The RPC answers anything else, e.g. an account's balance by its base58 id:
    ```bash
    curl -fsS "$LOGOS_DEVNET_SEQUENCER" -H 'content-type: application/json' \
      -d '{"jsonrpc":"2.0","id":1,"method":"getAccountBalance","params":["<base58 id>"]}'

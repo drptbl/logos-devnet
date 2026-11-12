@@ -53,6 +53,8 @@ pub struct Messaging {
 pub struct Sequencer {
     pub url: String,
     pub running: bool,
+    /// False when Docker didn't answer in time: `running` is then false, but means unknown.
+    pub runtime_answered: bool,
     /// The chain head, when it answers.
     pub block: Option<u64>,
     pub max_txs_per_block: u32,
@@ -161,6 +163,9 @@ impl Report for Status {
         let s = &self.sequencer;
         let mut out = format!("lez        {} ({})\n", self.lez, self.runtime);
         out += &match (s.running, s.block) {
+            _ if !s.runtime_answered => {
+                format!("sequencer  {}  unknown: Docker didn't answer", s.url)
+            }
             (true, Some(block)) => format!("sequencer  {}  running, block {block}", s.url),
             (true, None) => format!("sequencer  {}  starting", s.url),
             (false, _) => format!("sequencer  {}  stopped", s.url),
@@ -326,6 +331,7 @@ mod tests {
             sequencer: Sequencer {
                 url: "http://127.0.0.1:3040".into(),
                 running: true,
+                runtime_answered: true,
                 block: Some(7),
                 max_txs_per_block: 20,
                 block_time: "1s".into(),
@@ -363,6 +369,7 @@ mod tests {
         assert_eq!(json["sequencer"]["block"], 7);
         assert_eq!(json["sequencer"]["dev_mode"], true);
         assert!(status.human().contains("running, block 7, dev mode"));
+        assert_eq!(json["sequencer"]["runtime_answered"], true);
         assert_eq!(json["messaging"]["running"], true);
         assert_eq!(
             json["messaging"]["delivery"],
@@ -376,6 +383,40 @@ mod tests {
             status.human()
         );
         assert_eq!(json["messaging"]["discovery_node"], false);
+    }
+
+    #[test]
+    fn a_runtime_that_didnt_answer_leaves_the_sequencer_unknown() {
+        let status = Status {
+            lez: "v0.3.1".into(),
+            runtime: "docker".into(),
+            sequencer: Sequencer {
+                url: "http://127.0.0.1:3040".into(),
+                running: false,
+                runtime_answered: false,
+                block: None,
+                max_txs_per_block: 20,
+                block_time: "1s".into(),
+                dev_mode: false,
+            },
+            faucet: None,
+            programs: vec![],
+            account_groups: vec![],
+            sessions: vec![],
+            messaging: None,
+            env_file: None,
+        };
+        assert!(
+            status
+                .human()
+                .contains("sequencer  http://127.0.0.1:3040  unknown: Docker didn't answer"),
+            "{}",
+            status.human()
+        );
+        assert_eq!(
+            serde_json::to_value(&status).unwrap()["sequencer"]["runtime_answered"],
+            false
+        );
     }
 
     #[test]
