@@ -2,7 +2,7 @@
 home = ".logos-devnet"
 
 [devnet]
-port = 3042       # its own port, so it runs next to the shared devnet on 3040
+port = 0       # a free port, taken on the first `up` and kept, next to a shared devnet on 3040
 dev_mode = true   # fake proofs: a shielded transfer lands in about a second
 
 [sessions.alice]

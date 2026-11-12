@@ -15,7 +15,7 @@ Pass `--json` to every command: on success stdout holds one JSON document, and n
    ```toml
    home = ".logos-devnet"   # a devnet of this project's own
    [devnet]
-   port = 3041              # its own port: the shared devnet uses 3040
+   port = 0                 # a free port of its own, kept: the shared devnet uses 3040
    dev_mode = true          # only if something makes private calls
    [programs]
    counter = "target/riscv32im-risc0-zkvm-elf/docker/counter.bin"
@@ -41,7 +41,7 @@ Pass `--json` to every command: on success stdout holds one JSON document, and n
 
 ## Choices
 
-- **Home.** Without `home`, every project on the machine shares `~/.logos-devnet` on port 3040, and `up` refuses settings that disagree with what other projects run there. Tests, worktrees and parallel agents get `home = ".logos-devnet"` and a port of their own.
+- **Home.** Without `home`, every project on the machine shares `~/.logos-devnet` on port 3040, and `up` refuses settings that disagree with what other projects run there. Tests, worktrees and parallel agents get `home = ".logos-devnet"` and `[devnet] port = 0`, a free port of their own.
 - **Dev mode.** `dev_mode = true` makes private calls prove in about 1 s instead of about 2 min, with fake proofs. A chain keeps its dev mode for life: switching it takes `reset`. Use a chain without dev mode to check that real proofs verify.
 - **Programs.** A program can be a path, or a release: `{ url = "...", sha256 = "..." }`, downloaded once and deployed only if its SHA-256 matches. Programs deploy immutable, which undisclosed private calls require. While iterating on one, give it `{ path = "...", mutable = true }`: a rebuild then updates it in place with the same id on the next `up`. Its mutability is fixed per chain, so changing it takes `reset`. `.logos-devnet/programs.json` records each deployed program's binary SHA-256 and mutability: compare it with `shasum -a 256 <bin>` to show which build runs.
 - **Funding.** Groups that exist when a chain starts are funded at genesis, at once. A group added to a running chain is funded one transfer at a time, about 2.4 s per account. Every call holds about 1.6M lepta of fees up front, so an account that sends needs more than that. `logos-devnet fund Public/<id> [lepta]` tops one account up.
@@ -65,7 +65,7 @@ Each refusal changes nothing. `up` prefixes a program's refusal with `program <n
 | `this chain runs LEZ <tag>` | `reset --lez <tag>`. |
 | `logos-devnet runs LEZ v0.3 tags` | Use a v0.3 tag, e.g. `--lez v0.3.1`. LEZ v0.4 isn't supported yet. |
 | `the shared devnet runs with ..., but <file> asks for ...` | Other projects use that devnet. Give this project its own `home` and port. |
-| `port <n> on 127.0.0.1 is taken` | `up --port <free port>`, which is remembered, or the file's `[devnet] port`. |
+| `port <n> on 127.0.0.1 is taken` | `up --port <free port>`, remembered unless the file sets a fixed `port`. A new project home with `[devnet] port = 0` takes a free one on its first `up`. |
 | `sessions and the messaging hub need logosctl` | Install the Logos Core CLI, or remove the sessions and `[messaging]`. |
 | `port <n> on 127.0.0.1, which the messaging hub keeps, is taken` | Stop what holds it, or `messaging rm` and `up` for new ports and peer ids. |
 | `not a RISC Zero program binary` | Deploy the guest's `.bin` from `cargo risczero build`, not its ELF. |

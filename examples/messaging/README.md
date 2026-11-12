@@ -2,7 +2,7 @@
 
 Two `logosctl` sessions, Alice and Bob, send a message and find each other's service through the devnet's messaging hub. Nothing goes through the public fleet: every node listens on `127.0.0.1`.
 
-`logos-devnet.toml` here gives the example a devnet of its own on port 3044, the hub, and two sessions with `delivery_module` and `libp2p_module` installed. If something else holds 3044, `logos-devnet up --port <another>` picks another one, and it's remembered.
+`logos-devnet.toml` here gives the example a devnet of its own on a free port, the hub, and two sessions with `delivery_module` and `libp2p_module` installed.
 
 ## What you need
 

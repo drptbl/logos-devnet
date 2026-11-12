@@ -113,7 +113,12 @@ pub struct Devnet {
 
 impl Devnet {
     pub fn open(home: Home, project: Option<Project>) -> Result<Self> {
-        let settings = home.load_settings()?;
+        let mut settings = home.load_settings()?;
+        // `port = 0`: a devnet that hasn't run yet takes a free port, which `up` keeps.
+        let auto_port = project.as_ref().is_some_and(|p| p.devnet.port == Some(0));
+        if auto_port && !home.settings_file().exists() {
+            settings.port = free_port()?;
+        }
         Ok(Self::with(home, settings, project))
     }
 
@@ -1431,6 +1436,12 @@ pub(crate) fn random_key() -> Result<String> {
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// A port on 127.0.0.1 that nothing listens on now.
+pub(crate) fn free_port() -> Result<u16> {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).context("finding a free port")?;
+    Ok(listener.local_addr()?.port())
+}
+
 /// Fails when something listens on `port` on 127.0.0.1.
 pub(crate) fn port_free(port: u16) -> Result<()> {
     std::net::TcpListener::bind(("127.0.0.1", port))
@@ -1552,6 +1563,23 @@ mod tests {
     /// A devnet in `dir/home` for a project file in `dir` holding `programs`.
     fn devnet_with_programs(dir: &Path, programs: &str) -> Devnet {
         devnet_with_file(dir, &format!("[programs]\n{programs}\n"))
+    }
+
+    #[test]
+    fn port_zero_takes_a_free_port_once_and_keeps_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let devnet = devnet_with_file(dir.path(), "home = \"home\"\n[devnet]\nport = 0\n");
+        let first = devnet.settings_for_up().port;
+        assert_ne!(first, 0);
+        // Once `up` saved it (or `--port` changed it), the file's 0 keeps it.
+        let mut saved = devnet.settings.clone();
+        saved.port = 4567;
+        devnet.home.save_settings(&saved).unwrap();
+        let again = devnet_with_file(dir.path(), "home = \"home\"\n[devnet]\nport = 0\n");
+        assert_eq!(again.settings_for_up().port, 4567);
+        // A fixed port in the file still wins.
+        let fixed = devnet_with_file(dir.path(), "home = \"home\"\n[devnet]\nport = 4100\n");
+        assert_eq!(fixed.settings_for_up().port, 4100);
     }
 
     #[test]

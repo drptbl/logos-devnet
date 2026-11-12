@@ -20,6 +20,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::devnet::free_port;
 use crate::session::Logosctl;
 
 const DELIVERY: &str = "delivery_module";
@@ -472,12 +473,6 @@ fn other_settings(node: &str, reported: &str) -> anyhow::Error {
         "the hub's {node} node runs with other settings (it reports {reported}). \
          `logos-devnet down`, then `up`, restarts it"
     )
-}
-
-/// A port on 127.0.0.1 that nothing listens on now.
-fn free_port() -> Result<u16> {
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).context("finding a free port")?;
-    Ok(listener.local_addr()?.port())
 }
 
 #[cfg(test)]

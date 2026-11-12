@@ -2,7 +2,7 @@
 
 Two `logosctl` sessions, Alice and Bob, each with a funded wallet open in `lez_core`, the way an app or an agent talks to Logos. Alice pays Bob, then shields some of her funds into a private account. The devnet runs in dev mode, so the shielded transfer's proof takes a second instead of minutes.
 
-`logos-devnet.toml` here gives the example a devnet of its own on port 3042, next to a shared one on 3040. If something else holds 3042, `logos-devnet up --port <another>` picks another one, and it's remembered.
+`logos-devnet.toml` here gives the example a devnet of its own on a free port, next to a shared one on 3040. `port = 0` takes a free port on the first `up` and keeps it, and `logos-devnet env` shows it.
 
 ## What you need
 

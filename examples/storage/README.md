@@ -2,7 +2,7 @@
 
 Two `logosctl` sessions, Alice and Bob, share a file through Logos Storage. Alice uploads it, and Bob downloads it by its CID. Nothing goes through the public storage network: every node listens on `127.0.0.1`.
 
-`logos-devnet.toml` here gives the example a devnet of its own on port 3045, two sessions, and `[storage]`, which runs a storage node in the hub that both sessions' nodes bootstrap from. Each session's daemon starts its storage node on its own, so there's nothing to create. If something else holds 3045, `logos-devnet up --port <another>` picks another one, and it's remembered.
+`logos-devnet.toml` here gives the example a devnet of its own on a free port, two sessions, and `[storage]`, which runs a storage node in the hub that both sessions' nodes bootstrap from. Each session's daemon starts its storage node on its own, so there's nothing to create.
 
 ## What you need
 
