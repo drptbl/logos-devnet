@@ -1,6 +1,6 @@
 [package]
 name = "logos-devnet"
-version = "0.4.4"
+version = "0.4.5"
 edition = "2024"
 rust-version = "1.89"
 description = "A local LEZ chain for Logos development: one command to start it, fund accounts and deploy programs"
