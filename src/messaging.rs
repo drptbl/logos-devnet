@@ -14,6 +14,7 @@
 //! Ports and keys are picked once, so the hub keeps its addresses across restarts.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -26,6 +27,8 @@ const DISCOVERY: &str = "libp2p_module";
 /// A cluster no public network uses, so a node that ends up on the public fleet can't join it.
 const CLUSTER: u32 = 77;
 const SHARDS: u32 = 8;
+/// How long `status` waits for each answer from the hub's daemon.
+const STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 /// libp2p's protobuf header for a secp256k1 private key: key type 2, then 32 bytes of data.
 const SECP256K1_KEY_HEADER: &str = "08021220";
 
@@ -68,6 +71,7 @@ impl Addresses {
 pub struct Hub {
     dir: PathBuf,
     ctl: Logosctl,
+    status_timeout: Duration,
 }
 
 /// Which parts of the hub run.
@@ -81,12 +85,20 @@ pub struct Health {
 impl Hub {
     pub fn new(dir: PathBuf) -> Self {
         let ctl = Logosctl::new(dir.join("logosctl"));
-        Self { dir, ctl }
+        Self {
+            dir,
+            ctl,
+            status_timeout: STATUS_TIMEOUT,
+        }
     }
 
     #[cfg(test)]
     fn with_logosctl(dir: PathBuf, ctl: Logosctl) -> Self {
-        Self { dir, ctl }
+        Self {
+            dir,
+            ctl,
+            status_timeout: Duration::from_secs(2),
+        }
     }
 
     fn state_file(&self) -> PathBuf {
@@ -129,20 +141,22 @@ impl Hub {
         self.ctl.stop()
     }
 
-    /// Asks the hub's daemon whether each node runs.
+    /// Asks the hub's daemon whether each node runs. Each question gets `STATUS_TIMEOUT`, and
+    /// one left unanswered counts as no.
     pub fn health(&self) -> Health {
-        let daemon = self.running();
+        let daemon = self.ctl.answers_within(self.status_timeout);
         let state = self.state().ok().filter(|_| daemon);
-        let delivery = state.is_some()
-            && self
-                .node_info(DELIVERY, "getNodeInfo", &["IsRunning"])
+        let ask = |module, method, args: &[&str]| {
+            self.ctl
+                .call_within(module, method, args, self.status_timeout)
                 .ok()
-                .flatten()
+                .and_then(module_value)
+        };
+        let delivery = state.is_some()
+            && ask(DELIVERY, "getNodeInfo", &["IsRunning"])
                 .is_some_and(|running| running == "true");
         let discovery = state.is_some_and(|state| {
-            self.node_info(DISCOVERY, "peerInfo", &[])
-                .ok()
-                .flatten()
+            ask(DISCOVERY, "peerInfo", &[])
                 .is_some_and(|peer| listens_on(&peer, state.discovery_port))
         });
         Health {
@@ -242,8 +256,7 @@ impl Hub {
     /// A module's info about its node, or `None` when the module says it has none yet. A
     /// failing `logosctl` is an error, not a missing node.
     fn node_info(&self, module: &str, method: &str, args: &[&str]) -> Result<Option<Value>> {
-        let reply = self.ctl.call(module, method, args)?;
-        Ok((reply["success"] == true).then(|| reply["value"].clone()))
+        Ok(module_value(self.ctl.call(module, method, args)?))
     }
 
     /// Calls a module that answers `{"success", "value", "error"}`, and returns its value.
@@ -313,6 +326,11 @@ fn discovery_config(state: &State) -> String {
         "privKey": state.discovery_key,
     })
     .to_string()
+}
+
+/// The value of a module's `{"success", "value", "error"}` reply, when it succeeded.
+fn module_value(reply: Value) -> Option<Value> {
+    (reply["success"] == true).then(|| reply["value"].clone())
 }
 
 fn local_address(port: u16) -> String {
@@ -481,6 +499,32 @@ esac"#
                 delivery: false,
                 discovery: false
             }
+        );
+    }
+
+    #[test]
+    fn a_stuck_daemon_counts_as_a_node_that_does_not_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctl = fake_logosctl(
+            dir.path(),
+            r#"case "$2 $3" in
+  "daemon status") exit 0 ;;
+  *) exec sleep 30 ;;
+esac"#,
+        );
+        std::fs::create_dir_all(dir.path().join("session")).unwrap();
+        let hub = Hub::with_logosctl(dir.path().join("messaging"), ctl);
+        std::fs::create_dir_all(&hub.dir).unwrap();
+        hub.save(&state()).unwrap();
+        let started = std::time::Instant::now();
+        let health = hub.health();
+        assert!(
+            health.daemon && !health.delivery && !health.discovery,
+            "{health:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "gave up on each question"
         );
     }
 

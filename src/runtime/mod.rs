@@ -1,8 +1,10 @@
 //! Where the sequencer and the LEZ `wallet` run: in Docker (the default, from our image) or
 //! natively (built from the pinned LEZ tag). The rest of the CLI only talks to `Runtime`.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
@@ -92,6 +94,72 @@ pub(crate) fn stdout_of(cmd: &mut Command) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// `stdout_of`, giving up on a `cmd` that hasn't answered within `timeout`: it's killed, and
+/// the error says so. A process it leaves holding its output open doesn't hold this up either.
+pub(crate) fn stdout_within(cmd: &mut Command, timeout: Duration) -> Result<String> {
+    let deadline = Instant::now() + timeout;
+    let program = cmd.get_program().to_owned();
+    let timed_out = || {
+        anyhow::anyhow!(
+            "{program:?} didn't answer within {} s",
+            timeout.as_secs_f32()
+        )
+    };
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("could not run {program:?}"))?;
+    // Both pipes are read as the command writes, so a full pipe can't stall it.
+    let read = |pipe: Option<Box<dyn Read + Send>>| {
+        let (sent, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut bytes);
+            }
+            let _ = sent.send(bytes);
+        });
+        received
+    };
+    let stdout = read(
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let stderr = read(
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            outcome => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(match outcome {
+                    Err(e) => anyhow::Error::from(e).context(format!("waiting for {program:?}")),
+                    _ => timed_out(),
+                });
+            }
+        }
+    };
+    let rest = || deadline.saturating_duration_since(Instant::now());
+    let output = Output {
+        status,
+        stdout: stdout.recv_timeout(rest()).map_err(|_| timed_out())?,
+        stderr: stderr.recv_timeout(rest()).map_err(|_| timed_out())?,
+    };
+    Ok(String::from_utf8_lossy(&checked(&program, output)?.stdout).into_owned())
+}
+
 /// Runs `cmd` with stdin closed and returns stdout and stderr together.
 pub(crate) fn all_output_of(cmd: &mut Command) -> Result<String> {
     run(cmd).map(|output| combined(&output))
@@ -102,10 +170,14 @@ fn run(cmd: &mut Command) -> Result<Output> {
         .stdin(Stdio::null())
         .output()
         .with_context(|| format!("could not run {:?}", cmd.get_program()))?;
+    checked(cmd.get_program(), output)
+}
+
+/// `output`, or an error with everything `program` printed when it failed.
+fn checked(program: &std::ffi::OsStr, output: Output) -> Result<Output> {
     if !output.status.success() {
         bail!(
-            "{:?} failed ({}):\n{}",
-            cmd.get_program(),
+            "{program:?} failed ({}):\n{}",
             output.status,
             combined(&output).trim_end()
         );
@@ -236,6 +308,34 @@ fn combined(output: &Output) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gives_up_on_a_command_that_hangs() {
+        let started = Instant::now();
+        let err =
+            stdout_within(Command::new("sleep").arg("30"), Duration::from_millis(200)).unwrap_err();
+        assert!(err.to_string().contains("didn't answer within"), "{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "killed, not waited for"
+        );
+    }
+
+    #[test]
+    fn a_command_within_its_time_answers_as_usual() {
+        let timeout = Duration::from_secs(10);
+        let out = stdout_within(
+            Command::new("sh").args(["-c", "echo hi; echo no >&2"]),
+            timeout,
+        );
+        assert_eq!(out.unwrap(), "hi\n");
+        let err = stdout_within(
+            Command::new("sh").args(["-c", "echo why >&2; exit 3"]),
+            timeout,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("why"), "{err}");
+    }
 
     #[test]
     fn keeps_stdout_apart_from_stderr() {
