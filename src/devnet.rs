@@ -217,7 +217,7 @@ impl Devnet {
 
     /// Whether `up` runs the hub: the project asks for messaging or storage, or the devnet has
     /// a hub. Another project's file that leaves them out doesn't stop it.
-    fn wants_hub(&self) -> bool {
+    pub fn wants_hub(&self) -> bool {
         let wants = self.hub_wants();
         wants.messaging || wants.storage || self.hub().exists()
     }
@@ -440,6 +440,12 @@ impl Devnet {
                  from [messaging], then `logos-devnet messaging rm`"
             );
         }
+        self.check_hub_ports()
+    }
+
+    /// Fails when a port the hub keeps is taken while the hub doesn't run, so `up` couldn't
+    /// start it there.
+    pub fn check_hub_ports(&self) -> Result<()> {
         let hub = self.hub();
         if self.wants_hub() && !hub.running() {
             for port in hub.ports() {
@@ -453,6 +459,15 @@ impl Devnet {
             }
         }
         Ok(())
+    }
+
+    /// Whether `up` downloads a program, which takes `curl`.
+    pub fn needs_curl(&self) -> bool {
+        self.project.as_ref().is_some_and(|p| {
+            p.programs
+                .values()
+                .any(|program| matches!(program.source, ProgramSource::Release { .. }))
+        })
     }
 
     /// Makes every account group's wallet that's marked as on a new chain forget the old one:
@@ -1590,6 +1605,19 @@ mod tests {
     /// A devnet in `dir/home` for a project file in `dir` holding `programs`.
     fn devnet_with_programs(dir: &Path, programs: &str) -> Devnet {
         devnet_with_file(dir, &format!("[programs]\n{programs}\n"))
+    }
+
+    #[test]
+    fn only_programs_from_a_release_need_curl() {
+        let dir = tempfile::tempdir().unwrap();
+        let built = devnet_with_programs(dir.path(), "counter = \"counter.bin\"");
+        assert!(!built.needs_curl());
+        let sha = binary::sha256_hex(b"x");
+        let released = devnet_with_programs(
+            dir.path(),
+            &format!("token = {{ url = \"https://example.com/t.bin\", sha256 = \"{sha}\" }}"),
+        );
+        assert!(released.needs_curl());
     }
 
     #[test]

@@ -146,6 +146,30 @@ pub fn run(devnet: &Devnet, project_error: Option<&anyhow::Error>) -> Doctor {
         checks.push(pass("devnet", "not running; `logos-devnet up` starts it"));
     }
 
+    if devnet.wants_hub() {
+        checks.push(match devnet.check_hub_ports() {
+            Ok(()) => pass("hub ports", "free, or held by the running hub"),
+            Err(e) => Check {
+                name: "hub ports".into(),
+                ok: false,
+                detail: format!("{e:#}"),
+                fix: None,
+            },
+        });
+    }
+
+    if devnet.needs_curl() {
+        checks.push(if command_ok("curl", &["--version"]) {
+            pass("curl", "on PATH, for programs from a release")
+        } else {
+            fail(
+                "curl",
+                "not on PATH, and the project file names a program by URL",
+                "install curl",
+            )
+        });
+    }
+
     if devnet.needs_logosctl() {
         checks.push(if session::logosctl_on_path() {
             pass("logosctl", "on PATH, for sessions and the messaging hub")
