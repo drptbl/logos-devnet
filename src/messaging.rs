@@ -26,6 +26,8 @@ use crate::session::Logosctl;
 const DELIVERY: &str = "delivery_module";
 const DISCOVERY: &str = "libp2p_module";
 const STORAGE: &str = "storage_module";
+/// How long a session's new delivery node gets to reach the hub.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long the hub's storage node gets to start with its daemon.
 const STORAGE_START_TIMEOUT: Duration = Duration::from_secs(30);
 /// A cluster no public network uses, so a node that ends up on the public fleet can't join it.
@@ -93,6 +95,21 @@ impl Addresses {
         let mut overrides = network_overrides();
         overrides.insert("entry-node".into(), json!([self.delivery]));
         json!({ "mode": "Edge", "messagingOverrides": overrides }).to_string()
+    }
+
+    /// The `libp2p_module.createNode` config of an app's node that takes the hub's discovery
+    /// node as its only bootstrap node.
+    pub fn discovery_client_config(&self) -> Result<String> {
+        let (addr, peer) = self
+            .discovery
+            .split_once("/p2p/")
+            .with_context(|| format!("{} has no peer id", self.discovery))?;
+        Ok(json!({
+            "bootstrapNodes": [{ "peerId": peer, "addrs": [addr] }],
+            "mountKad": true,
+            "mountServiceDiscovery": true,
+        })
+        .to_string())
     }
 }
 
@@ -371,20 +388,113 @@ impl Hub {
         Ok(format!("{}/p2p/{id}", local_address(state.discovery_port)))
     }
 
-    /// A module's info about its node, or `None` when the module says it has none yet. A
-    /// failing `logosctl` is an error, not a missing node.
     fn node_info(&self, module: &str, method: &str, args: &[&str]) -> Result<Option<Value>> {
-        Ok(module_value(self.ctl.call(module, method, args)?))
+        node_info(&self.ctl, module, method, args)
     }
 
-    /// Calls a module that answers `{"success", "value", "error"}`, and returns its value.
     fn module_call(&self, module: &str, method: &str, args: &[&str]) -> Result<Value> {
-        let reply = self.ctl.call(module, method, args)?;
-        if reply["success"] != true {
-            let error = reply["error"].as_str().unwrap_or("no error message");
-            bail!("{module}.{method} failed: {error}");
+        module_call(&self.ctl, module, method, args)
+    }
+}
+
+/// A module's info about its node, or `None` when the module says it has none yet. A failing
+/// `logosctl` is an error, not a missing node.
+fn node_info(ctl: &Logosctl, module: &str, method: &str, args: &[&str]) -> Result<Option<Value>> {
+    Ok(module_value(ctl.call(module, method, args)?))
+}
+
+/// Calls a module that answers `{"success", "value", "error"}`, and returns its value.
+fn module_call(ctl: &Logosctl, module: &str, method: &str, args: &[&str]) -> Result<Value> {
+    let reply = ctl.call(module, method, args)?;
+    if reply["success"] != true {
+        let error = reply["error"].as_str().unwrap_or("no error message");
+        bail!("{module}.{method} failed: {error}");
+    }
+    Ok(reply["value"].clone())
+}
+
+/// Gives a session's daemon (`ctl`) a delivery node and a discovery node on the hub (`hub`),
+/// for those of the two modules it has loaded, unless it has one already: a node an app made
+/// stays as the app made it. Whatever creates a module's first node picks its network, so a
+/// node made here keeps every app in the session, and `chat_module`, on the hub. A delivery
+/// node made here is waited on until it reaches the hub: a module that starts a node still
+/// starting crashes `delivery_module`.
+pub fn join_hub(ctl: &Logosctl, hub: &Addresses) -> Result<()> {
+    let loaded = ctl.loaded_modules()?;
+    let has = |module: &str| loaded.iter().any(|m| m == module);
+    if has(DELIVERY)
+        && join(
+            ctl,
+            DELIVERY,
+            ("getNodeInfo", &["MyMultiaddresses"]),
+            &hub.client_config(),
+            &["start"],
+        )?
+    {
+        wait_connected(ctl)?;
+    }
+    if has(DISCOVERY) {
+        join(
+            ctl,
+            DISCOVERY,
+            ("peerInfo", &[]),
+            &hub.discovery_client_config()?,
+            &["start", "discoStart"],
+        )?;
+    }
+    Ok(())
+}
+
+/// Makes `module`'s node from `config` unless it has one (`info` asks), and calls `start` on it
+/// when it was made here, now or by an earlier `up` that may have stopped short of starting it:
+/// starting a running node does nothing. True when the node is one made here.
+fn join(
+    ctl: &Logosctl,
+    module: &str,
+    info: (&str, &[&str]),
+    config: &str,
+    start: &[&str],
+) -> Result<bool> {
+    let record = ctl.home().join("hub-nodes");
+    let made = std::fs::read_to_string(&record).unwrap_or_default();
+    let mut ours = made.lines().any(|line| line == module);
+    if node_info(ctl, module, info.0, info.1)?.is_none() {
+        module_call(ctl, module, "createNode", &[config])?;
+        if !ours {
+            std::fs::create_dir_all(ctl.home())?;
+            std::fs::write(&record, format!("{made}{module}\n"))
+                .with_context(|| format!("writing {}", record.display()))?;
+            ours = true;
         }
-        Ok(reply["value"].clone())
+    }
+    if ours {
+        for method in start {
+            module_call(ctl, module, method, &[])?;
+        }
+    }
+    Ok(ours)
+}
+
+/// Waits until the delivery node in `ctl` reaches a peer, the hub.
+fn wait_connected(ctl: &Logosctl) -> Result<()> {
+    let deadline = std::time::Instant::now() + CONNECT_TIMEOUT;
+    loop {
+        let status = node_info(ctl, DELIVERY, "getConnectionStatus", &[])?;
+        if status
+            .as_ref()
+            .and_then(Value::as_str)
+            .is_some_and(|s| s != "Disconnected")
+        {
+            return Ok(());
+        }
+        if std::time::Instant::now() > deadline {
+            bail!(
+                "the session's delivery node didn't reach the hub within {} s. `logos-devnet \
+                 status` shows whether the hub's nodes run",
+                CONNECT_TIMEOUT.as_secs()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(500));
     }
 }
 
@@ -584,6 +694,133 @@ esac"#
         // The port stays across ensures, and storage stays on for a project without it.
         hub.ensure(false, Wants::default()).unwrap();
         assert_eq!(hub.state().unwrap().storage_port, Some(port));
+    }
+
+    /// A session daemon with `loaded` modules, whose nodes exist once `createNode` made them,
+    /// or from the start for the modules in `nodes`.
+    fn session_daemon(dir: &Path, loaded: &[&str], nodes: &[&str]) -> Logosctl {
+        let made = dir.join("made");
+        std::fs::create_dir_all(&made).unwrap();
+        for module in nodes {
+            std::fs::write(made.join(module), "").unwrap();
+        }
+        let listed: Vec<String> = loaded
+            .iter()
+            .map(|m| format!(r#"{{"name":"{m}","status":"loaded"}}"#))
+            .collect();
+        let made = made.display();
+        fake_logosctl(
+            dir,
+            &format!(
+                r#"ok() {{ echo "{{\"status\":\"ok\",\"result\":$1}}"; }}
+case "$2 $3 $4" in
+  "module ls "*) echo '[{listed}]' ;;
+  *" createNode") touch '{made}'/"$3"; ok '{{"success":true,"value":null}}' ;;
+  *" getConnectionStatus") ok '{{"success":true,"value":"PartiallyConnected"}}' ;;
+  *" getNodeInfo") [ -e '{made}/{DELIVERY}' ] \
+      && ok '{{"success":true,"value":"/ip4/127.0.0.1/tcp/1/p2p/x"}}' \
+      || ok '{{"success":false,"error":"Context not initialized"}}' ;;
+  *" peerInfo") [ -e '{made}/{DISCOVERY}' ] \
+      && ok '{{"success":true,"value":{{"addrs":[],"peerId":"y"}}}}' \
+      || ok '{{"success":false,"error":"No libp2p context"}}' ;;
+  *) ok '{{"success":true,"value":null}}' ;;
+esac"#,
+                listed = listed.join(","),
+            ),
+        )
+    }
+
+    fn hub_addresses() -> Addresses {
+        Addresses {
+            delivery: DELIVERY_ADDR.into(),
+            discovery: format!("/ip4/127.0.0.1/tcp/61320/p2p/{PEER}"),
+        }
+    }
+
+    /// The module calls `ctl` got, method by method, without arguments.
+    fn module_calls(dir: &Path) -> Vec<String> {
+        calls(dir)
+            .lines()
+            .filter_map(|l| l.strip_prefix("--json call "))
+            .map(|l| l.split(" str:").next().unwrap().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn a_session_joins_the_hub_with_nodes_of_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctl = session_daemon(dir.path(), &[DELIVERY, DISCOVERY], &[]);
+        join_hub(&ctl, &hub_addresses()).unwrap();
+        assert_eq!(
+            module_calls(dir.path()),
+            [
+                "delivery_module getNodeInfo",
+                "delivery_module createNode",
+                "delivery_module start",
+                "delivery_module getConnectionStatus",
+                "libp2p_module peerInfo",
+                "libp2p_module createNode",
+                "libp2p_module start",
+                "libp2p_module discoStart",
+            ]
+        );
+        let log = calls(dir.path());
+        assert!(
+            log.contains(&hub_addresses().client_config()),
+            "the hub's config"
+        );
+    }
+
+    #[test]
+    fn leaves_an_apps_nodes_and_modules_it_doesnt_run_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctl = session_daemon(dir.path(), &[DELIVERY, DISCOVERY], &[DELIVERY, DISCOVERY]);
+        join_hub(&ctl, &hub_addresses()).unwrap();
+        assert_eq!(
+            module_calls(dir.path()),
+            ["delivery_module getNodeInfo", "libp2p_module peerInfo"],
+            "never started again: an app may hold it unstarted"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let ctl = session_daemon(dir.path(), &["lez_core"], &[]);
+        join_hub(&ctl, &hub_addresses()).unwrap();
+        assert!(module_calls(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn starts_again_a_node_an_earlier_up_made() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctl = session_daemon(dir.path(), &[DELIVERY, DISCOVERY], &[DELIVERY, DISCOVERY]);
+        // Made here before, maybe left unstarted by an interrupted `up`.
+        std::fs::create_dir_all(ctl.home()).unwrap();
+        std::fs::write(
+            ctl.home().join("hub-nodes"),
+            format!("{DELIVERY}\n{DISCOVERY}\n"),
+        )
+        .unwrap();
+        join_hub(&ctl, &hub_addresses()).unwrap();
+        assert_eq!(
+            module_calls(dir.path()),
+            [
+                "delivery_module getNodeInfo",
+                "delivery_module start",
+                "delivery_module getConnectionStatus",
+                "libp2p_module peerInfo",
+                "libp2p_module start",
+                "libp2p_module discoStart",
+            ]
+        );
+    }
+
+    #[test]
+    fn apps_bootstrap_discovery_from_the_hub_alone() {
+        let config: Value =
+            serde_json::from_str(&hub_addresses().discovery_client_config().unwrap()).unwrap();
+        assert_eq!(
+            config["bootstrapNodes"],
+            json!([{ "peerId": PEER, "addrs": ["/ip4/127.0.0.1/tcp/61320"] }])
+        );
+        assert_eq!(config["mountServiceDiscovery"], true);
     }
 
     #[test]

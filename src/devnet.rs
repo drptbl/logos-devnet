@@ -232,6 +232,19 @@ impl Devnet {
             .context("the messaging hub")
     }
 
+    /// Puts a session daemon's delivery and discovery nodes on the hub, when it runs
+    /// messaging (see `messaging::join_hub`).
+    /// Nothing happens while the hub doesn't run: `up` reports that on its own.
+    fn join_hub(&self, ctl: &session::Logosctl) -> Result<()> {
+        let hub = self.hub();
+        match hub.addresses() {
+            Some(addresses) if hub.running() => {
+                crate::messaging::join_hub(ctl, &addresses).context("joining the messaging hub")
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// The storage config of a session's daemon: the hub's storage node as its only bootstrap
     /// node when the hub runs one, or else a node of its own that joins no network.
     fn session_storage(&self) -> crate::storage::Config {
@@ -710,6 +723,7 @@ impl Devnet {
                     &session.wallet_storage(),
                     &self.settings.sequencer_url(),
                 )?;
+                self.join_hub(&ctl)?;
                 funded
             });
             if let Err(e) = resumed {
@@ -1034,6 +1048,7 @@ impl Devnet {
             session.save_info(&info)?;
             ctl.load(one)?;
         }
+        self.join_hub(&ctl)?;
         Ok(missing)
     }
 
@@ -1065,6 +1080,10 @@ impl Devnet {
         };
         session.save_info(&info)?;
         self.send(&info.account, amount)?;
+        // The session is made and funded either way: the next `up` joins it again.
+        if let Err(e) = self.join_hub(&ctl) {
+            eprintln!("session {}: {e:#}", session.name);
+        }
         Ok(info)
     }
 

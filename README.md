@@ -179,9 +179,12 @@ An empty `[messaging]` table in the project file gives the devnet a local messag
 | --- | --- |
 | `LOGOS_DEVNET_DELIVERY_CONFIG` | the `delivery_module.createNode` config for your app's node: Edge mode, no preset, the hub as its only entry node |
 | `LOGOS_DEVNET_DELIVERY_ENTRY_NODE` | the hub's delivery node, `/ip4/127.0.0.1/tcp/<port>/p2p/<id>` |
-| `LOGOS_DEVNET_DISCOVERY_BOOTSTRAP` | the hub's discovery node, `/ip4/127.0.0.1/tcp/<port>/p2p/<id>`: in `libp2p_module`'s `bootstrapNodes`, its id is the `peerId` and the part before `/p2p/` the address |
+| `LOGOS_DEVNET_DISCOVERY_BOOTSTRAP` | the hub's discovery node, `/ip4/127.0.0.1/tcp/<port>/p2p/<id>` |
+| `LOGOS_DEVNET_DISCOVERY_CONFIG` | the `libp2p_module.createNode` config for your app's node: the hub as its only bootstrap node, service discovery on |
 
-Create your app's delivery node from `LOGOS_DEVNET_DELIVERY_CONFIG` before anything else in that daemon creates one: the first `createNode` decides a daemon's network, and a module that creates its own uses the public one. Two apps whose nodes use the hub exchange messages through it. With only the hub as a peer, their nodes report `PartiallyConnected`.
+Sessions join the hub on their own. When a session's daemon has `delivery_module` or `libp2p_module` loaded, `chat_module` included since it loads `delivery_module`, `up` gives it a node on the hub and starts it, unless an app already made one. That matters because the first `createNode` in a daemon decides its network, and a module that creates its own node uses the public one. `up` does it again after a daemon restart, which drops the nodes. Apps then use the node that's there, and `chat_module` adopts it.
+
+Outside a session, create your app's nodes from `LOGOS_DEVNET_DELIVERY_CONFIG` and `LOGOS_DEVNET_DISCOVERY_CONFIG` before anything else in that daemon does. Two apps whose nodes use the hub exchange messages through it. With only the hub as a peer, their nodes report `PartiallyConnected`.
 
 The hub keeps its ports and peer ids, so the variables stay the same across `down`, `up` and `reset`. `reset` keeps its message store too. `up` brings the hub's nodes back when its daemon restarted, and `down` stops it. `status` shows whether each node runs. Once a devnet has a hub, `up` runs it for every project sharing that devnet: `logos-devnet messaging rm` stops and deletes it, and the next `up` of a project that asks for one starts a new hub, with new ports and peer ids.
 

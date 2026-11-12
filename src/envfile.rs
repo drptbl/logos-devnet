@@ -2,8 +2,8 @@
 //! `source`. `LOGOS_DEVNET_SEQUENCER` is the RPC URL, each deployed program adds
 //! `LOGOS_PROGRAM_<NAME>` (base58) and `LOGOS_PROGRAM_<NAME>_HEX`, and each account group
 //! `LOGOS_DEVNET_ACCOUNTS_<NAME>`, the path of its `accounts.json`. A messaging hub adds
-//! `LOGOS_DEVNET_DELIVERY_CONFIG`, `LOGOS_DEVNET_DELIVERY_ENTRY_NODE` and
-//! `LOGOS_DEVNET_DISCOVERY_BOOTSTRAP`.
+//! `LOGOS_DEVNET_DELIVERY_CONFIG`, `LOGOS_DEVNET_DELIVERY_ENTRY_NODE`,
+//! `LOGOS_DEVNET_DISCOVERY_BOOTSTRAP` and `LOGOS_DEVNET_DISCOVERY_CONFIG`.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -21,6 +21,7 @@ const GROUP_PREFIX: &str = "LOGOS_DEVNET_ACCOUNTS_";
 const DELIVERY_CONFIG_VAR: &str = "LOGOS_DEVNET_DELIVERY_CONFIG";
 const DELIVERY_ENTRY_NODE_VAR: &str = "LOGOS_DEVNET_DELIVERY_ENTRY_NODE";
 const DISCOVERY_BOOTSTRAP_VAR: &str = "LOGOS_DEVNET_DISCOVERY_BOOTSTRAP";
+const DISCOVERY_CONFIG_VAR: &str = "LOGOS_DEVNET_DISCOVERY_CONFIG";
 /// RISC Zero's switch for fake proofs, read by every prover and verifier of the devnet.
 pub const DEV_MODE_VAR: &str = "RISC0_DEV_MODE";
 
@@ -43,14 +44,18 @@ pub struct Env {
     pub messaging: Option<Addresses>,
 }
 
-/// The messaging hub's variables: an app's delivery node config, the hub's delivery node and
-/// its discovery bootstrap node.
-fn messaging_vars(hub: &Addresses) -> [(&'static str, String); 3] {
-    [
+/// The messaging hub's variables: an app's delivery node config, the hub's delivery node, its
+/// discovery bootstrap node and an app's discovery node config.
+fn messaging_vars(hub: &Addresses) -> Vec<(&'static str, String)> {
+    let mut vars = vec![
         (DELIVERY_CONFIG_VAR, hub.client_config()),
         (DELIVERY_ENTRY_NODE_VAR, hub.delivery.clone()),
         (DISCOVERY_BOOTSTRAP_VAR, hub.discovery.clone()),
-    ]
+    ];
+    if let Ok(config) = hub.discovery_client_config() {
+        vars.push((DISCOVERY_CONFIG_VAR, config));
+    }
+    vars
 }
 
 /// The wallet directory of the group whose `accounts.json` is `manifest`, for
@@ -325,6 +330,8 @@ mod tests {
         let vars = env.vars();
         assert!(vars.contains(&(DELIVERY_ENTRY_NODE_VAR.into(), hub.delivery.clone())));
         assert!(vars.contains(&(DISCOVERY_BOOTSTRAP_VAR.into(), hub.discovery.clone())));
+        assert!(vars.iter().any(|(var, value)| var == DISCOVERY_CONFIG_VAR
+            && value.contains("bootstrapNodes")));
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("env");
         std::fs::write(&file, env.render()).unwrap();
