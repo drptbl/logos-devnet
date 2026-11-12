@@ -70,6 +70,14 @@ pub struct Hub {
     ctl: Logosctl,
 }
 
+/// Which parts of the hub run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Health {
+    pub daemon: bool,
+    pub delivery: bool,
+    pub discovery: bool,
+}
+
 impl Hub {
     pub fn new(dir: PathBuf) -> Self {
         let ctl = Logosctl::new(dir.join("logosctl"));
@@ -119,6 +127,29 @@ impl Hub {
 
     pub fn stop(&self) -> Result<()> {
         self.ctl.stop()
+    }
+
+    /// Asks the hub's daemon whether each node runs.
+    pub fn health(&self) -> Health {
+        let daemon = self.running();
+        let state = self.state().ok().filter(|_| daemon);
+        let delivery = state.is_some()
+            && self
+                .node_info(DELIVERY, "getNodeInfo", &["IsRunning"])
+                .ok()
+                .flatten()
+                .is_some_and(|running| running == "true");
+        let discovery = state.is_some_and(|state| {
+            self.node_info(DISCOVERY, "peerInfo", &[])
+                .ok()
+                .flatten()
+                .is_some_and(|peer| listens_on(&peer, state.discovery_port))
+        });
+        Health {
+            daemon,
+            delivery,
+            discovery,
+        }
     }
 
     /// Makes the hub run: picks its ports and keys the first time, starts its daemon, and
@@ -184,14 +215,10 @@ impl Hub {
         self.module_call(DISCOVERY, "discoStart", &[])?;
         let peer = info()?.unwrap_or_default();
         let id = peer["peerId"].as_str().unwrap_or_default();
-        let wanted = local_address(state.discovery_port);
-        let listens = peer["addrs"]
-            .as_array()
-            .is_some_and(|addrs| addrs.iter().any(|a| a.as_str() == Some(wanted.as_str())));
-        if !listens || id.is_empty() {
+        if !listens_on(&peer, state.discovery_port) || id.is_empty() {
             return Err(other_settings("discovery", &peer.to_string()));
         }
-        Ok(format!("{wanted}/p2p/{id}"))
+        Ok(format!("{}/p2p/{id}", local_address(state.discovery_port)))
     }
 
     /// A module's info about its node, or `None` when the module says it has none yet. A
@@ -274,6 +301,15 @@ fn local_address(port: u16) -> String {
     format!("/ip4/127.0.0.1/tcp/{port}")
 }
 
+/// Whether a libp2p node's `peerInfo` lists `port` on 127.0.0.1: a node that isn't started
+/// lists no address.
+fn listens_on(peer: &Value, port: u16) -> bool {
+    let wanted = local_address(port);
+    peer["addrs"]
+        .as_array()
+        .is_some_and(|addrs| addrs.iter().any(|a| a.as_str() == Some(wanted.as_str())))
+}
+
 fn other_settings(node: &str, reported: &str) -> anyhow::Error {
     anyhow::anyhow!(
         "the hub's {node} node runs with other settings (it reports {reported}). \
@@ -322,11 +358,13 @@ mod tests {
             &format!(
                 r#"ok() {{ echo "{{\"status\":\"ok\",\"result\":$1}}"; }}
 case "$2 $3 $4" in
-  "daemon status "*) exit 0 ;;
+  "daemon status "*) [ ! -e '{made}/stopped' ] ;;
+  "daemon stop "*) touch '{made}/stopped' ;;
   "module ls "*) echo '[{{"name":"{DELIVERY}","status":"loaded"}},{{"name":"{DISCOVERY}","status":"loaded"}}]' ;;
   *" createNode") touch '{made}'/"$3"; ok '{{"success":true,"value":null}}' ;;
   *" getNodeInfo") [ -e '{made}/{DELIVERY}' ] \
-      && ok '{{"success":true,"value":"{DELIVERY_ADDR}"}}' \
+      && {{ [ "$5" = str:IsRunning ] && ok '{{"success":true,"value":"true"}}' \
+        || ok '{{"success":true,"value":"{DELIVERY_ADDR}"}}'; }} \
       || ok '{{"success":false,"error":"Context not initialized"}}' ;;
   *" peerInfo") [ -e '{made}/{DISCOVERY}' ] \
       && ok '{{"success":true,"value":{{"addrs":["/ip4/127.0.0.1/tcp/61320"],"peerId":"{PEER}"}}}}' \
@@ -335,6 +373,8 @@ case "$2 $3 $4" in
 esac"#
             ),
         );
+        // The daemon's directory, as `start` makes it.
+        std::fs::create_dir_all(dir.join("session")).unwrap();
         let hub = Hub::with_logosctl(dir.join("messaging"), ctl);
         std::fs::create_dir_all(&hub.dir).unwrap();
         hub.save(&state()).unwrap();
@@ -382,6 +422,48 @@ esac"#
         ] {
             assert!(log.contains(start), "{start}: {log}");
         }
+    }
+
+    #[test]
+    fn reports_which_nodes_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let all = Health {
+            daemon: true,
+            delivery: true,
+            discovery: true,
+        };
+        assert_eq!(hub(dir.path(), true).health(), all);
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            hub(dir.path(), false).health(),
+            Health {
+                delivery: false,
+                discovery: false,
+                ..all
+            }
+        );
+    }
+
+    #[test]
+    fn reports_a_node_that_does_not_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = hub(dir.path(), true);
+        // The discovery node isn't there; the delivery node is.
+        std::fs::remove_file(dir.path().join("made").join(DISCOVERY)).unwrap();
+        let health = hub.health();
+        assert!(
+            health.daemon && health.delivery && !health.discovery,
+            "{health:?}"
+        );
+        hub.stop().unwrap();
+        assert_eq!(
+            hub.health(),
+            Health {
+                daemon: false,
+                delivery: false,
+                discovery: false
+            }
+        );
     }
 
     #[test]

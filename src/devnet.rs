@@ -840,9 +840,14 @@ impl Devnet {
 
     fn hub_status(&self) -> Option<report::Messaging> {
         let hub = self.hub();
-        hub.exists().then(|| report::Messaging {
-            running: hub.running(),
-            addresses: hub.addresses(),
+        hub.exists().then(|| {
+            let health = hub.health();
+            report::Messaging {
+                running: health.daemon,
+                delivery_node: health.delivery,
+                discovery_node: health.discovery,
+                addresses: hub.addresses(),
+            }
         })
     }
 
