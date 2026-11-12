@@ -323,9 +323,10 @@ impl Devnet {
             let applied = self.apply_project(&mut deployed);
             let forgot = self.forget_group_chains();
             let resumed = self.resume_sessions(false);
+            let refreshed = self.refresh_env();
             return with_status(
                 with_deploys(self.report(Some(true)), &deployed),
-                after_start([forgot, applied, resumed, messaging]),
+                after_start([forgot, applied, resumed, messaging, refreshed]),
             );
         }
         // The running sequencer holds its own port, and gives it up when it stops.
@@ -377,9 +378,10 @@ impl Devnet {
         let resumed = next.resume_sessions(!continuing);
         let mut deployed = Vec::new();
         let applied = next.apply_project(&mut deployed);
+        let refreshed = next.refresh_env();
         with_status(
             with_deploys(next.report(Some(true)), &deployed),
-            after_start([marked, forgot, resumed, applied, messaging]),
+            after_start([marked, forgot, resumed, applied, messaging, refreshed]),
         )
     }
 
@@ -826,11 +828,33 @@ impl Devnet {
             groups: BTreeMap::new(),
             dev_mode: self.settings.dev_mode,
             messaging: self.hub().addresses(),
+            sessions: BTreeMap::new(),
         };
         for group in groups::list(&self.home.groups_dir())? {
             env.groups.insert(group.name.clone(), group.manifest());
         }
+        // A session still being made has no account yet: it joins the next env file.
+        for session in self.sessions() {
+            if let Ok(info) = session.info() {
+                let vars = envfile::SessionEnv {
+                    logosctl: session.logosctl_dir(),
+                    wallet: session.wallet_dir(),
+                    account: info.account,
+                };
+                env.sessions.insert(session.name.clone(), vars);
+            }
+        }
         std::fs::write(self.home.env_file(), env.render()).context("writing the env file")
+    }
+
+    /// Writes the env file again, with the sessions and groups there are now. Nothing, before
+    /// a first `up` wrote one.
+    fn refresh_env(&self) -> Result<()> {
+        match self.read_env() {
+            Ok(env) => self.write_env(&env),
+            Err(_) if !self.home.env_file().exists() => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 
     fn read_env(&self) -> Result<Env> {
@@ -1009,6 +1033,10 @@ impl Devnet {
             }
         }
         let info = made?;
+        // The session is made either way: the next `up` writes the env file again.
+        if let Err(e) = self.refresh_env() {
+            eprintln!("{e:#}");
+        }
         Ok(SessionMade {
             name: name.to_owned(),
             vars: session
@@ -1140,6 +1168,9 @@ impl Devnet {
         session.logosctl().stop()?;
         std::fs::remove_dir_all(session.dir())
             .with_context(|| format!("deleting {}", session.dir().display()))?;
+        if let Err(e) = self.refresh_env() {
+            eprintln!("{e:#}");
+        }
         Ok(Done {
             message: format!("Removed session {name} and its wallet."),
         })

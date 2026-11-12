@@ -30,7 +30,8 @@ Pass `--json` to every command: on success stdout holds one JSON document, and n
    - `LOGOS_DEVNET_SEQUENCER`: the RPC URL.
    - `LOGOS_PROGRAM_<NAME>`, `LOGOS_PROGRAM_<NAME>_HEX`: a program's id, base58 and hex, with the name upper-cased and `-` as `_` (`hello-world` is `LOGOS_PROGRAM_HELLO_WORLD`). It stays the same across `reset`.
    - `LOGOS_DEVNET_ACCOUNTS_<NAME>`: the group's `accounts.json`, `{"amount": ..., "accounts": [{"index", "id", "hex"}]}` with `id` in base58.
-   - `LOGOS_DEVNET_ACCOUNTS_<NAME>_WALLET`: the group's LEZ wallet, for `LEE_WALLET_HOME_DIR`.
+   - `LOGOS_DEVNET_ACCOUNTS_<NAME>_WALLET`: the group's LEZ wallet, for `LEE_WALLET_HOME_DIR`. A test running in parallel copies its `wallet_config.json` and `storage.json` to a directory of its own first: runs sharing one wallet overwrite each other's sync state.
+   - `LOGOS_DEVNET_SESSION_<NAME>`: a session's `LOGOSCTL_CONFIG_DIR`, with `_WALLET`, `_ACCOUNT` (`Public/<id>`) and `_ACCOUNT_HEX` (what `lez_core` takes), for a test driving several sessions.
    - `RISC0_DEV_MODE`: `1` or `0`, matching the chain.
    - With `[messaging]`: `LOGOS_DEVNET_DELIVERY_CONFIG`, the `delivery_module.createNode` config of a node that uses the local hub, `LOGOS_DEVNET_DELIVERY_ENTRY_NODE`, `LOGOS_DEVNET_DISCOVERY_BOOTSTRAP`, a `libp2p_module` bootstrap node, and `LOGOS_DEVNET_DISCOVERY_CONFIG`, its node's config.
 5. `logos-devnet status --json` shows what runs: chain head, faucet, programs, groups, sessions. `.sequencer.runtime_answered` is false when Docker didn't answer within 10 s: Docker is stuck, so restart it rather than running `up`.

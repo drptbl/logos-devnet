@@ -21,13 +21,13 @@ That starts the devnet and both sessions. Each one gets its own `logosctl` daemo
 ```bash
 call() { logosctl --json call lez_core "$@" | tail -1 | jq -r .result; }
 source <(logos-devnet session env bob)
-bob=$(call account_id_from_base58 "str:${LOGOS_DEVNET_ACCOUNT#Public/}")
+bob=$LOGOS_DEVNET_ACCOUNT_HEX
 source <(logos-devnet session env alice)
-alice=$(call account_id_from_base58 "str:${LOGOS_DEVNET_ACCOUNT#Public/}")
+alice=$LOGOS_DEVNET_ACCOUNT_HEX
 call get_balance "str:$alice" true   # 10000000000
 ```
 
-`lez_core` takes account ids as hex, so they're converted from the base58 `Public/` id the session prints. `get_balance` takes `true` for a public account and `false` for a private one, and answers in lepta.
+`lez_core` takes account ids as hex, which `LOGOS_DEVNET_ACCOUNT_HEX` gives next to the base58 `Public/` id. `get_balance` takes `true` for a public account and `false` for a private one, and answers in lepta.
 
 Alice sends Bob 1000 lepta. Amounts go in as 16 little-endian bytes, in hex:
 

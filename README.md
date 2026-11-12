@@ -136,7 +136,7 @@ Up to 1000 is accepted. Above 100 clients at the same instant, the RPC answers 4
 
 ## Point your project at it
 
-The env file is the contract. A project reads `LOGOS_DEVNET_SEQUENCER` for the RPC URL, and `LOGOS_PROGRAM_<NAME>` (base58) or `LOGOS_PROGRAM_<NAME>_HEX` (what `lez_core` takes as `program_id_hex`) for its programs, falling back to the testnet values when they're not set.
+The env file is the contract. A project reads `LOGOS_DEVNET_SEQUENCER` for the RPC URL, and `LOGOS_PROGRAM_<NAME>` (base58) or `LOGOS_PROGRAM_<NAME>_HEX` (what `lez_core` takes as `program_id_hex`) for its programs, falling back to the testnet values when they're not set. A test that drives several sessions at once reads each one's `LOGOS_DEVNET_SESSION_<NAME>` (its `LOGOSCTL_CONFIG_DIR`), `_WALLET`, `_ACCOUNT` and `_ACCOUNT_HEX` from the env file too, so `logos-devnet exec -- pytest` sees them all.
 
 Program ids stay the same. `deploy my-program` always deploys from the dev wallet's `program-my-program` header key, and a program id is that key's account id, so `reset` and redeploy give you the same `LOGOS_PROGRAM_MY_PROGRAM`. A second `deploy` of the same name on the same chain does nothing, unless the program is mutable and the binary changed: then it's updated in place.
 
@@ -163,6 +163,7 @@ Each session runs its own daemon in `~/.logos-devnet/sessions/<name>`, with `lez
 | `LOGOS_DEVNET_WALLET_CONFIG` | the wallet's `wallet_config.json` |
 | `LOGOS_DEVNET_WALLET_STORAGE` | the wallet's `storage.json` |
 | `LOGOS_DEVNET_ACCOUNT` | its funded account, `Public/<id>` |
+| `LOGOS_DEVNET_ACCOUNT_HEX` | the same account as 64 hex digits, as `lez_core` takes it |
 
 Sessions follow the chain. `down` stops their daemons. `up` starts them again, loads their modules and opens their wallets, also after a `--port` change. `reset` funds each account again with what it was created with, and makes each wallet forget the old chain: its sync position and the state of its private accounts. Its keys and accounts stay. `session rm` deletes a session and its wallet.
 

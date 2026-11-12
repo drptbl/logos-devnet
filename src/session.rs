@@ -142,7 +142,7 @@ impl Session {
     }
 
     /// What an app needs from the session, by variable name.
-    pub fn vars(&self, info: &SessionInfo) -> [(&'static str, String); 4] {
+    pub fn vars(&self, info: &SessionInfo) -> [(&'static str, String); 5] {
         [
             ("LOGOSCTL_CONFIG_DIR", path_text(&self.logosctl_dir())),
             (
@@ -154,6 +154,8 @@ impl Session {
                 path_text(&self.wallet_storage()),
             ),
             ("LOGOS_DEVNET_ACCOUNT", info.account.wallet_form()),
+            // The form `lez_core` takes.
+            ("LOGOS_DEVNET_ACCOUNT_HEX", info.account.hex()),
         ]
     }
 }
@@ -225,7 +227,14 @@ pub fn logosctl_on_path() -> bool {
 /// Session names are lower-case letters, digits and `-`, starting with a letter: they become
 /// directory names.
 pub fn check_session_name(name: &str) -> Result<()> {
-    crate::envfile::check_name("session", name)
+    crate::envfile::check_name("session", name)?;
+    // `LOGOS_DEVNET_SESSION_<NAME>_WALLET` and the like would name another session's variables.
+    for suffix in ["-wallet", "-account", "-account-hex"] {
+        if name.ends_with(suffix) {
+            bail!("session names can't end in {suffix}: {name}");
+        }
+    }
+    Ok(())
 }
 
 /// The Logos Core CLI for one session directory.
@@ -984,6 +993,9 @@ esac"#,
         for bad in ["", "Alice", "2nd", "a b", "../x", "a/b", &"a".repeat(49)] {
             assert!(check_session_name(bad).is_err(), "{bad:?}");
         }
+        for clash in ["alice-wallet", "alice-account", "alice-account-hex"] {
+            assert!(check_session_name(clash).is_err(), "{clash}");
+        }
     }
 
     #[test]
@@ -1167,6 +1179,11 @@ esac"#
         );
         assert_eq!(vars[3], ("LOGOS_DEVNET_ACCOUNT", format!("Public/{ID}")));
         assert!(vars[2].1.ends_with("wallet/storage.json"));
+        assert_eq!(
+            vars[4],
+            ("LOGOS_DEVNET_ACCOUNT_HEX", info.account.hex()),
+            "what lez_core takes"
+        );
     }
 
     #[test]
