@@ -13,7 +13,7 @@ cargo install --locked logos-devnet
 Or take a binary from the [latest release](https://github.com/drptbl/logos-devnet/releases/latest), built for macOS (`aarch64-apple-darwin`, `x86_64-apple-darwin`) and Linux (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, static, so any distribution), and check it against its `.sha256`:
 
 ```bash
-v=v0.4.0 t=aarch64-apple-darwin
+v=v0.4.1 t=aarch64-apple-darwin
 curl -fsSL --remote-name-all https://github.com/drptbl/logos-devnet/releases/download/$v/logos-devnet-$v-$t.tar.gz{,.sha256}
 shasum -a 256 -c logos-devnet-$v-$t.tar.gz.sha256 \
   && tar -xzf logos-devnet-$v-$t.tar.gz \
@@ -182,7 +182,7 @@ An empty `[messaging]` table in the project file gives the devnet a local messag
 
 Create your app's delivery node from `LOGOS_DEVNET_DELIVERY_CONFIG` before anything else in that daemon creates one: the first `createNode` decides a daemon's network, and a module that creates its own uses the public one. Two apps whose nodes use the hub exchange messages through it. With only the hub as a peer, their nodes report `PartiallyConnected`.
 
-The hub keeps its ports and peer ids, so the variables stay the same across `down`, `up` and `reset`. `reset` keeps its message store too. `up` brings the hub's nodes back when its daemon restarted, and `down` stops it. Once a devnet has a hub, `up` runs it for every project sharing that devnet. To remove it, drop `[messaging]` from every project file, `down`, and delete the home's `messaging/`.
+The hub keeps its ports and peer ids, so the variables stay the same across `down`, `up` and `reset`. `reset` keeps its message store too. `up` brings the hub's nodes back when its daemon restarted, and `down` stops it. `status` shows whether each node runs. Once a devnet has a hub, `up` runs it for every project sharing that devnet: `logos-devnet messaging rm` stops and deletes it, and the next `up` of a project that asks for one starts a new hub, with new ports and peer ids.
 
 Chat isn't fully local yet. `chat_module` 0.3.0 runs over the hub's delivery node once your app created it, but it still looks up keys at a hard-coded public registry.
 
@@ -253,7 +253,7 @@ With `--json`, a command prints one JSON document and nothing else on stdout. No
 The repo is a GitHub Action. On a Linux runner it installs `logos-devnet`, starts the devnet from your project file and exports the env into the job:
 
 ```yaml
-- uses: drptbl/logos-devnet@v0.4.0
+- uses: drptbl/logos-devnet@v0.4.1
   with:
     args: --max-txs-per-block 100     # optional, more options for up
 - run: cargo test                     # LOGOS_DEVNET_SEQUENCER, LOGOS_PROGRAM_*, LOGOS_DEVNET_ACCOUNTS_*, RISC0_DEV_MODE are set

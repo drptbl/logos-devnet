@@ -94,6 +94,15 @@ enum Command {
     /// Throwaway logosctl sessions with a funded devnet wallet, for apps and agents.
     #[command(subcommand)]
     Session(SessionCommand),
+    /// The local messaging hub that a project's `[messaging]` table asks for.
+    #[command(subcommand)]
+    Messaging(MessagingCommand),
+}
+
+#[derive(Subcommand)]
+enum MessagingCommand {
+    /// Stop the hub and delete it: its ports, peer ids and message store.
+    Rm,
 }
 
 #[derive(Subcommand)]
@@ -212,5 +221,6 @@ fn main() -> Result<()> {
             SessionCommand::Env { name } => emit(&devnet.session_env(&name)?, json),
             SessionCommand::Rm { name } => emit(&devnet.session_rm(&name)?, json),
         },
+        Command::Messaging(MessagingCommand::Rm) => emit(&devnet.messaging_rm()?, json),
     }
 }

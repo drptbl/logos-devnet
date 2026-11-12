@@ -21,7 +21,7 @@ jobs:
       # Installs logos-devnet, starts the devnet from logos-devnet.toml, and exports its env
       # (LOGOS_DEVNET_SEQUENCER, LOGOS_PROGRAM_*, LOGOS_DEVNET_ACCOUNTS_*, RISC0_DEV_MODE).
       - id: devnet
-        uses: drptbl/logos-devnet@v0.4.0
+        uses: drptbl/logos-devnet@v0.4.1
       - run: cargo test
       - name: The sequencer's log
         if: failure()

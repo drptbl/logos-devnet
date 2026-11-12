@@ -38,7 +38,12 @@ pub struct Status {
 
 #[derive(Debug, Serialize)]
 pub struct Messaging {
+    /// Whether its daemon runs.
     pub running: bool,
+    /// Whether its delivery node runs.
+    pub delivery_node: bool,
+    /// Whether its discovery node runs.
+    pub discovery_node: bool,
     /// Its nodes' multiaddrs, `delivery` and `discovery`, once they reported them.
     #[serde(flatten)]
     pub addresses: Option<crate::messaging::Addresses>,
@@ -181,8 +186,23 @@ impl Report for Status {
             out += &format!("sessions   {}\n", self.sessions.join(", "));
         }
         if let Some(m) = &self.messaging {
-            let state = if m.running { "running" } else { "stopped" };
-            out += &format!("messaging  {state}\n");
+            let down: Vec<&str> = [
+                (m.delivery_node, "delivery"),
+                (m.discovery_node, "discovery"),
+            ]
+            .into_iter()
+            .filter_map(|(up, node)| (!up).then_some(node))
+            .collect();
+            out += &match (m.running, down.as_slice()) {
+                (false, _) => "messaging  stopped\n".to_owned(),
+                (true, []) => "messaging  running\n".to_owned(),
+                (true, down) => format!(
+                    "messaging  running, but its {} node{} down. `logos-devnet up` starts {}\n",
+                    down.join(" and "),
+                    if down.len() == 1 { " is" } else { "s are" },
+                    if down.len() == 1 { "it" } else { "them" },
+                ),
+            };
             if let Some(a) = &m.addresses {
                 out += &format!("           delivery  {}\n", a.delivery);
                 out += &format!("           discovery  {}\n", a.discovery);
@@ -317,6 +337,8 @@ mod tests {
             sessions: vec![],
             messaging: Some(Messaging {
                 running: true,
+                delivery_node: true,
+                discovery_node: false,
                 addresses: Some(crate::messaging::Addresses {
                     delivery: "/ip4/127.0.0.1/tcp/61310/p2p/16Uiu2HAmA".into(),
                     discovery: "/ip4/127.0.0.1/tcp/61320/p2p/16Uiu2HAmB".into(),
@@ -347,10 +369,13 @@ mod tests {
             "/ip4/127.0.0.1/tcp/61310/p2p/16Uiu2HAmA"
         );
         assert!(
-            status
-                .human()
-                .contains("messaging  running\n           delivery  /ip4/127.0.0.1/tcp/61310")
+            status.human().contains(
+                "messaging  running, but its discovery node is down. `logos-devnet up` starts it\n           delivery  /ip4/127.0.0.1/tcp/61310"
+            ),
+            "{}",
+            status.human()
         );
+        assert_eq!(json["messaging"]["discovery_node"], false);
     }
 
     #[test]
