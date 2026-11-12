@@ -1368,15 +1368,32 @@ impl Devnet {
         let id = self.account_id(account)?;
         let rpc = self.rpc();
         let state = rpc.account(&id)?;
-        let data = state["data"]["shards"]
+        let shards: BTreeMap<String, Vec<u8>> = state["data"]["shards"]
             .as_object()
             .map(|shards| {
                 shards
                     .iter()
-                    .map(|(program, bytes)| (program.clone(), bytes.as_array().map_or(0, Vec::len)))
+                    .map(|(program, bytes)| {
+                        let bytes = bytes.as_array().into_iter().flatten();
+                        let bytes = bytes.filter_map(Value::as_u64).map(|b| b as u8).collect();
+                        (program.clone(), bytes)
+                    })
                     .collect()
             })
             .unwrap_or_default();
+        let data = shards
+            .iter()
+            .map(|(p, bytes)| (p.clone(), bytes.len()))
+            .collect();
+        let data_hex = shards
+            .iter()
+            .map(|(p, bytes)| {
+                (
+                    p.clone(),
+                    bytes.iter().map(|b| format!("{b:02x}")).collect(),
+                )
+            })
+            .collect();
         Ok(report::Account {
             account: id.wallet_form(),
             hex: id.hex(),
@@ -1384,6 +1401,7 @@ impl Devnet {
             nonce: state["nonce"].as_u64().map_or(0, u128::from),
             in_use: crate::rpc::in_use(&state),
             data,
+            data_hex,
         })
     }
 

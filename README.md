@@ -264,7 +264,7 @@ With `--json`, a command prints one JSON document and nothing else on stdout. No
 | `deploy` | `name`, `id`, `hex`, `var`, `deployed_now`, `updated` |
 | `fund` | `account`, `balance` |
 | `tx` | `hash`, `block` (or `null` while no block holds it) |
-| `account` | `account`, `hex`, `balance`, `nonce`, `in_use`, `data` (each program's data, as a byte count, by program id) |
+| `account` | `account`, `hex`, `balance`, `nonce`, `in_use`, `data` (each program's data, as a byte count, by program id), `data_hex` (the same data, as hex) |
 | `accounts new`, `accounts ls` | `name`, `accounts`, `amount`, `file`, `wallet`, `var` (a list for `ls`) |
 | `session new` | `name`, `modules`, `vars` |
 | `session ls` | a list of `name`, `running`, `account`, `balance`, `error` |

@@ -91,6 +91,8 @@ pub struct Account {
     pub in_use: bool,
     /// The bytes each program keeps in it, by program id. The native token's is the balance.
     pub data: BTreeMap<String, usize>,
+    /// The same bytes, as hex.
+    pub data_hex: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Serialize)]
