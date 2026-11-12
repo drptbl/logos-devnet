@@ -229,10 +229,10 @@ impl Devnet {
 
     /// The storage config of a session's daemon: the hub's storage node as its only bootstrap
     /// node when the hub runs one, or else a node of its own that joins no network.
-    fn session_storage(&self) -> Value {
+    fn session_storage(&self) -> crate::storage::Config {
         self.hub()
-            .storage_spr()
-            .map_or_else(crate::storage::isolated, |spr| crate::storage::client(&spr))
+            .storage_client()
+            .unwrap_or_else(crate::storage::isolated)
     }
 
     /// Runs the LEZ wallet on the dev wallet. Its config is rewritten first: the wallet would
@@ -996,7 +996,15 @@ impl Devnet {
             return Ok(missing);
         }
         let ctl = session.logosctl();
-        session.start_daemon(&ctl, self.settings.dev_mode, &self.session_storage())?;
+        if session.start_daemon(&ctl, self.settings.dev_mode, &self.session_storage())? {
+            // A daemon that started now has nothing loaded: bring the session back first.
+            ctl.resume(
+                &info.modules,
+                &session.wallet_config(),
+                &session.wallet_storage(),
+                &self.settings.sequencer_url(),
+            )?;
+        }
         // Recorded one at a time, so a module that fails keeps the ones before it.
         for module in &missing {
             let one = std::slice::from_ref(module);
@@ -1115,7 +1123,7 @@ impl Devnet {
         if let Some(env) = env {
             self.write_env(&env)?;
         }
-        let message = match self.project.as_ref().filter(|p| p.messaging) {
+        let message = match self.project.as_ref().filter(|p| p.messaging || p.storage) {
             Some(project) => format!(
                 "Removed the messaging hub. {} asks for one, so the next `up` starts a new hub, \
                  with new ports and peer ids.",
@@ -1577,10 +1585,13 @@ mod tests {
         std::fs::write(
             devnet.home.messaging_dir().join("hub.json"),
             r#"{"delivery_port":1,"discovery_port":2,"delivery_key":"","discovery_key":"",
-                "messaging":false,"storage_port":3,"storage_spr":"spr:hub"}"#,
+                "messaging":false,"storage_port":3,"storage_spr":"spr:hub","storage_peer":"peer"}"#,
         )
         .unwrap();
-        assert_eq!(devnet.session_storage(), crate::storage::client("spr:hub"));
+        assert_eq!(
+            devnet.session_storage(),
+            crate::storage::client("spr:hub", "peer")
+        );
     }
 
     #[test]

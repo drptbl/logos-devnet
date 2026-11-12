@@ -117,20 +117,34 @@ jobs:
           set -euo pipefail
           config=.github/ci/sessions.toml
           call() { logosctl --json call storage_module "$@" | tail -1 | jq -c .result; }
+          # Waits up to a minute for an event in a watch log, and prints its payload.
+          event() {
+            for _ in $(seq 60); do
+              line=$(grep "\"$2\"" "$1" | tail -1 || true)
+              [ -n "$line" ] && { jq -c '.data.arg0 | fromjson' <<< "$line"; return; }
+              sleep 1
+            done
+            echo "::error::no $2 in $1"; cat "$1"; exit 1
+          }
           logos-devnet --config $config status --json | jq -e '.storage.running'
           source <(logos-devnet --config $config session env alice)
           logosctl --json watch storage_module > alice.log &
-          watch=$!
-          sleep 2
-          echo "from alice $GITHUB_RUN_ID" > input.txt
-          call uploadUrl "str:$PWD/input.txt" 65536 true
-          for _ in $(seq 30); do grep -q storageUploadDone alice.log && break; sleep 1; done
-          cid=$(grep storageUploadDone alice.log | tail -1 | jq -r '.data.arg0 | fromjson | .cid')
+          watches=$!
           source <(logos-devnet --config $config session env bob)
-          call downloadToUrl "str:$cid" "str:$PWD/output.txt" false 65536 false true
-          for _ in $(seq 30); do [ -s output.txt ] && break; sleep 1; done
-          kill $watch
+          logosctl --json watch storage_module > bob.log &
+          watches="$watches $!"
+          trap 'kill $watches' EXIT
+          sleep 5
+          echo "from alice $GITHUB_RUN_ID" > input.txt
+          source <(logos-devnet --config $config session env alice)
+          call uploadUrl "str:$PWD/input.txt" 65536 true | jq -e .success
+          cid=$(event alice.log storageUploadDone | jq -er .cid)
+          source <(logos-devnet --config $config session env bob)
+          call downloadToUrl "str:$cid" "str:$PWD/output.txt" false 65536 false true | jq -e .success
+          event bob.log storageDownloadDone | jq -e .success
           diff input.txt output.txt
+          # No daemon used the runner's own storage home.
+          test ! -e ~/.logos_storage
       # The container runs a few seconds before its sequencer answers, as after an `up` that
       # was stopped while a long chain loaded: the next `up` waits for it.
       - name: up waits for a sequencer that's still starting

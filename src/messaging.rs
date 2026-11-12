@@ -60,6 +60,9 @@ struct State {
     /// The storage node's signed peer record, which sessions bootstrap from.
     #[serde(default)]
     storage_spr: Option<String>,
+    /// The storage node's peer id, which stays across its restarts while its record changes.
+    #[serde(default)]
+    storage_peer: Option<String>,
 }
 
 fn runs_messaging() -> bool {
@@ -169,9 +172,14 @@ impl Hub {
         self.state().is_ok_and(|s| s.storage_port.is_some())
     }
 
-    /// The signed peer record of the hub's storage node, which sessions bootstrap from.
-    pub fn storage_spr(&self) -> Option<String> {
-        self.state().ok().and_then(|s| s.storage_spr)
+    /// The storage config of a session that bootstraps from the hub's storage node, when the
+    /// hub runs one.
+    pub fn storage_client(&self) -> Option<crate::storage::Config> {
+        let state = self.state().ok()?;
+        Some(crate::storage::client(
+            state.storage_spr.as_deref()?,
+            state.storage_peer.as_deref()?,
+        ))
     }
 
     /// The addresses the hub's nodes last reported.
@@ -287,26 +295,33 @@ impl Hub {
             }
         }
         if state.storage_port.is_some() {
-            let spr = self.started_storage_spr()?;
-            if state.storage_spr.as_ref() != Some(&spr) {
+            let (spr, peer) = self.started_storage_node()?;
+            if state.storage_spr.as_ref() != Some(&spr)
+                || state.storage_peer.as_ref() != Some(&peer)
+            {
                 state.storage_spr = Some(spr);
+                state.storage_peer = Some(peer);
                 self.save(&state)?;
             }
         }
         Ok(())
     }
 
-    /// The storage node's signed peer record, once the node runs: the daemon starts it on its
-    /// own, a moment after it starts.
-    fn started_storage_spr(&self) -> Result<String> {
+    /// The storage node's signed peer record and peer id, once the node runs: the daemon
+    /// starts it on its own, a moment after it starts. Until then the module may not answer.
+    fn started_storage_node(&self) -> Result<(String, String)> {
         let deadline = std::time::Instant::now() + STORAGE_START_TIMEOUT;
+        let ask = |method| {
+            self.ctl
+                .call_within(STORAGE, method, &[], Duration::from_secs(5))
+                .ok()
+                .and_then(module_value)
+                .and_then(|value| value.as_str().map(str::to_owned))
+        };
         loop {
-            if let Some(spr) = self
-                .node_info(STORAGE, "spr", &[])?
-                .and_then(|spr| spr.as_str().map(str::to_owned))
-                .filter(|spr| spr.starts_with("spr:"))
-            {
-                return Ok(spr);
+            let spr = ask("spr").filter(|spr| spr.starts_with("spr:"));
+            if let (Some(spr), Some(peer)) = (spr, ask("peerId").filter(|p| !p.is_empty())) {
+                return Ok((spr, peer));
             }
             if std::time::Instant::now() > deadline {
                 bail!(
@@ -389,6 +404,7 @@ impl State {
             messaging: false,
             storage_port: None,
             storage_spr: None,
+            storage_peer: None,
         })
     }
 }
@@ -488,6 +504,7 @@ mod tests {
             messaging: true,
             storage_port: None,
             storage_spr: None,
+            storage_peer: None,
         }
     }
 
@@ -510,8 +527,8 @@ case "$2 $3 $4" in
   "daemon status "*) [ ! -e '{made}/stopped' ] ;;
   "daemon stop "*) touch '{made}/stopped' ;;
   "daemon start "*) rm -f '{made}/stopped'; echo "$HOME" > '{made}/home' ;;
-  "call storage_module dataDir") ok "{{\"success\":true,\"value\":\"$(cat '{made}/home')/.logos_storage/data\"}}" ;;
   "call storage_module spr") ok '{{"success":true,"value":"spr:hub"}}' ;;
+  "call storage_module peerId") ok '{{"success":true,"value":"16Uiu2HAmHub"}}' ;;
   "call storage_module isRunning") ok true ;;
   "module ls "*) echo '[{{"name":"{DELIVERY}","status":"loaded"}},{{"name":"{DISCOVERY}","status":"loaded"}}]' ;;
   *" createNode") touch '{made}'/"$3"; ok '{{"success":true,"value":null}}' ;;
@@ -552,7 +569,10 @@ esac"#
             },
         )
         .unwrap();
-        assert_eq!(hub.storage_spr().as_deref(), Some("spr:hub"));
+        assert_eq!(
+            hub.storage_client(),
+            Some(crate::storage::client("spr:hub", "16Uiu2HAmHub"))
+        );
         assert!(hub.runs_storage() && !hub.runs_messaging());
         let log = calls(dir.path());
         assert!(
@@ -561,11 +581,10 @@ esac"#
         );
         let port = hub.state().unwrap().storage_port.unwrap();
         assert_eq!(hub.ports(), [port], "only the storage port is the hub's");
-        let config: Value = serde_json::from_str(
-            &std::fs::read_to_string(crate::storage::config_file(&hub.ctl.home())).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(config, crate::storage::hub(port));
+        assert!(!crate::storage::differs(
+            &hub.ctl.home(),
+            &crate::storage::hub(port)
+        ));
         assert!(hub.health().storage);
         // The port stays across ensures, and storage stays on for a project without it.
         hub.ensure(false, Wants::default()).unwrap();

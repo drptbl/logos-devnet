@@ -197,9 +197,9 @@ An empty `[storage]` table connects them through a storage node in the hub, so a
 [storage]
 ```
 
-Sessions need nothing passed in: logos-devnet configures their storage before it starts their daemons. `status` shows whether the hub's storage node runs.
+Sessions need nothing passed in: logos-devnet configures their storage before it starts their daemons. `status` shows whether the hub's storage node runs. Once a project asked for it, the hub keeps its storage node for every project on that devnet, until `logos-devnet messaging rm`.
 
-`storage_module` keeps its data next to the config in `$HOME/.logos_storage`, one store per user, which a second daemon can't open. So each session's daemon, and the hub's, runs with a `HOME` of its own, `home/` in its directory. logos-devnet never changes your own `~/.logos_storage`. `up` restarts a session daemon started before this, so its storage moves into its own home.
+`storage_module` keeps its data next to the config in `$HOME/.logos_storage`, one store per user, which a second daemon can't open. So each session's daemon, and the hub's, runs with a `HOME` of its own, `home/` in its directory, and logos-devnet never changes your own `~/.logos_storage`. A daemon started before logos-devnet did this is restarted once by `up`, and gets a store of its own. `session env` doesn't set `HOME`: if you start a session's daemon yourself, set `HOME` to its `home/`.
 
 ## What runs
 
@@ -252,7 +252,7 @@ With `--json`, a command prints one JSON document and nothing else on stdout. No
 
 | Command | Fields |
 | --- | --- |
-| `up`, `reset`, `status` | `lez`, `runtime`, `sequencer` (`url`, `running`, `runtime_answered`, `block`, `max_txs_per_block`, `block_time`, `dev_mode`), `faucet` (`account`, `balance`), `programs`, `account_groups`, `sessions`, `messaging` (`running`, `delivery_node`, `discovery_node`, `delivery`, `discovery`, or `null` without a hub), `storage` (`running`, or `null` without `[storage]`), `env_file` |
+| `up`, `reset`, `status` | `lez`, `runtime`, `sequencer` (`url`, `running`, `runtime_answered`, `block`, `max_txs_per_block`, `block_time`, `dev_mode`), `faucet` (`account`, `balance`), `programs`, `account_groups`, `sessions`, `messaging` (`running`, `delivery_node`, `discovery_node`, `delivery`, `discovery`, or `null` without a hub), `storage` (`running`, or `null` until a project asks for `[storage]`), `env_file` |
 | `deploy` | `name`, `id`, `hex`, `var`, `deployed_now`, `updated` |
 | `fund` | `account`, `balance` |
 | `accounts new`, `accounts ls` | `name`, `accounts`, `amount`, `file`, `wallet`, `var` (a list for `ls`) |
