@@ -8,12 +8,21 @@
 //! `SEGMENT_LEN` bytes, and refuses a deploy whose segment accounts don't number exactly that.
 
 use anyhow::{Result, bail};
+use sha2::{Digest, Sha256};
 
 /// LEZ's `MAX_SEGMENT_DATA_LEN`.
 const SEGMENT_LEN: usize = 96 * 1024;
 
 const MAGIC: &[u8] = b"R0BF";
 const FORMAT_VERSION: u32 = 1;
+
+/// `bytes`' SHA-256, in lower-case hex, as `shasum -a 256` prints it.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
 
 /// How many segment accounts the loader needs for `binary`.
 pub fn segments(binary: &[u8]) -> Result<usize> {

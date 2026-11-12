@@ -11,6 +11,7 @@ mod chain_config;
 mod devnet;
 mod doctor;
 mod envfile;
+mod fetch;
 mod groups;
 mod home;
 mod project;

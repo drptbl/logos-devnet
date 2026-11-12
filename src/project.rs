@@ -29,6 +29,7 @@ use serde::Deserialize;
 use crate::chain_config;
 use crate::devnet::{DEFAULT_FUND, UpOptions};
 use crate::envfile::{check_name, check_program_name};
+use crate::fetch;
 use crate::groups;
 use crate::home::{RuntimeKind, Settings};
 use crate::session::{check_session_name, modules_with};
@@ -49,11 +50,12 @@ struct ProjectFile {
     sessions: BTreeMap<String, SessionSpec>,
 }
 
-/// A `[programs]` entry: the binary's path, or a table that can also make it mutable.
+/// A `[programs]` entry: the binary's path, or a table that can name a release instead and make
+/// it mutable.
 #[derive(Debug, Deserialize)]
 #[serde(
     untagged,
-    expecting = "a binary's path, or { path = \"...\", mutable = true }"
+    expecting = "a binary's path, or { path = \"...\" } or { url = \"...\", sha256 = \"...\" }, with mutable = true if wanted"
 )]
 enum ProgramEntry {
     Path(PathBuf),
@@ -63,16 +65,27 @@ enum ProgramEntry {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProgramTable {
-    path: PathBuf,
+    path: Option<PathBuf>,
+    url: Option<String>,
+    sha256: Option<String>,
     #[serde(default)]
     mutable: bool,
+}
+
+/// Where a program's binary comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProgramSource {
+    /// A file on this machine, absolute.
+    File(PathBuf),
+    /// A download, e.g. a program's GitHub release, kept only when its SHA-256 matches.
+    Release { url: String, sha256: String },
 }
 
 /// A program the project deploys.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProgramSpec {
-    /// Its binary, absolute.
-    pub binary: PathBuf,
+    /// Where its binary comes from.
+    pub source: ProgramSource,
     /// Deployed mutable, so a new build updates it in place. Undisclosed private calls need an
     /// immutable program, so it's off unless asked for.
     pub mutable: bool,
@@ -177,24 +190,6 @@ pub fn find(start: &Path) -> Option<PathBuf> {
 }
 
 impl Project {
-    /// Every program binary exists and is one LEZ loads. Checked by `up` and `reset` only, so
-    /// other commands work while a build is missing.
-    pub fn check_binaries(&self) -> Result<()> {
-        for (name, ProgramSpec { binary, .. }) in &self.programs {
-            if !binary.is_file() {
-                bail!(
-                    "[programs] {name}: {} doesn't exist. Build it first",
-                    binary.display()
-                );
-            }
-            let bytes = std::fs::read(binary)
-                .with_context(|| format!("[programs] {name}: reading {}", binary.display()))?;
-            crate::binary::segments(&bytes)
-                .with_context(|| format!("[programs] {name}: {}", binary.display()))?;
-        }
-        Ok(())
-    }
-
     /// Reads and checks the file: everything `up` would trip over later is refused here,
     /// before the devnet is touched.
     pub fn load(path: &Path) -> Result<Self> {
@@ -225,17 +220,32 @@ impl Project {
         let mut programs = BTreeMap::new();
         for (name, entry) in file.programs {
             check_program_name(&name)?;
-            let (path, mutable) = match entry {
-                ProgramEntry::Path(path) => (path, false),
-                ProgramEntry::Table(table) => (table.path, table.mutable),
-            };
-            programs.insert(
-                name,
-                ProgramSpec {
-                    binary: dir.join(path),
-                    mutable,
+            let program = match entry {
+                ProgramEntry::Path(path) => ProgramSpec {
+                    source: ProgramSource::File(dir.join(path)),
+                    mutable: false,
                 },
-            );
+                ProgramEntry::Table(table) => {
+                    let source = match (table.path, table.url, table.sha256) {
+                        (Some(path), None, None) => ProgramSource::File(dir.join(path)),
+                        (None, Some(url), Some(sha256)) => {
+                            fetch::check_url(&url)
+                                .and_then(|()| fetch::check_sha256(&sha256))
+                                .with_context(|| format!("[programs] {name}"))?;
+                            ProgramSource::Release { url, sha256 }
+                        }
+                        (None, Some(_), None) => {
+                            bail!("[programs] {name}: a url needs the file's sha256, to check it")
+                        }
+                        _ => bail!("[programs] {name}: give a path, or a url with its sha256"),
+                    };
+                    ProgramSpec {
+                        source,
+                        mutable: table.mutable,
+                    }
+                }
+            };
+            programs.insert(name, program);
         }
         for (name, group) in &file.accounts {
             check_name("account group", name)?;
@@ -298,7 +308,7 @@ modules = ["chat_module"]
         assert_eq!(
             project.programs["counter"],
             ProgramSpec {
-                binary: dir.path().join("out/counter.bin"),
+                source: ProgramSource::File(dir.path().join("out/counter.bin")),
                 mutable: false
             }
         );
@@ -350,7 +360,7 @@ modules = ["chat_module"]
         assert_eq!(
             project.programs["shop"],
             ProgramSpec {
-                binary: dir.path().join("s.bin"),
+                source: ProgramSource::File(dir.path().join("s.bin")),
                 mutable: true
             }
         );
@@ -370,6 +380,41 @@ modules = ["chat_module"]
         assert_eq!(applied.log_filter, "debug");
         assert_eq!(project.devnet.describe(&applied), "log_filter = \"debug\"");
         assert!(project_in(dir.path(), "[devnet]\nlog_filter = \"\"\n").is_err());
+    }
+
+    #[test]
+    fn a_program_can_come_from_a_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let sha = "e39f35af4f8b93ee5e1ca0ecb6c4f524c43c4446a8a6ad56d8c7d3fde7c3deb5";
+        let url = "https://example.com/releases/v1.0.0/token.bin";
+        let project = project_in(
+            dir.path(),
+            &format!("[programs]\ntoken = {{ url = \"{url}\", sha256 = \"{sha}\" }}\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            project.programs["token"],
+            ProgramSpec {
+                source: ProgramSource::Release {
+                    url: url.into(),
+                    sha256: sha.into()
+                },
+                mutable: false
+            }
+        );
+        for odd in [
+            format!("token = {{ url = \"{url}\" }}"),
+            format!("token = {{ url = \"{url}\", sha256 = \"abc\" }}"),
+            format!("token = {{ path = \"e.bin\", url = \"{url}\", sha256 = \"{sha}\" }}"),
+            format!("token = {{ path = \"e.bin\", sha256 = \"{sha}\" }}"),
+            "token = { mutable = true }".to_owned(),
+            // curl would read these as an option, or a local file.
+            format!("token = {{ url = \"-K/etc/passwd\", sha256 = \"{sha}\" }}"),
+            format!("token = {{ url = \"file:///etc/passwd\", sha256 = \"{sha}\" }}"),
+        ] {
+            let err = project_in(dir.path(), &format!("[programs]\n{odd}\n"));
+            assert!(err.is_err(), "{odd}");
+        }
     }
 
     #[test]
@@ -397,11 +442,6 @@ modules = ["chat_module"]
     #[test]
     fn refuses_what_up_would_trip_over() {
         let dir = tempfile::tempdir().unwrap();
-        let missing = project_in(dir.path(), "[programs]\ncounter = \"missing.bin\"").unwrap();
-        assert!(
-            missing.check_binaries().is_err(),
-            "loads, but up refuses it"
-        );
         for bad in [
             "[programs]\nCounter = \"x\"",
             "[accounts.users]\ncount = 0",

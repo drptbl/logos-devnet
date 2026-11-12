@@ -1,6 +1,6 @@
 //! The commands: start a chain, fund accounts, deploy programs, and write what projects need.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -9,15 +9,14 @@ use serde_json::{Value, json};
 
 use std::collections::BTreeMap;
 
-use sha2::{Digest, Sha256};
-
 use crate::account::{PublicId, first_public_id};
 use crate::binary;
 use crate::chain_config::{self, ChainOptions};
 use crate::envfile::{self, Env};
+use crate::fetch;
 use crate::groups::{self, Group, GroupInfo};
 use crate::home::{Home, RuntimeKind, Settings, write_json};
-use crate::project::Project;
+use crate::project::{ProgramSource, ProgramSpec, Project};
 use crate::report::{
     self, Balance, Done, EnvVars, GroupSummary, Groups, Program, Report, SessionMade, SessionRow,
     Sessions, Status, WalletConfig,
@@ -349,14 +348,34 @@ impl Devnet {
         Ok(wanted)
     }
 
+    /// Where `program`'s binary is on this machine: its path, or its release, downloaded into
+    /// the home once and checked against its SHA-256.
+    fn program_binary(&self, program: &ProgramSpec) -> Result<PathBuf> {
+        match &program.source {
+            ProgramSource::File(path) if !path.is_file() => {
+                bail!("{} doesn't exist. Build it first", path.display())
+            }
+            ProgramSource::File(path) => Ok(path.clone()),
+            ProgramSource::Release { url, sha256 } => {
+                fetch::cached(&self.home.downloads_dir(), url, sha256)
+            }
+        }
+    }
+
     /// What `up` can't make by itself, checked before anything changes: the project's program
-    /// binaries, and logosctl when sessions exist or the project declares some, since `up`
-    /// resumes or makes each one.
+    /// binaries (downloading releases), and logosctl when sessions exist or the project declares
+    /// some, since `up` resumes or makes each one.
     fn check_needs(&self, logosctl_on_path: impl FnOnce() -> bool) -> Result<()> {
         if let Some(project) = &self.project {
-            project.check_binaries()?;
-            for program in project.programs.values() {
-                self.runtime.check_wallet_file(&program.binary)?;
+            for (name, program) in &project.programs {
+                let binary = self
+                    .program_binary(program)
+                    .with_context(|| format!("[programs] {name}"))?;
+                std::fs::read(&binary)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|bytes| binary::segments(&bytes))
+                    .with_context(|| format!("[programs] {name}: {}", binary.display()))?;
+                self.runtime.check_wallet_file(&binary)?;
             }
         }
         if self.needs_logosctl() && !logosctl_on_path() {
@@ -434,7 +453,10 @@ impl Devnet {
         let mut failed: Vec<String> = Vec::new();
         if let Some(project) = &self.project {
             for (name, program) in &project.programs {
-                match self.deploy_program(name, &program.binary, program.mutable) {
+                let deployed_one = self
+                    .program_binary(program)
+                    .and_then(|binary| self.deploy_program(name, &binary, program.mutable));
+                match deployed_one {
                     Ok(report) => deployed.push(report),
                     Err(e) => {
                         eprintln!("program {name}: {e:#}");
@@ -998,7 +1020,7 @@ impl Devnet {
             std::fs::read(elf).with_context(|| format!("{} does not exist", elf.display()))?;
         // Before any account is made: the loader takes exactly this many segments.
         let segments = binary::segments(&bytes).with_context(|| elf.display().to_string())?;
-        let hash = hex_digest(&bytes);
+        let hash = binary::sha256_hex(&bytes);
         let faucet = self.faucet()?;
         let mut env = self.read_env()?;
         let mut records = self.program_records()?;
@@ -1270,14 +1292,6 @@ fn random_key() -> Result<String> {
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// Lower-case hex SHA-256 of `bytes`.
-fn hex_digest(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
 /// The env file after `up`: a chain that carries on keeps its programs, a new one has none.
 pub(crate) fn port_free(port: u16) -> Result<()> {
     std::net::TcpListener::bind(("127.0.0.1", port))
@@ -1385,6 +1399,48 @@ mod tests {
         assert_eq!(devnet.settings.runtime, RuntimeKind::Docker);
         let err = devnet.check_needs(|| true).unwrap_err();
         assert!(format!("{err:#}").contains("holds a `:`"), "{err:#}");
+    }
+
+    /// A devnet in `dir/home` for a project file in `dir` holding `programs`.
+    fn devnet_with_programs(dir: &Path, programs: &str) -> Devnet {
+        let file = dir.join(crate::project::FILE_NAME);
+        std::fs::write(&file, format!("[programs]\n{programs}\n")).unwrap();
+        let home = Home::locate(Some(dir.join("home"))).unwrap();
+        Devnet::open(home, Some(Project::load(&file).unwrap())).unwrap()
+    }
+
+    #[test]
+    fn refuses_a_missing_build_before_touching_the_devnet() {
+        let dir = tempfile::tempdir().unwrap();
+        let devnet = devnet_with_programs(dir.path(), "counter = \"missing.bin\"");
+        let err = devnet.check_needs(|| true).unwrap_err();
+        assert!(format!("{err:#}").contains("Build it first"), "{err:#}");
+    }
+
+    #[test]
+    fn refuses_a_release_with_another_sha256_before_touching_the_devnet() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = crate::fetch::tests::serve("200 OK", b"something else", 1);
+        let sha = binary::sha256_hex(b"a program");
+        let devnet = devnet_with_programs(
+            dir.path(),
+            &format!("token = {{ url = \"{url}\", sha256 = \"{sha}\" }}"),
+        );
+        let err = devnet.check_needs(|| true).unwrap_err();
+        assert!(format!("{err:#}").contains("has SHA-256"), "{err:#}");
+    }
+
+    #[test]
+    fn checks_a_downloaded_release_like_a_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = crate::fetch::tests::serve("200 OK", b"not a program", 1);
+        let sha = binary::sha256_hex(b"not a program");
+        let devnet = devnet_with_programs(
+            dir.path(),
+            &format!("token = {{ url = \"{url}\", sha256 = \"{sha}\" }}"),
+        );
+        let err = devnet.check_needs(|| true).unwrap_err();
+        assert!(format!("{err:#}").contains("not a RISC Zero"), "{err:#}");
     }
 
     #[test]

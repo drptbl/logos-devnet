@@ -13,7 +13,7 @@ cargo install --locked logos-devnet
 Or take a binary from the [latest release](https://github.com/drptbl/logos-devnet/releases/latest), built for macOS (`aarch64-apple-darwin`, `x86_64-apple-darwin`) and Linux (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, static, so any distribution), and check it against its `.sha256`:
 
 ```bash
-v=v0.3.6 t=aarch64-apple-darwin
+v=v0.3.7 t=aarch64-apple-darwin
 curl -fsSL --remote-name-all https://github.com/drptbl/logos-devnet/releases/download/$v/logos-devnet-$v-$t.tar.gz{,.sha256}
 shasum -a 256 -c logos-devnet-$v-$t.tar.gz.sha256 \
   && tar -xzf logos-devnet-$v-$t.tar.gz \
@@ -81,6 +81,7 @@ log_filter = "info,sequencer_core=debug"   # the sequencer's RUST_LOG, for `logs
 [programs]               # name = guest binary, relative to this file
 counter = "target/riscv32im-risc0-zkvm-elf/docker/counter.bin"
 shop = { path = "target/riscv32im-risc0-zkvm-elf/docker/shop.bin", mutable = true }
+token = { url = "https://github.com/<owner>/<repo>/releases/download/v1.0.0/token.bin", sha256 = "<its 64 hex digits>" }
 
 [accounts.users]         # a group of funded accounts
 count = 100
@@ -89,6 +90,8 @@ amount = 5_000_000_000   # lepta each, 10B when left out
 [sessions.alice]         # a logosctl session, as session new
 modules = ["chat_module"]
 ```
+
+A program can come from a release instead of a path: `up` downloads its `url` once, with `curl`, into the home, and deploys it only if its SHA-256 is the `sha256` given (as `shasum -a 256` prints it).
 
 `up` deploys missing programs, makes and funds missing accounts and sessions, and changes nothing the second time (0.6 s). A `mutable` program whose binary changed is updated in place, with the same id. An immutable one keeps its old build, and `up` and `deploy` fail saying so, so tests don't run against it: `reset` deploys the new build. A module added to a session's `modules` is installed into it. `up` checks the whole file before it touches the devnet.
 
@@ -198,6 +201,7 @@ Everything is in `~/.logos-devnet` (or `LOGOS_DEVNET_HOME`):
 | `sessions/` | one directory per session: its `logosctl` home, wallet and `session.json` |
 | `accounts/` | one directory per account group: its wallet and `accounts.json` |
 | `programs.json` | the binary hash each program was deployed from |
+| `downloads/` | program binaries the project file names by URL, by SHA-256 |
 | `lock` | held while a command changes the devnet, so two projects sharing the home take turns |
 
 The RPC listens on `127.0.0.1` only. It has no authentication, so don't publish the port.
@@ -224,7 +228,7 @@ With `--json`, a command prints one JSON document and nothing else on stdout. No
 The repo is a GitHub Action. On a Linux runner it installs `logos-devnet`, starts the devnet from your project file and exports the env into the job:
 
 ```yaml
-- uses: drptbl/logos-devnet@v0.3.6
+- uses: drptbl/logos-devnet@v0.3.7
   with:
     args: --max-txs-per-block 100     # optional, more options for up
 - run: cargo test                     # LOGOS_DEVNET_SEQUENCER, LOGOS_PROGRAM_*, LOGOS_DEVNET_ACCOUNTS_*, RISC0_DEV_MODE are set
