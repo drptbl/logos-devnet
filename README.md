@@ -2,7 +2,7 @@
 
 A local LEZ chain for Logos development. One command starts a sequencer on your machine with 1 second blocks and a funded faucet, and a project file in your repo says what else it needs: programs, a hundred funded test accounts, `logosctl` sessions. A transfer lands in about 2 seconds and a program deploy in about 10, and you never run out of testnet funds.
 
-Keep the public testnet for final checks. Messaging (chat, discovery) isn't part of this: it stays on the Logos fleets.
+Keep the public testnet for final checks. Messages and service discovery can stay local too: a project that asks for it gets a messaging hub on `127.0.0.1` instead of the Logos fleets.
 
 ## Install
 
@@ -37,11 +37,11 @@ source ~/.logos-devnet/env                         # LOGOS_DEVNET_SEQUENCER, LOG
 
 | Command | What it does |
 | --- | --- |
-| `up` | Starts the devnet, or resumes it, and makes it match your `logos-devnet.toml`. Takes `--docker` or `--native`, `--lez <tag>`, `--port`, `--block-time`, `--max-txs-per-block`, `--dev-mode` and `--log-filter`, and remembers them. `--rebuild` builds the image or binaries again. |
+| `up` | Starts the devnet, or resumes it, and makes it match your `logos-devnet.toml`. Takes `--docker` or `--native`, `--lez <tag>` (a v0.3 tag), `--port`, `--block-time`, `--max-txs-per-block`, `--dev-mode` and `--log-filter`, and remembers them. `--rebuild` builds the image or binaries again. |
 | `down` | Stops it. The chain is kept. |
 | `reset` | Deletes the chain and starts a new one, every account group funded at genesis. Takes the same options as `up`. |
-| `status` | What runs, the chain head, the faucet, programs, account groups and sessions. |
-| `doctor` | Checks the project file, Docker and the image (or git and cargo with `--native`), whether the chain takes the project's settings, the port, the faucet and, when sessions need it, `logosctl`, and says how to fix what fails. |
+| `status` | What runs, the chain head, the faucet, programs, account groups, sessions and the messaging hub. |
+| `doctor` | Checks the project file, Docker and the image (or git and cargo with `--native`), whether the chain takes the project's settings, the port, the faucet and, when sessions or the messaging hub need it, `logosctl`, and says how to fix what fails. |
 | `fund <account> [amount]` | Sends lepta from the faucet to a public account, 10B by default. |
 | `deploy <name> <bin> [--mutable]` | Deploys a program, from its `.bin` (what `cargo risczero build` makes, not the bare ELF), and adds `LOGOS_PROGRAM_<NAME>` and `LOGOS_PROGRAM_<NAME>_HEX` to the env file. Names are lower-case letters, digits and `-`. With `--mutable`, a new build updates it in place. |
 | `wallet-config <dir>` | Writes a `wallet_config.json` pointing at the devnet into a new wallet directory. |
@@ -51,10 +51,11 @@ source ~/.logos-devnet/env                         # LOGOS_DEVNET_SEQUENCER, LOG
 | `session ls`, `session env <name>`, `session rm <name>` | Lists sessions, prints one's env to `source`, deletes one. |
 | `accounts new <name> --count <n> [--amount <a>]` | Makes a group of funded accounts, see below. |
 | `accounts ls` | Lists account groups. |
+| `messaging rm` | Stops the messaging hub and deletes it, see below. |
 
 Every command takes `--json` for scripts and agents, `--config <file>` for a project file elsewhere, and `--home <dir>`. A bad option changes nothing: `up` and `reset` check it, and build what they need, before they stop the running chain.
 
-[`examples/`](examples) has LEZ's hello-world tutorial running on a devnet, two `logosctl` sessions paying each other, and a GitHub Actions workflow to copy. For a whole project on it, [logos-agents](https://github.com/drptbl/logos-agents) deploys a released program and runs two sessions from its [`logos-devnet.toml`](https://github.com/drptbl/logos-agents/blob/main/logos-devnet.toml).
+[`examples/`](examples) has LEZ's hello-world tutorial running on a devnet, two `logosctl` sessions paying each other, two sessions messaging and discovering each other through the hub, and a GitHub Actions workflow to copy. For a whole project on it, [logos-agents](https://github.com/drptbl/logos-agents) deploys a released program and runs two sessions and the messaging hub from its [`logos-devnet.toml`](https://github.com/drptbl/logos-agents/blob/main/logos-devnet.toml).
 
 ## For AI agents
 
@@ -237,7 +238,7 @@ With `--json`, a command prints one JSON document and nothing else on stdout. No
 
 | Command | Fields |
 | --- | --- |
-| `up`, `reset`, `status` | `lez`, `runtime`, `sequencer` (`url`, `running`, `block`, `max_txs_per_block`, `block_time`, `dev_mode`), `faucet` (`account`, `balance`), `programs`, `account_groups`, `sessions`, `env_file` |
+| `up`, `reset`, `status` | `lez`, `runtime`, `sequencer` (`url`, `running`, `runtime_answered`, `block`, `max_txs_per_block`, `block_time`, `dev_mode`), `faucet` (`account`, `balance`), `programs`, `account_groups`, `sessions`, `messaging` (`running`, `delivery_node`, `discovery_node`, `delivery`, `discovery`, or `null` without a hub), `env_file` |
 | `deploy` | `name`, `id`, `hex`, `var`, `deployed_now`, `updated` |
 | `fund` | `account`, `balance` |
 | `accounts new`, `accounts ls` | `name`, `accounts`, `amount`, `file`, `wallet`, `var` (a list for `ls`) |
@@ -245,7 +246,7 @@ With `--json`, a command prints one JSON document and nothing else on stdout. No
 | `session ls` | a list of `name`, `running`, `account`, `balance`, `error` |
 | `env`, `session env` | an object of variable to value |
 | `wallet-config` | `path` |
-| `down`, `session rm` | `message` |
+| `down`, `session rm`, `messaging rm` | `message` |
 | `doctor` | `ok`, `checks` (`name`, `ok`, `detail`, `fix`) |
 
 ## In CI
@@ -261,7 +262,7 @@ The repo is a GitHub Action. On a Linux runner it installs `logos-devnet`, start
   run: logos-devnet logs              # the sequencer's log, when a test fails
 ```
 
-Inputs: `version` (default: the release tag you use the action at, or, pinned to a commit, the release that commit's `Cargo.toml` names), `config`, `working-directory`, `args` (space-separated, without shell quoting. Set the home with `LOGOS_DEVNET_HOME`, not `--home`), `start: "false"` to only install, which also works on macOS runners, and `logosctl-version` (default `0.3.2`). When the project file has sessions and no `logosctl` is on `PATH`, the action installs that release of the Logos Core CLI, checked against its SHA-256. Output: `sequencer`. When `up` itself fails, the action prints the sequencer's log. Starting the devnet needs a Linux runner, for Docker.
+Inputs: `version` (default: the release tag you use the action at, or, pinned to a commit, the release that commit's `Cargo.toml` names), `config`, `working-directory`, `args` (space-separated, without shell quoting. Set the home with `LOGOS_DEVNET_HOME`, not `--home`), `start: "false"` to only install, which also works on macOS runners, and `logosctl-version` (default `0.3.2`). When the project file has sessions or `[messaging]` and no `logosctl` is on `PATH`, the action installs that release of the Logos Core CLI, checked against its SHA-256. Output: `sequencer`. When `up` itself fails, the action prints the sequencer's log. Starting the devnet needs a Linux runner, for Docker.
 
 ## The image
 

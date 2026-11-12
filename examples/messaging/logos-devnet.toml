@@ -1,0 +1,14 @@
+# Two logosctl sessions messaging and discovering each other through the devnet's local
+# messaging hub. See README.md.
+home = ".logos-devnet"
+
+[devnet]
+port = 3044       # its own port, so it runs next to the shared devnet on 3040
+
+[messaging]       # the hub: a delivery node and a discovery bootstrap on 127.0.0.1
+
+[sessions.alice]
+modules = ["delivery_module", "libp2p_module"]
+
+[sessions.bob]
+modules = ["delivery_module", "libp2p_module"]

@@ -62,6 +62,7 @@ Each refusal changes nothing. `up` prefixes a program's refusal with `program <n
 | `<name> is deployed mutable, asked for immutable` (or the reverse) | Put `mutable` back as deployed, or `reset`. |
 | `this chain runs in dev mode` / `this chain checks proofs` | Match the chain's dev mode, or `reset --dev-mode` / `reset --dev-mode false`. |
 | `this chain runs LEZ <tag>` | `reset --lez <tag>`. |
+| `logos-devnet runs LEZ v0.3 tags` | Use a v0.3 tag, e.g. `--lez v0.3.1`. LEZ v0.4 isn't supported yet. |
 | `the shared devnet runs with ..., but <file> asks for ...` | Other projects use that devnet. Give this project its own `home` and port. |
 | `port <n> on 127.0.0.1 is taken` | `up --port <free port>`, which is remembered, or the file's `[devnet] port`. |
 | `sessions and the messaging hub need logosctl` | Install the Logos Core CLI, or remove the sessions and `[messaging]`. |
