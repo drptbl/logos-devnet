@@ -30,8 +30,18 @@ pub struct Status {
     pub programs: Vec<Program>,
     pub account_groups: Vec<GroupSummary>,
     pub sessions: Vec<String>,
+    /// The local messaging hub, when the devnet has one.
+    pub messaging: Option<Messaging>,
     /// The env file to `source`, once the devnet has run.
     pub env_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Messaging {
+    pub running: bool,
+    /// Its nodes' multiaddrs, `delivery` and `discovery`, once they reported them.
+    #[serde(flatten)]
+    pub addresses: Option<crate::messaging::Addresses>,
 }
 
 #[derive(Debug, Serialize)]
@@ -170,6 +180,14 @@ impl Report for Status {
         if !self.sessions.is_empty() {
             out += &format!("sessions   {}\n", self.sessions.join(", "));
         }
+        if let Some(m) = &self.messaging {
+            let state = if m.running { "running" } else { "stopped" };
+            out += &format!("messaging  {state}\n");
+            if let Some(a) = &m.addresses {
+                out += &format!("           delivery  {}\n", a.delivery);
+                out += &format!("           discovery  {}\n", a.discovery);
+            }
+        }
         if let Some(env) = &self.env_file {
             out += &format!("env        {}\n", env.display());
         }
@@ -297,6 +315,13 @@ mod tests {
             programs: vec![],
             account_groups: vec![],
             sessions: vec![],
+            messaging: Some(Messaging {
+                running: true,
+                addresses: Some(crate::messaging::Addresses {
+                    delivery: "/ip4/127.0.0.1/tcp/61310/p2p/16Uiu2HAmA".into(),
+                    discovery: "/ip4/127.0.0.1/tcp/61320/p2p/16Uiu2HAmB".into(),
+                }),
+            }),
             env_file: None,
         };
         let json = serde_json::to_value(&status).unwrap();
@@ -308,6 +333,7 @@ mod tests {
             "programs",
             "account_groups",
             "sessions",
+            "messaging",
             "env_file",
         ] {
             assert!(json.get(key).is_some(), "{key}");
@@ -315,6 +341,16 @@ mod tests {
         assert_eq!(json["sequencer"]["block"], 7);
         assert_eq!(json["sequencer"]["dev_mode"], true);
         assert!(status.human().contains("running, block 7, dev mode"));
+        assert_eq!(json["messaging"]["running"], true);
+        assert_eq!(
+            json["messaging"]["delivery"],
+            "/ip4/127.0.0.1/tcp/61310/p2p/16Uiu2HAmA"
+        );
+        assert!(
+            status
+                .human()
+                .contains("messaging  running\n           delivery  /ip4/127.0.0.1/tcp/61310")
+        );
     }
 
     #[test]

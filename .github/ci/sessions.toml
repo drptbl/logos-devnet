@@ -1,2 +1,3 @@
-# A project with a session: the action installs logosctl for it.
+# A project with a session and the messaging hub: the action installs logosctl for them.
 [sessions.alice]
+[messaging]

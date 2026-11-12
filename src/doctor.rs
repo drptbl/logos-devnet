@@ -148,11 +148,11 @@ pub fn run(devnet: &Devnet, project_error: Option<&anyhow::Error>) -> Doctor {
 
     if devnet.needs_logosctl() {
         checks.push(if session::logosctl_on_path() {
-            pass("logosctl", "on PATH, for sessions")
+            pass("logosctl", "on PATH, for sessions and the messaging hub")
         } else {
             fail(
                 "logosctl",
-                "sessions need logosctl, the Logos Core CLI, and it isn't on PATH",
+                "sessions and the messaging hub need logosctl, the Logos Core CLI, and it isn't on PATH",
                 "install the Logos Core CLI (logosctl)",
             )
         });

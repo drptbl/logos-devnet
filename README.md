@@ -13,7 +13,7 @@ cargo install --locked logos-devnet
 Or take a binary from the [latest release](https://github.com/drptbl/logos-devnet/releases/latest), built for macOS (`aarch64-apple-darwin`, `x86_64-apple-darwin`) and Linux (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, static, so any distribution), and check it against its `.sha256`:
 
 ```bash
-v=v0.3.8 t=aarch64-apple-darwin
+v=v0.4.0 t=aarch64-apple-darwin
 curl -fsSL --remote-name-all https://github.com/drptbl/logos-devnet/releases/download/$v/logos-devnet-$v-$t.tar.gz{,.sha256}
 shasum -a 256 -c logos-devnet-$v-$t.tar.gz.sha256 \
   && tar -xzf logos-devnet-$v-$t.tar.gz \
@@ -89,6 +89,8 @@ amount = 5_000_000_000   # lepta each, 10B when left out
 
 [sessions.alice]         # a logosctl session, as session new
 modules = ["chat_module"]
+
+[messaging]              # a local messaging hub, see Messaging
 ```
 
 A program can come from a release instead of a path: `up` downloads its `url` once, with `curl`, into the home, and deploys it only if its SHA-256 is the `sha256` given (as `shasum -a 256` prints it).
@@ -162,6 +164,28 @@ Sessions follow the chain. `down` stops their daemons. `up` starts them again, l
 
 The catalog's `lez_core` 0.5.1 is built on LEZ `v0.3.1`, the default `--lez` tag, so sessions match it.
 
+## Messaging
+
+An empty `[messaging]` table in the project file gives the devnet a local messaging hub, so your app's messages and service lookups stay on your machine instead of going through the public fleet:
+
+```toml
+[messaging]
+```
+
+`up` then runs a `logosctl` daemon of the devnet's own with two nodes, both on `127.0.0.1` only. A `delivery_module` node relays and stores messages on a private cluster, and a `libp2p_module` node is the discovery bootstrap. You need `logosctl` on your `PATH`. The env file gains:
+
+| Variable | |
+| --- | --- |
+| `LOGOS_DEVNET_DELIVERY_CONFIG` | the `delivery_module.createNode` config for your app's node: Edge mode, no preset, the hub as its only entry node |
+| `LOGOS_DEVNET_DELIVERY_ENTRY_NODE` | the hub's delivery node, `/ip4/127.0.0.1/tcp/<port>/p2p/<id>` |
+| `LOGOS_DEVNET_DISCOVERY_BOOTSTRAP` | the hub's discovery node, `/ip4/127.0.0.1/tcp/<port>/p2p/<id>`: in `libp2p_module`'s `bootstrapNodes`, its id is the `peerId` and the part before `/p2p/` the address |
+
+Create your app's delivery node from `LOGOS_DEVNET_DELIVERY_CONFIG` before anything else in that daemon creates one: the first `createNode` decides a daemon's network, and a module that creates its own uses the public one. Two apps whose nodes use the hub exchange messages through it. With only the hub as a peer, their nodes report `PartiallyConnected`.
+
+The hub keeps its ports and peer ids, so the variables stay the same across `down`, `up` and `reset`. `reset` keeps its message store too. `up` brings the hub's nodes back when its daemon restarted, and `down` stops it. Once a devnet has a hub, `up` runs it for every project sharing that devnet. To remove it, drop `[messaging]` from every project file, `down`, and delete the home's `messaging/`.
+
+Chat isn't fully local yet. `chat_module` 0.3.0 runs over the hub's delivery node once your app created it, but it still looks up keys at a hard-coded public registry.
+
 ## What runs
 
 LEZ's own `sequencer_service` runs, built with two features. `standalone` replaces Bedrock, the L1, with an in-process mock that accepts every block. `prove` runs programs in-process, so you don't need `r0vm`. The default is `v0.3.1`. `--lez` picks another `v0.3` tag, and a chain only runs one tag: `reset --lez <tag>` to switch. LEZ `v0.4` changes the sequencer's config and commands, and isn't supported yet.
@@ -202,6 +226,7 @@ Everything is in `~/.logos-devnet` (or `LOGOS_DEVNET_HOME`):
 | `accounts/` | one directory per account group: its wallet and `accounts.json` |
 | `programs.json` | the binary hash each program was deployed from |
 | `downloads/` | program binaries the project file names by URL, by SHA-256 |
+| `messaging/` | the messaging hub: its `logosctl` home, message store, ports and node keys in `hub.json` |
 | `lock` | held while a command changes the devnet, so two projects sharing the home take turns |
 
 The RPC listens on `127.0.0.1` only. It has no authentication, so don't publish the port.
@@ -228,7 +253,7 @@ With `--json`, a command prints one JSON document and nothing else on stdout. No
 The repo is a GitHub Action. On a Linux runner it installs `logos-devnet`, starts the devnet from your project file and exports the env into the job:
 
 ```yaml
-- uses: drptbl/logos-devnet@v0.3.8
+- uses: drptbl/logos-devnet@v0.4.0
   with:
     args: --max-txs-per-block 100     # optional, more options for up
 - run: cargo test                     # LOGOS_DEVNET_SEQUENCER, LOGOS_PROGRAM_*, LOGOS_DEVNET_ACCOUNTS_*, RISC0_DEV_MODE are set
