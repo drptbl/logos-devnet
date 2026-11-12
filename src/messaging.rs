@@ -199,7 +199,8 @@ impl Hub {
         if !state.installed {
             eprintln!("Starting the messaging hub and installing {DELIVERY}, {DISCOVERY}...");
         }
-        self.ctl.start(dev_mode)?;
+        self.ctl
+            .start_with_storage(dev_mode, &crate::storage::isolated())?;
         if !state.installed {
             self.ctl.install(&modules)?;
             state.installed = true;

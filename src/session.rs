@@ -30,6 +30,8 @@ const LEZ_CORE: &str = "lez_core";
 const LEZ_CORE_VERSION: &str = "0.5.1";
 /// How long `stop` waits for a daemon to exit.
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a daemon gets to say where its storage node keeps its data.
+const STORAGE_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What a session remembers about itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,17 +107,17 @@ impl Session {
         self.dir.join("dev-mode")
     }
 
-    /// Starts the session's daemon (`ctl`) with the chain's dev mode. One running with the
-    /// other mode, or with none recorded, is restarted first: it would make proofs the chain
-    /// rejects.
-    pub fn start_daemon(&self, ctl: &Logosctl, dev_mode: bool) -> Result<()> {
+    /// Starts the session's daemon (`ctl`) with the chain's dev mode and `storage`'s config.
+    /// One running with the other mode, or with none recorded, is restarted first: it would
+    /// make proofs the chain rejects.
+    pub fn start_daemon(&self, ctl: &Logosctl, dev_mode: bool, storage: &Value) -> Result<()> {
         let record = self.dev_mode_record();
         let value = dev_mode_value(dev_mode);
         let started = std::fs::read_to_string(&record).ok();
         if started.as_deref().map(str::trim) != Some(value) {
             ctl.stop()?;
         }
-        ctl.start(dev_mode)?;
+        ctl.start_with_storage(dev_mode, storage)?;
         std::fs::create_dir_all(&self.dir)?;
         std::fs::write(&record, value).with_context(|| format!("writing {}", record.display()))
     }
@@ -236,6 +238,12 @@ impl Logosctl {
         }
     }
 
+    /// The daemon's `HOME`, next to its config directory, so modules that keep state in `HOME`
+    /// (`storage_module`) keep it per daemon.
+    pub fn home(&self) -> PathBuf {
+        self.dir.with_file_name("home")
+    }
+
     fn cmd(&self) -> Command {
         let mut cmd = Command::new(&self.program);
         cmd.env("LOGOSCTL_CONFIG_DIR", &self.dir).arg("--json");
@@ -261,15 +269,39 @@ impl Logosctl {
     /// answers in plain text even with `--json`.)
     pub fn start(&self, dev_mode: bool) -> Result<()> {
         std::fs::create_dir_all(&self.dir)?;
+        std::fs::create_dir_all(self.home())?;
         if !self.running() {
             // The daemon's modules prove in its process, so it takes the chain's dev mode.
             self.output_of(
                 self.cmd()
                     .env(DEV_MODE_VAR, dev_mode_value(dev_mode))
+                    .env("HOME", self.home())
                     .args(["daemon", "start", "--detach"]),
             )?;
         }
         Ok(())
+    }
+
+    /// `start`, with the daemon's storage node configured by `storage` (see `storage`). A
+    /// running daemon is restarted when its config changed, or when its storage isn't the one in
+    /// its own `HOME`: it was started before daemons had one.
+    pub fn start_with_storage(&self, dev_mode: bool, storage: &Value) -> Result<()> {
+        let changed = crate::storage::write_config(&self.home(), storage)?;
+        if self.running() && (changed || !self.storage_in_home()) {
+            self.stop()?;
+        }
+        self.start(dev_mode)
+    }
+
+    /// Whether the daemon's storage node keeps its data in the daemon's own `HOME`.
+    fn storage_in_home(&self) -> bool {
+        let wanted = crate::storage::data_dir(&self.home());
+        let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_owned());
+        self.call_within("storage_module", "dataDir", &[], STORAGE_CHECK_TIMEOUT)
+            .ok()
+            .filter(|reply| reply["success"] == true)
+            .and_then(|reply| reply["value"].as_str().map(PathBuf::from))
+            .is_some_and(|dir| canonical(&dir) == canonical(&wanted))
     }
 
     /// Stops the session's daemon and waits for it to exit.
@@ -573,11 +605,13 @@ esac"#
                 r#"case "$2 $3" in
   "daemon status") [ -f '{up}' ] || exit 1; echo '{{"status":"ok"}}' ;;
   "daemon stop") rm -f '{up}' ;;
-  "daemon start") echo "$RISC0_DEV_MODE" > '{started}'; touch '{up}' ;;
+  "daemon start") echo "$RISC0_DEV_MODE" > '{started}'; echo "$HOME" > '{home}'; touch '{up}' ;;
+  "call storage_module") echo "{{\"status\":\"ok\",\"result\":{{\"success\":true,\"value\":\"$(cat '{home}')/.logos_storage/data\"}}}}" ;;
   *) echo '{{"status":"ok"}}' ;;
 esac"#,
                 up = up.display(),
                 started = dir.join("started").display(),
+                home = dir.join("started-home").display(),
             ),
         )
     }
@@ -633,7 +667,9 @@ esac"#,
         let session = Session::new(&dir.path().join("sessions"), "alice").unwrap();
         // Running from before v0.3.0: nothing says how it started.
         let ctl = daemon(dir.path(), true);
-        session.start_daemon(&ctl, true).unwrap();
+        session
+            .start_daemon(&ctl, true, &crate::storage::isolated())
+            .unwrap();
         assert_eq!(
             std::fs::read_to_string(dir.path().join("started")).unwrap(),
             "1\n"
@@ -641,15 +677,65 @@ esac"#,
         assert!(calls(dir.path()).contains("daemon stop"));
         // Started in this mode: left running.
         std::fs::remove_file(dir.path().join("calls.log")).unwrap();
-        session.start_daemon(&ctl, true).unwrap();
+        session
+            .start_daemon(&ctl, true, &crate::storage::isolated())
+            .unwrap();
         assert!(!calls(dir.path()).contains("daemon stop"));
         // The other mode: restarted.
-        session.start_daemon(&ctl, false).unwrap();
+        session
+            .start_daemon(&ctl, false, &crate::storage::isolated())
+            .unwrap();
         assert!(calls(dir.path()).contains("daemon stop"));
         assert_eq!(
             std::fs::read_to_string(dir.path().join("started")).unwrap(),
             "0\n"
         );
+    }
+
+    #[test]
+    fn a_daemon_gets_a_home_of_its_own_with_an_isolated_storage_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctl = daemon(dir.path(), false);
+        ctl.start_with_storage(false, &crate::storage::isolated())
+            .unwrap();
+        let home = std::fs::read_to_string(dir.path().join("started-home")).unwrap();
+        assert_eq!(home.trim(), ctl.home().to_str().unwrap());
+        let config: Value = serde_json::from_str(
+            &std::fs::read_to_string(crate::storage::config_file(&ctl.home())).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(config, crate::storage::isolated());
+        // Started that way: left running.
+        std::fs::remove_file(dir.path().join("calls.log")).unwrap();
+        ctl.start_with_storage(false, &crate::storage::isolated())
+            .unwrap();
+        assert!(!calls(dir.path()).contains("daemon stop"));
+    }
+
+    #[test]
+    fn a_daemon_using_another_homes_storage_is_restarted() {
+        let dir = tempfile::tempdir().unwrap();
+        // Running from before daemons had a HOME of their own: storage in the user's.
+        let ctl = daemon(dir.path(), true);
+        std::fs::write(dir.path().join("started-home"), "/Users/someone").unwrap();
+        ctl.start_with_storage(false, &crate::storage::isolated())
+            .unwrap();
+        assert!(calls(dir.path()).contains("daemon stop"));
+        let home = std::fs::read_to_string(dir.path().join("started-home")).unwrap();
+        assert_eq!(home.trim(), ctl.home().to_str().unwrap());
+    }
+
+    #[test]
+    fn a_daemon_whose_storage_config_changed_is_restarted() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctl = daemon(dir.path(), false);
+        ctl.start_with_storage(false, &crate::storage::isolated())
+            .unwrap();
+        std::fs::remove_file(dir.path().join("calls.log")).unwrap();
+        let mut other = crate::storage::isolated();
+        other["listen-port"] = serde_json::json!(4040);
+        ctl.start_with_storage(false, &other).unwrap();
+        assert!(calls(dir.path()).contains("daemon stop"));
     }
 
     #[test]

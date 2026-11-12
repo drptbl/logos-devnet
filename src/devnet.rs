@@ -665,7 +665,7 @@ impl Devnet {
                 session.forget_old_chain()?;
                 self.write_session_wallet_config(&session)?;
                 let ctl = session.logosctl();
-                session.start_daemon(&ctl, self.settings.dev_mode)?;
+                session.start_daemon(&ctl, self.settings.dev_mode, &crate::storage::isolated())?;
                 ctl.resume(
                     &info.modules,
                     &session.wallet_config(),
@@ -970,7 +970,7 @@ impl Devnet {
             return Ok(missing);
         }
         let ctl = session.logosctl();
-        session.start_daemon(&ctl, self.settings.dev_mode)?;
+        session.start_daemon(&ctl, self.settings.dev_mode, &crate::storage::isolated())?;
         // Recorded one at a time, so a module that fails keeps the ones before it.
         for module in &missing {
             let one = std::slice::from_ref(module);
@@ -996,7 +996,7 @@ impl Devnet {
             session.name,
             modules.join(", ")
         );
-        session.start_daemon(&ctl, self.settings.dev_mode)?;
+        session.start_daemon(&ctl, self.settings.dev_mode, &crate::storage::isolated())?;
         ctl.install(&modules)?;
         ctl.load(&modules)?;
         ctl.create_wallet(&session.wallet_config(), &session.wallet_storage())?;
