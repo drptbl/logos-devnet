@@ -287,7 +287,6 @@ fn compose_project(home: &Home) -> String {
     }
 }
 
-/// Whether the Docker daemon answers. With it down, no container of ours runs.
 /// `path`, absolute, as `--volume` can mount it: its short syntax splits on `:`.
 fn mountable(path: &Path) -> Result<std::path::PathBuf> {
     let path = path
@@ -316,6 +315,7 @@ pub(crate) fn image_present(image: &str) -> bool {
 pub(crate) const START_DOCKER: &str =
     "install or start Docker (OrbStack, Docker Desktop or Colima), or use `up --native`";
 
+/// Whether the Docker daemon answers. With it down, no container of ours runs.
 pub(crate) fn docker_reachable() -> bool {
     Command::new("docker")
         .args(["info", "--format", "{{.ServerVersion}}"])
