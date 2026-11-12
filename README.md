@@ -162,7 +162,7 @@ Each session runs its own daemon in `~/.logos-devnet/sessions/<name>`, with `lez
 
 Sessions follow the chain. `down` stops their daemons. `up` starts them again, loads their modules and opens their wallets, also after a `--port` change. `reset` funds each account again with what it was created with, and makes each wallet forget the old chain: its sync position and the state of its private accounts. Its keys and accounts stay. `session rm` deletes a session and its wallet.
 
-The catalog's `lez_core` 0.5.1 is built on LEZ `v0.3.1`, the default `--lez` tag, so sessions match it.
+The catalog's `lez_core` 0.5.1 is built on LEZ `v0.3.1`, the default `--lez` tag, so sessions match it. They install that version even once the catalog has a newer one, which may be built for LEZ v0.4.
 
 ## Messaging
 

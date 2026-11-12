@@ -25,6 +25,9 @@ use crate::runtime::{stdout_of, stdout_within};
 use crate::wallet_storage;
 
 const LEZ_CORE: &str = "lez_core";
+/// The `lez_core` built on LEZ v0.3, the line logos-devnet runs. A later one may be built on
+/// LEZ v0.4, whose fees, transactions and built-in programs a v0.3 chain doesn't take.
+const LEZ_CORE_VERSION: &str = "0.5.1";
 /// How long `stop` waits for a daemon to exit.
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -301,10 +304,16 @@ impl Logosctl {
     }
 
     /// Installs `modules` from the catalog, unsigned ones included (`lez_core` is unsigned).
+    /// `lez_core` is pinned to `LEZ_CORE_VERSION`, the others are the catalog's latest.
     pub fn install(&self, modules: &[String]) -> Result<()> {
         self.run(&["catalog", "refresh"])?;
         for module in modules {
-            self.run(&["package", "install", module, "--yes"])
+            let mut args = vec!["package", "install", module.as_str()];
+            if module == LEZ_CORE {
+                args.extend(["--version", LEZ_CORE_VERSION]);
+            }
+            args.push("--yes");
+            self.run(&args)
                 .with_context(|| format!("installing {module}"))?;
         }
         Ok(())
@@ -796,6 +805,23 @@ esac"#,
         assert_eq!(modules, ["lez_core", "chat_module"]);
         assert!(modules_with(&["bad name".into()]).is_err());
         assert!(modules_with(&["--yes".into()]).is_err(), "never a flag");
+    }
+
+    #[test]
+    fn pins_lez_core_to_the_v0_3_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctl = fake_logosctl(dir.path(), r#"echo '{"status":"ok"}'"#);
+        ctl.install(&["lez_core".into(), "chat_module".into()])
+            .unwrap();
+        let log = calls(dir.path());
+        assert!(
+            log.contains("--json package install lez_core --version 0.5.1 --yes\n"),
+            "{log}"
+        );
+        assert!(
+            log.contains("--json package install chat_module --yes\n"),
+            "{log}"
+        );
     }
 
     #[test]
