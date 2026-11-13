@@ -18,6 +18,7 @@ pub const SEQUENCER_VAR: &str = "LOGOS_DEVNET_SEQUENCER";
 pub const HEADER: &str = "# Written by logos-devnet. Load it with: source <this file>\n";
 const PROGRAM_PREFIX: &str = "LOGOS_PROGRAM_";
 const GROUP_PREFIX: &str = "LOGOS_DEVNET_ACCOUNTS_";
+const SESSION_PREFIX: &str = "LOGOS_DEVNET_SESSION_";
 const DELIVERY_CONFIG_VAR: &str = "LOGOS_DEVNET_DELIVERY_CONFIG";
 const DELIVERY_ENTRY_NODE_VAR: &str = "LOGOS_DEVNET_DELIVERY_ENTRY_NODE";
 const DISCOVERY_BOOTSTRAP_VAR: &str = "LOGOS_DEVNET_DISCOVERY_BOOTSTRAP";
@@ -42,6 +43,42 @@ pub struct Env {
     pub dev_mode: bool,
     /// Where apps reach the messaging hub, when the devnet has one.
     pub messaging: Option<Addresses>,
+    /// Session name to what an app needs to act as it.
+    pub sessions: BTreeMap<String, SessionEnv>,
+}
+
+/// A session, as a test that drives several at once reads it from the env file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionEnv {
+    /// Its daemon's `LOGOSCTL_CONFIG_DIR`.
+    pub logosctl: PathBuf,
+    /// Its LEZ wallet's directory, for `LEE_WALLET_HOME_DIR`.
+    pub wallet: PathBuf,
+    /// Its funded account.
+    pub account: PublicId,
+}
+
+/// `LOGOS_DEVNET_SESSION_<NAME>` for a session name.
+fn session_var(name: &str) -> String {
+    format!(
+        "{SESSION_PREFIX}{}",
+        name.to_ascii_uppercase().replace('-', "_")
+    )
+}
+
+/// A session's variables: its `LOGOSCTL_CONFIG_DIR`, wallet directory and account in both
+/// forms.
+fn session_vars(name: &str, session: &SessionEnv) -> [(String, String); 4] {
+    let var = session_var(name);
+    [
+        (var.clone(), session.logosctl.to_string_lossy().into_owned()),
+        (
+            format!("{var}_WALLET"),
+            session.wallet.to_string_lossy().into_owned(),
+        ),
+        (format!("{var}_ACCOUNT"), session.account.wallet_form()),
+        (format!("{var}_ACCOUNT_HEX"), session.account.hex()),
+    ]
 }
 
 /// The messaging hub's variables: an app's delivery node config, the hub's delivery node, its
@@ -130,6 +167,9 @@ impl Env {
             vars.push((var.clone(), path.to_string_lossy().into_owned()));
             vars.push((format!("{var}_WALLET"), group_wallet(path)));
         }
+        for (name, session) in &self.sessions {
+            vars.extend(session_vars(name, session));
+        }
         for (var, value) in self.messaging.iter().flat_map(messaging_vars) {
             vars.push((var.to_owned(), value));
         }
@@ -154,6 +194,12 @@ impl Env {
             out += &export_line(&var, &path.to_string_lossy());
             out += &export_line(&format!("{var}_WALLET"), &group_wallet(path));
         }
+        for (name, session) in &self.sessions {
+            out += &format!("# session {name}\n");
+            for (var, value) in session_vars(name, session) {
+                out += &export_line(&var, &value);
+            }
+        }
         if let Some(hub) = &self.messaging {
             out += "# messaging hub\n";
             for (var, value) in messaging_vars(hub) {
@@ -169,12 +215,16 @@ impl Env {
         let mut env = Env::default();
         let mut pending: Option<String> = None;
         let mut pending_group: Option<String> = None;
+        // A session's name, and its directories once read: its account comes after them.
+        let mut pending_session: Option<(String, Option<PathBuf>, Option<PathBuf>)> = None;
         let (mut entry_node, mut bootstrap) = (None, None);
         for line in text.lines() {
             if let Some(name) = line.strip_prefix("# program ") {
                 pending = Some(name.trim().to_owned());
             } else if let Some(name) = line.strip_prefix("# accounts ") {
                 pending_group = Some(name.trim().to_owned());
+            } else if let Some(name) = line.strip_prefix("# session ") {
+                pending_session = Some((name.trim().to_owned(), None, None));
             } else if let Some(assignment) = line.strip_prefix("export ") {
                 let Some((var, value)) = assignment.split_once('=') else {
                     continue;
@@ -193,6 +243,24 @@ impl Env {
                     env.programs.insert(name, PublicId::parse(&value)?);
                 } else if let Some(name) = pending_group.take_if(|n| group_var(n) == var) {
                     env.groups.insert(name, PathBuf::from(value));
+                } else if let Some((name, logosctl, wallet)) = &mut pending_session {
+                    let session = session_var(name);
+                    if var == session {
+                        *logosctl = Some(PathBuf::from(value));
+                    } else if var == format!("{session}_WALLET") {
+                        *wallet = Some(PathBuf::from(value));
+                    } else if var == format!("{session}_ACCOUNT") {
+                        let (name, logosctl, wallet) = pending_session.take().expect("set");
+                        if let (Some(logosctl), Some(wallet)) = (logosctl, wallet) {
+                            let account = PublicId::parse(&value)?;
+                            let session = SessionEnv {
+                                logosctl,
+                                wallet,
+                                account,
+                            };
+                            env.sessions.insert(name, session);
+                        }
+                    }
                 } else if var == DELIVERY_ENTRY_NODE_VAR {
                     entry_node = Some(value);
                 } else if var == DISCOVERY_BOOTSTRAP_VAR {
@@ -344,6 +412,42 @@ mod tests {
             .output()
             .unwrap();
         assert_eq!(String::from_utf8(out.stdout).unwrap(), hub.client_config());
+    }
+
+    #[test]
+    fn lists_every_session_for_a_test_that_drives_several() {
+        let mut env = Env {
+            sequencer: "http://127.0.0.1:3041".into(),
+            ..Env::default()
+        };
+        let account = PublicId::parse(ID).unwrap();
+        env.sessions.insert(
+            "agents-buyer".into(),
+            SessionEnv {
+                logosctl: "/h/it's here/sessions/agents-buyer/logosctl".into(),
+                wallet: "/h/it's here/sessions/agents-buyer/wallet".into(),
+                account: account.clone(),
+            },
+        );
+        assert_eq!(Env::parse(&env.render()).unwrap(), env);
+        let vars = env.vars();
+        let get = |var: &str| {
+            vars.iter()
+                .find(|(v, _)| v == var)
+                .map(|(_, value)| value.clone())
+        };
+        assert_eq!(
+            get("LOGOS_DEVNET_SESSION_AGENTS_BUYER").as_deref(),
+            Some("/h/it's here/sessions/agents-buyer/logosctl")
+        );
+        assert_eq!(
+            get("LOGOS_DEVNET_SESSION_AGENTS_BUYER_ACCOUNT_HEX"),
+            Some(account.hex())
+        );
+        assert_eq!(
+            get("LOGOS_DEVNET_SESSION_AGENTS_BUYER_ACCOUNT"),
+            Some(account.wallet_form())
+        );
     }
 
     #[test]

@@ -146,6 +146,29 @@ pub fn run(devnet: &Devnet, project_error: Option<&anyhow::Error>) -> Doctor {
         checks.push(pass("devnet", "not running; `logos-devnet up` starts it"));
     }
 
+    // `up` downloads programs from a release itself, so only built files are checked here.
+    for (name, program) in devnet.project().map(|p| &p.programs).into_iter().flatten() {
+        if let crate::project::ProgramSource::File(path) = &program.source {
+            let check = std::fs::read(path)
+                .map_err(anyhow::Error::from)
+                .and_then(|bytes| crate::binary::segments(&bytes));
+            checks.push(match check {
+                Ok(_) => pass(&format!("program {name}"), path.display().to_string()),
+                Err(_) if !path.exists() => fail(
+                    &format!("program {name}"),
+                    format!("{} doesn't exist", path.display()),
+                    "build it first",
+                ),
+                Err(e) => Check {
+                    name: format!("program {name}"),
+                    ok: false,
+                    detail: format!("{}: {e:#}", path.display()),
+                    fix: None,
+                },
+            });
+        }
+    }
+
     if devnet.wants_hub() {
         checks.push(match devnet.check_hub_ports() {
             Ok(()) => pass("hub ports", "free, or held by the running hub"),

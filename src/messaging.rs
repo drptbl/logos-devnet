@@ -117,6 +117,8 @@ pub struct Hub {
     dir: PathBuf,
     ctl: Logosctl,
     status_timeout: Duration,
+    /// Where the devnet keeps module packages (`Logosctl::install`).
+    packages: PathBuf,
 }
 
 /// Which parts of the hub run.
@@ -129,18 +131,20 @@ pub struct Health {
 }
 
 impl Hub {
-    pub fn new(dir: PathBuf) -> Self {
+    pub fn new(dir: PathBuf, packages: PathBuf) -> Self {
         let ctl = Logosctl::new(dir.join("logosctl"));
         Self {
             dir,
             ctl,
             status_timeout: STATUS_TIMEOUT,
+            packages,
         }
     }
 
     #[cfg(test)]
     fn with_logosctl(dir: PathBuf, ctl: Logosctl) -> Self {
         Self {
+            packages: dir.join("packages"),
             dir,
             ctl,
             status_timeout: Duration::from_secs(2),
@@ -298,7 +302,7 @@ impl Hub {
         self.ctl.start_with_storage(dev_mode, &storage)?;
         if state.messaging {
             if !state.installed {
-                self.ctl.install(&modules)?;
+                self.ctl.install(&modules, &self.packages)?;
                 state.installed = true;
                 self.save(&state)?;
             }
@@ -677,6 +681,7 @@ case "$2 $3 $4" in
   "call storage_module peerId") ok '{{"success":true,"value":"16Uiu2HAmHub"}}' ;;
   "call storage_module isRunning") ok true ;;
   "module ls "*) echo '[{{"name":"{DELIVERY}","status":"loaded"}},{{"name":"{DISCOVERY}","status":"loaded"}}]' ;;
+  "package install "*) echo '{{"changes":[]}}' ;;
   *" createNode") [ -e '{made}'/"$3" ] && {{ ok '{{"success":false,"error":"createNode: node already created"}}'; exit 0; }}
       touch '{made}'/"$3"; ok '{{"success":true,"value":null}}' ;;
   *" getNodeInfo") [ -e '{made}/{DELIVERY}' ] \
@@ -1097,12 +1102,10 @@ esac"#,
         hub.ensure(false, MESSAGING).unwrap();
         hub.ensure(false, MESSAGING).unwrap();
         let log = calls(dir.path());
-        assert_eq!(log.matches("package install").count(), 2, "{log}");
-        assert!(
-            log.contains("package install delivery_module --yes"),
-            "{log}"
-        );
-        assert!(log.contains("package install libp2p_module --yes"), "{log}");
+        for module in [DELIVERY, DISCOVERY] {
+            let plan = format!("package install {module} --dry-run");
+            assert_eq!(log.matches(&plan).count(), 1, "{log}");
+        }
     }
 
     #[test]

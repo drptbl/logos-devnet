@@ -13,7 +13,7 @@ cargo install --locked logos-devnet
 Or take a binary from the [latest release](https://github.com/drptbl/logos-devnet/releases/latest), built for macOS (`aarch64-apple-darwin`, `x86_64-apple-darwin`) and Linux (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, static, so any distribution), and check it against its `.sha256`:
 
 ```bash
-v=v0.7.0 t=aarch64-apple-darwin
+v=v0.8.0 t=aarch64-apple-darwin
 curl -fsSL --remote-name-all https://github.com/drptbl/logos-devnet/releases/download/$v/logos-devnet-$v-$t.tar.gz{,.sha256}
 shasum -a 256 -c logos-devnet-$v-$t.tar.gz.sha256 \
   && tar -xzf logos-devnet-$v-$t.tar.gz \
@@ -52,6 +52,7 @@ source ~/.logos-devnet/env                         # LOGOS_DEVNET_SEQUENCER, LOG
 | `logs [-f] [--session <name> \| --hub]` | Prints the sequencer's log, or a session's or the hub's daemon log, with its modules' output. |
 | `session new <name> [--module <m>]` | Makes a `logosctl` session with a funded devnet wallet, see below. |
 | `session ls`, `session env <name>`, `session rm <name>` | Lists sessions, prints one's env to `source`, deletes one. |
+| `session restart <name>` | Restarts a session's daemon and loads its modules again, keeping its packages, keys and funded wallet: a fresh start for a module that keeps state while loaded, safer than `logosctl module reload`. Calls in flight fail, and modules an app loaded itself need loading again. |
 | `accounts new <name> --count <n> [--amount <a>]` | Makes a group of funded accounts, see below. |
 | `accounts ls` | Lists account groups. |
 | `messaging rm` | Stops the messaging hub and deletes it, see below. |
@@ -136,7 +137,7 @@ Up to 1000 is accepted. Above 100 clients at the same instant, the RPC answers 4
 
 ## Point your project at it
 
-The env file is the contract. A project reads `LOGOS_DEVNET_SEQUENCER` for the RPC URL, and `LOGOS_PROGRAM_<NAME>` (base58) or `LOGOS_PROGRAM_<NAME>_HEX` (what `lez_core` takes as `program_id_hex`) for its programs, falling back to the testnet values when they're not set.
+The env file is the contract. A project reads `LOGOS_DEVNET_SEQUENCER` for the RPC URL, and `LOGOS_PROGRAM_<NAME>` (base58) or `LOGOS_PROGRAM_<NAME>_HEX` (what `lez_core` takes as `program_id_hex`) for its programs, falling back to the testnet values when they're not set. A test that drives several sessions at once reads each one's `LOGOS_DEVNET_SESSION_<NAME>` (its `LOGOSCTL_CONFIG_DIR`), `_WALLET`, `_ACCOUNT` and `_ACCOUNT_HEX` from the env file too, so `logos-devnet exec -- pytest` sees them all.
 
 Program ids stay the same. `deploy my-program` always deploys from the dev wallet's `program-my-program` header key, and a program id is that key's account id, so `reset` and redeploy give you the same `LOGOS_PROGRAM_MY_PROGRAM`. A second `deploy` of the same name on the same chain does nothing, unless the program is mutable and the binary changed: then it's updated in place.
 
@@ -163,6 +164,7 @@ Each session runs its own daemon in `~/.logos-devnet/sessions/<name>`, with `lez
 | `LOGOS_DEVNET_WALLET_CONFIG` | the wallet's `wallet_config.json` |
 | `LOGOS_DEVNET_WALLET_STORAGE` | the wallet's `storage.json` |
 | `LOGOS_DEVNET_ACCOUNT` | its funded account, `Public/<id>` |
+| `LOGOS_DEVNET_ACCOUNT_HEX` | the same account as 64 hex digits, as `lez_core` takes it |
 
 Sessions follow the chain. `down` stops their daemons. `up` starts them again, loads their modules and opens their wallets, also after a `--port` change. `reset` funds each account again with what it was created with, and makes each wallet forget the old chain: its sync position and the state of its private accounts. Its keys and accounts stay. `session rm` deletes a session and its wallet.
 
@@ -246,7 +248,7 @@ Everything is in `~/.logos-devnet` (or `LOGOS_DEVNET_HOME`):
 | `sessions/` | one directory per session: its `logosctl` home, its daemon's `HOME` with its storage, wallet and `session.json` |
 | `accounts/` | one directory per account group: its wallet and `accounts.json` |
 | `programs.json` | the binary hash each program was deployed from |
-| `downloads/` | program binaries the project file names by URL, by SHA-256 |
+| `downloads/` | program binaries the project file names by URL, by SHA-256, and in `packages/` the module packages every daemon installs from, downloaded once and checked against the catalog's SHA-256 |
 | `messaging/` | the hub, for `[messaging]` and `[storage]`: its `logosctl` home, its daemon's `HOME`, message store, ports and node keys in `hub.json` |
 | `lock` | held while a command changes the devnet, so two projects sharing the home take turns |
 
@@ -262,7 +264,7 @@ With `--json`, a command prints one JSON document and nothing else on stdout. No
 | `deploy` | `name`, `id`, `hex`, `var`, `deployed_now`, `updated` |
 | `fund` | `account`, `balance` |
 | `tx` | `hash`, `block` (or `null` while no block holds it) |
-| `account` | `account`, `hex`, `balance`, `nonce`, `in_use`, `data` (each program's data, as a byte count, by program id) |
+| `account` | `account`, `hex`, `balance`, `nonce`, `in_use`, `data` (each program's data, as a byte count, by program id), `data_hex` (the same data, as hex) |
 | `accounts new`, `accounts ls` | `name`, `accounts`, `amount`, `file`, `wallet`, `var` (a list for `ls`) |
 | `session new` | `name`, `modules`, `vars` |
 | `session ls` | a list of `name`, `running`, `account`, `balance`, `error` |
@@ -276,7 +278,7 @@ With `--json`, a command prints one JSON document and nothing else on stdout. No
 The repo is a GitHub Action. On a Linux runner it installs `logos-devnet`, starts the devnet from your project file and exports the env into the job:
 
 ```yaml
-- uses: drptbl/logos-devnet@v0.7.0
+- uses: drptbl/logos-devnet@v0.8.0
   with:
     args: --max-txs-per-block 100     # optional, more options for up
 - run: cargo test                     # LOGOS_DEVNET_SEQUENCER, LOGOS_PROGRAM_*, LOGOS_DEVNET_ACCOUNTS_*, RISC0_DEV_MODE are set

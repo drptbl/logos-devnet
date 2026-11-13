@@ -2,7 +2,7 @@
 
 What `lez_core`, the LEZ module in a `logosctl` session, expects. A session's env (`source <(logos-devnet session env <name>)`) points `logosctl` at its daemon, where the wallet is open.
 
-- Account ids are hex. `logosctl --json call lez_core account_id_from_base58 str:<base58>` converts the `Public/<id>` a session prints. A group's `accounts.json` already has each account's `hex`.
+- Account ids are hex. A session's `LOGOS_DEVNET_ACCOUNT_HEX` is its account in that form, a group's `accounts.json` has each account's `hex`, and `logos-devnet account <id>` prints any id in both forms.
 - Amounts are 16 little-endian bytes in hex: 1000 lepta is `e8030000000000000000000000000000`.
 - Strings take a `str:` prefix. Booleans go bare, as `true` or `false`.
 - `get_balance str:<hex> true` reads a public account and `... false` a private one, in lepta. An empty result means the call failed.

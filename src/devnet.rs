@@ -202,7 +202,7 @@ impl Devnet {
     }
 
     fn hub(&self) -> Hub {
-        Hub::new(self.home.messaging_dir())
+        Hub::new(self.home.messaging_dir(), self.home.packages_dir())
     }
 
     /// What the project asks the hub to run.
@@ -323,9 +323,10 @@ impl Devnet {
             let applied = self.apply_project(&mut deployed);
             let forgot = self.forget_group_chains();
             let resumed = self.resume_sessions(false);
+            let refreshed = self.refresh_env();
             return with_status(
                 with_deploys(self.report(Some(true)), &deployed),
-                after_start([forgot, applied, resumed, messaging]),
+                after_start([forgot, applied, resumed, messaging, refreshed]),
             );
         }
         // The running sequencer holds its own port, and gives it up when it stops.
@@ -377,9 +378,10 @@ impl Devnet {
         let resumed = next.resume_sessions(!continuing);
         let mut deployed = Vec::new();
         let applied = next.apply_project(&mut deployed);
+        let refreshed = next.refresh_env();
         with_status(
             with_deploys(next.report(Some(true)), &deployed),
-            after_start([marked, forgot, resumed, applied, messaging]),
+            after_start([marked, forgot, resumed, applied, messaging, refreshed]),
         )
     }
 
@@ -705,28 +707,7 @@ impl Devnet {
         let mut failed = Vec::new();
         let sessions = self.sessions();
         for session in sessions {
-            let resumed = session.info().and_then(|info| {
-                // Funding only needs the dev wallet: a daemon that won't start doesn't cost the
-                // account its funds.
-                let funded = if new_chain {
-                    self.send(&info.account, info.funded).map(drop)
-                } else {
-                    Ok(())
-                };
-                session.forget_old_chain()?;
-                self.write_session_wallet_config(&session)?;
-                let ctl = session.logosctl();
-                session.start_daemon(&ctl, self.settings.dev_mode, &self.session_storage())?;
-                ctl.resume(
-                    &info.modules,
-                    &session.wallet_config(),
-                    &session.wallet_storage(),
-                    &self.settings.sequencer_url(),
-                )?;
-                self.join_hub(&ctl)?;
-                funded
-            });
-            if let Err(e) = resumed {
+            if let Err(e) = self.resume_session(&session, new_chain) {
                 eprintln!("session {}: {e:#}", session.name);
                 failed.push(session.name);
             }
@@ -739,6 +720,48 @@ impl Devnet {
             );
         }
         Ok(())
+    }
+
+    /// Brings a session's daemon back to work: started, its modules loaded, its wallet open on
+    /// the devnet, its nodes on the hub. On a new chain its account is funded again first.
+    fn resume_session(&self, session: &Session, new_chain: bool) -> Result<()> {
+        let info = session.info()?;
+        // Funding only needs the dev wallet: a daemon that won't start doesn't cost the
+        // account its funds.
+        let funded = if new_chain {
+            self.send(&info.account, info.funded).map(drop)
+        } else {
+            Ok(())
+        };
+        session.forget_old_chain()?;
+        self.write_session_wallet_config(session)?;
+        let ctl = session.logosctl();
+        session.start_daemon(&ctl, self.settings.dev_mode, &self.session_storage())?;
+        ctl.resume(
+            &info.modules,
+            &session.wallet_config(),
+            &session.wallet_storage(),
+            &self.settings.sequencer_url(),
+        )?;
+        self.join_hub(&ctl)?;
+        funded
+    }
+
+    /// Restarts a session's daemon and brings it back as `up` does: a fresh start for modules
+    /// that keep state while loaded, e.g. `libp2p_module`, which advertises one service per load.
+    /// Its packages, keys and funded wallet stay.
+    pub fn session_restart(&self, name: &str) -> Result<Done> {
+        let session = self.existing_session(name)?;
+        self.require_running()?;
+        // A session that can't come back stays as it is.
+        session.info()?;
+        session.logosctl().stop()?;
+        self.resume_session(&session, false)?;
+        Ok(Done {
+            message: format!(
+                "Restarted session {name}: its modules are loaded and its wallet open."
+            ),
+        })
     }
 
     /// The sessions, or none (with a note) when their directory can't be read.
@@ -826,11 +849,33 @@ impl Devnet {
             groups: BTreeMap::new(),
             dev_mode: self.settings.dev_mode,
             messaging: self.hub().addresses(),
+            sessions: BTreeMap::new(),
         };
         for group in groups::list(&self.home.groups_dir())? {
             env.groups.insert(group.name.clone(), group.manifest());
         }
+        // A session still being made has no account yet: it joins the next env file.
+        for session in self.sessions() {
+            if let Ok(info) = session.info() {
+                let vars = envfile::SessionEnv {
+                    logosctl: session.logosctl_dir(),
+                    wallet: session.wallet_dir(),
+                    account: info.account,
+                };
+                env.sessions.insert(session.name.clone(), vars);
+            }
+        }
         std::fs::write(self.home.env_file(), env.render()).context("writing the env file")
+    }
+
+    /// Writes the env file again, with the sessions and groups there are now. Nothing, before
+    /// a first `up` wrote one.
+    fn refresh_env(&self) -> Result<()> {
+        match self.read_env() {
+            Ok(env) => self.write_env(&env),
+            Err(_) if !self.home.env_file().exists() => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 
     fn read_env(&self) -> Result<Env> {
@@ -1009,6 +1054,10 @@ impl Devnet {
             }
         }
         let info = made?;
+        // The session is made either way: the next `up` writes the env file again.
+        if let Err(e) = self.refresh_env() {
+            eprintln!("{e:#}");
+        }
         Ok(SessionMade {
             name: name.to_owned(),
             vars: session
@@ -1042,7 +1091,7 @@ impl Devnet {
         // Recorded one at a time, so a module that fails keeps the ones before it.
         for module in &missing {
             let one = std::slice::from_ref(module);
-            ctl.install(one)?;
+            ctl.install(one, &self.home.packages_dir())?;
             // Recorded once installed: every `up` loads recorded modules that aren't loaded.
             info.modules.push(module.clone());
             session.save_info(&info)?;
@@ -1066,7 +1115,7 @@ impl Devnet {
             modules.join(", ")
         );
         session.start_daemon(&ctl, self.settings.dev_mode, &self.session_storage())?;
-        ctl.install(&modules)?;
+        ctl.install(&modules, &self.home.packages_dir())?;
         ctl.load(&modules)?;
         ctl.create_wallet(&session.wallet_config(), &session.wallet_storage())?;
         let account = ctl.call("lez_core", "create_account_public", &[])?;
@@ -1140,6 +1189,9 @@ impl Devnet {
         session.logosctl().stop()?;
         std::fs::remove_dir_all(session.dir())
             .with_context(|| format!("deleting {}", session.dir().display()))?;
+        if let Err(e) = self.refresh_env() {
+            eprintln!("{e:#}");
+        }
         Ok(Done {
             message: format!("Removed session {name} and its wallet."),
         })
@@ -1316,15 +1368,32 @@ impl Devnet {
         let id = self.account_id(account)?;
         let rpc = self.rpc();
         let state = rpc.account(&id)?;
-        let data = state["data"]["shards"]
+        let shards: BTreeMap<String, Vec<u8>> = state["data"]["shards"]
             .as_object()
             .map(|shards| {
                 shards
                     .iter()
-                    .map(|(program, bytes)| (program.clone(), bytes.as_array().map_or(0, Vec::len)))
+                    .map(|(program, bytes)| {
+                        let bytes = bytes.as_array().into_iter().flatten();
+                        let bytes = bytes.filter_map(Value::as_u64).map(|b| b as u8).collect();
+                        (program.clone(), bytes)
+                    })
                     .collect()
             })
             .unwrap_or_default();
+        let data = shards
+            .iter()
+            .map(|(p, bytes)| (p.clone(), bytes.len()))
+            .collect();
+        let data_hex = shards
+            .iter()
+            .map(|(p, bytes)| {
+                (
+                    p.clone(),
+                    bytes.iter().map(|b| format!("{b:02x}")).collect(),
+                )
+            })
+            .collect();
         Ok(report::Account {
             account: id.wallet_form(),
             hex: id.hex(),
@@ -1332,6 +1401,7 @@ impl Devnet {
             nonce: state["nonce"].as_u64().map_or(0, u128::from),
             in_use: crate::rpc::in_use(&state),
             data,
+            data_hex,
         })
     }
 
@@ -1734,6 +1804,17 @@ mod tests {
             &format!("token = {{ url = \"https://example.com/t.bin\", sha256 = \"{sha}\" }}"),
         );
         assert!(released.needs_curl());
+    }
+
+    #[test]
+    fn restarts_only_a_session_on_a_running_devnet() {
+        let dir = tempfile::tempdir().unwrap();
+        let devnet = devnet_in(&dir.path().join("home"));
+        let err = devnet.session_restart("nobody").unwrap_err();
+        assert!(err.to_string().contains("no session nobody"), "{err}");
+        std::fs::create_dir_all(devnet.home.sessions_dir().join("alice")).unwrap();
+        let err = devnet.session_restart("alice").unwrap_err();
+        assert!(err.to_string().contains("not running"), "{err}");
     }
 
     #[test]
