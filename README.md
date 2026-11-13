@@ -2,7 +2,7 @@
 
 A local LEZ chain for Logos development. One command starts a sequencer on your machine with 1 second blocks and a funded faucet, and a project file in your repo says what else it needs: programs, a hundred funded test accounts, `logosctl` sessions. A transfer lands in about 2 seconds and a program deploy in about 10, and you never run out of testnet funds.
 
-Keep the public testnet for final checks. Messages and service discovery can stay local too: a project that asks for it gets a messaging hub on `127.0.0.1` instead of the Logos fleets.
+Keep the public testnet for final checks. Messages, service discovery and storage can stay local too: a project that asks for them gets a hub on `127.0.0.1` instead of the Logos fleets.
 
 ## Install
 
@@ -41,7 +41,7 @@ source ~/.logos-devnet/env                         # LOGOS_DEVNET_SEQUENCER, LOG
 | `down` | Stops it. The chain is kept. |
 | `reset` | Deletes the chain and starts a new one, every account group funded at genesis. Takes the same options as `up`. |
 | `status` | What runs, the chain head, the faucet, programs, account groups, sessions, the messaging hub and local storage. |
-| `doctor` | Checks the project file, Docker and the image (or git and cargo with `--native`), whether the chain takes the project's settings, the port, the faucet and, when sessions or the messaging hub need it, `logosctl`, and says how to fix what fails. |
+| `doctor` | Checks the project file, Docker and the image (or git and cargo with `--native`), whether the chain takes the project's settings, the `[programs]` files, the port, the hub's ports, the faucet, `curl` for programs from a release and, when sessions or the hub need it, `logosctl`, and says how to fix what fails. |
 | `fund <account> [amount]` | Sends lepta from the faucet to a public account, 10B by default. |
 | `deploy <name> <bin> [--mutable]` | Deploys a program, from its `.bin` (what `cargo risczero build` makes, not the bare ELF), and adds `LOGOS_PROGRAM_<NAME>` and `LOGOS_PROGRAM_<NAME>_HEX` to the env file. Names are lower-case letters, digits and `-`. With `--mutable`, a new build updates it in place. |
 | `wallet-config <dir>` | Writes a `wallet_config.json` pointing at the devnet into a new wallet directory. |
@@ -270,7 +270,7 @@ With `--json`, a command prints one JSON document and nothing else on stdout. No
 | `session ls` | a list of `name`, `running`, `account`, `balance`, `error` |
 | `env`, `session env` | an object of variable to value |
 | `wallet-config` | `path` |
-| `down`, `session rm`, `messaging rm` | `message` |
+| `down`, `session rm`, `session restart`, `messaging rm` | `message` |
 | `doctor` | `ok`, `checks` (`name`, `ok`, `detail`, `fix`) |
 
 ## In CI

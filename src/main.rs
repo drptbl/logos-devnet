@@ -57,7 +57,8 @@ enum Command {
     /// Delete the chain and start a new one. Program ids stay the same and every account group
     /// is funded at genesis.
     Reset(UpOptions),
-    /// Show what runs, the chain head, the faucet, programs, account groups and sessions.
+    /// Show what runs, the chain head, the faucet, programs, account groups, sessions, the
+    /// messaging hub and local storage.
     Status,
     /// Check what logos-devnet needs, and say how to fix what's missing.
     Doctor,
