@@ -7,6 +7,13 @@ description: logos-devnet runs a local LEZ (Logos Execution Zone) chain. Use whe
 
 `logos-devnet` runs LEZ's own sequencer on this machine, with 1 s blocks and a faucet funded at genesis. A project describes what it needs in `logos-devnet.toml`, and `up` makes the devnet match it. The README (https://github.com/drptbl/logos-devnet) has every detail, and `logos-devnet <command> --help` every flag.
 
+## Before you start
+
+- **logos-devnet 0.8.0 or newer**: `logos-devnet --version`. Install it with `cargo install --locked logos-devnet`, or a binary from https://github.com/drptbl/logos-devnet/releases/latest (macOS and Linux).
+- **Docker**: OrbStack, Docker Desktop or Colima, running. `logos-devnet doctor` says when it isn't.
+- **`logosctl`**, the Logos Core CLI, on `PATH`, only for sessions, `[messaging]` and `[storage]`: a release from https://github.com/logos-co/logos-logoscore-cli/releases.
+- **LEZ programs** you deploy are built with `cargo risczero build`, which makes the `.bin` the devnet takes.
+
 ## The loop
 
 Pass `--json` to every command: on success stdout holds one JSON document, and notes go to stderr. On failure the exit is non-zero, stdout is empty, and the error is on stderr, starting `Error:`.
@@ -24,7 +31,7 @@ Pass `--json` to every command: on success stdout holds one JSON document, and n
    [sessions.alice]         # a logosctl session with a funded wallet
    ```
    Program, group and session names are lower-case letters, digits and `-`. A project-local home is state, not source: add `.logos-devnet/` to `.gitignore`.
-2. `logos-devnet doctor --json`, from the project's directory so it checks the file's settings. It checks the setup (Docker, the port, the chain), not program builds: `up` does that. Done when `.ok` is true. Each failed check carries a `detail`, and a `fix` when the detail doesn't already say what to do.
+2. `logos-devnet doctor --json`, from the project's directory so it checks the file's settings: Docker, the ports, the chain, `logosctl`, and that each `[programs]` file is a built program. Done when `.ok` is true. Each failed check carries a `detail`, and a `fix` when the detail doesn't already say what to do.
 3. `logos-devnet up --json`. Done when it exits 0 and `.sequencer.running` is true. It is idempotent, so run it again after any change to the file or a rebuild. When it exits non-zero after starting, the error starts "the devnet is up, but" and names what failed: fix that and run `up` again.
 4. `source <(logos-devnet env)`, or read `logos-devnet env --json`. Code and tests read these, so they work on any devnet:
    - `LOGOS_DEVNET_SEQUENCER`: the RPC URL.
@@ -34,7 +41,7 @@ Pass `--json` to every command: on success stdout holds one JSON document, and n
    - `LOGOS_DEVNET_SESSION_<NAME>`: a session's `LOGOSCTL_CONFIG_DIR`, with `_WALLET`, `_ACCOUNT` (`Public/<id>`) and `_ACCOUNT_HEX` (what `lez_core` takes), for a test driving several sessions.
    - `RISC0_DEV_MODE`: `1` or `0`, matching the chain.
    - With `[messaging]`: `LOGOS_DEVNET_DELIVERY_CONFIG`, the `delivery_module.createNode` config of a node that uses the local hub, `LOGOS_DEVNET_DELIVERY_ENTRY_NODE`, `LOGOS_DEVNET_DISCOVERY_BOOTSTRAP`, a `libp2p_module` bootstrap node, and `LOGOS_DEVNET_DISCOVERY_CONFIG`, its node's config.
-5. `logos-devnet status --json` shows what runs: chain head, faucet, programs, groups, sessions. `.sequencer.runtime_answered` is false when Docker didn't answer within 10 s: Docker is stuck, so restart it rather than running `up`.
+5. `logos-devnet status --json` shows what runs: chain head, faucet, programs, groups, sessions, the hub and storage. `.sequencer.runtime_answered` is false when Docker didn't answer within 10 s: Docker is stuck, so restart it rather than running `up`.
 6. Check the chain instead of sleeping:
    - `logos-devnet tx --wait <hash>` returns once a block holds the transaction (`lez_core`'s `tx_hash`), with the block in `--json`'s `.block`, and fails after `--timeout` (60 s).
    - `logos-devnet account <id>` shows an account's balance, nonce and data. It takes `Public/<id>`, base58, the 64-hex form `lez_core` uses, or a deployed program's name, and prints both forms.
@@ -49,6 +56,7 @@ Pass `--json` to every command: on success stdout holds one JSON document, and n
 - **Funding.** Groups that exist when a chain starts are funded at genesis, at once. A group added to a running chain is funded one transfer at a time, about 2.4 s per account. Every call holds about 1.6M lepta of fees up front, so an account that sends needs more than that. `logos-devnet fund Public/<id> [lepta]` tops one account up.
 - **Messaging.** An empty `[messaging]` table runs a local hub: a delivery node and a discovery bootstrap on `127.0.0.1`, so messages and service lookups skip the public fleet. Sessions with `delivery_module` or `libp2p_module` loaded (`chat_module` loads the first) get nodes on the hub from `up`; outside a session, create the app's nodes from `LOGOS_DEVNET_DELIVERY_CONFIG` and `LOGOS_DEVNET_DISCOVERY_CONFIG` first in its daemon: the first `createNode` picks the network. `chat_module` still reaches a public key registry. `status --json` shows whether each hub node runs, in `.messaging.delivery_node` and `.messaging.discovery_node`, and `messaging rm` deletes the hub: a project that asks for one gets a new hub, with new addresses, on its next `up`.
 - **Storage.** Each session runs a storage node of its own, on `127.0.0.1` and in no network. An empty `[storage]` table connects the sessions through a node in the hub, so one session downloads by CID what another uploaded. Sessions need nothing passed in.
+- **Calling the modules.** To send or receive messages, advertise or look up a service, or upload and download a file from a session, read [modules.md](modules.md): `delivery_module`, `libp2p_module` and `storage_module` take arguments in an order and form their errors don't explain.
 - **Sessions** need `logosctl` on `PATH`. `logos-devnet session restart <name>` gives one a fresh daemon in seconds, keeping its wallet: use it where a module keeps state while loaded (libp2p_module 1.1.0 advertises one service per load) instead of `logosctl module reload`. They suit apps that talk to Logos through `logosctl` and `lez_core`. Before calling `lez_core` yourself, read [lez_core.md](lez_core.md): it takes ids and amounts in forms its errors don't explain.
 
 ## Reset
