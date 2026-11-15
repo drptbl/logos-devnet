@@ -170,9 +170,12 @@ enum SessionCommand {
     Env { name: String },
     /// Stop a session's daemon and delete it, wallet and all.
     Rm { name: String },
-    /// Restart a session's daemon and load its modules again, wallet and keys kept: a fresh
+    /// Restart sessions' daemons and load their modules again, wallets and keys kept: a fresh
     /// start for modules that keep state while loaded.
-    Restart { name: String },
+    Restart {
+        #[arg(required = true)]
+        names: Vec<String>,
+    },
 }
 
 impl Command {
@@ -277,7 +280,7 @@ fn main() -> Result<()> {
             SessionCommand::Ls => emit(&devnet.session_list()?, json),
             SessionCommand::Env { name } => emit(&devnet.session_env(&name)?, json),
             SessionCommand::Rm { name } => emit(&devnet.session_rm(&name)?, json),
-            SessionCommand::Restart { name } => emit(&devnet.session_restart(&name)?, json),
+            SessionCommand::Restart { names } => emit(&devnet.session_restart(&names)?, json),
         },
         Command::Messaging(MessagingCommand::Rm) => emit(&devnet.messaging_rm()?, json),
     }

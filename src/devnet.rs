@@ -750,18 +750,30 @@ impl Devnet {
     /// Restarts a session's daemon and brings it back as `up` does: a fresh start for modules
     /// that keep state while loaded, e.g. `libp2p_module`, which advertises one service per load.
     /// Its packages, keys and funded wallet stay.
-    pub fn session_restart(&self, name: &str) -> Result<Done> {
-        let session = self.existing_session(name)?;
+    /// Restarts each of `names`, in order. Every name is checked first, so a typo restarts none.
+    pub fn session_restart(&self, names: &[String]) -> Result<Done> {
+        let sessions = names
+            .iter()
+            .map(|name| self.existing_session(name))
+            .collect::<Result<Vec<_>>>()?;
         self.require_running()?;
-        // A session that can't come back stays as it is.
-        session.info()?;
-        session.logosctl().stop()?;
-        self.resume_session(&session, false)?;
-        Ok(Done {
-            message: format!(
-                "Restarted session {name}: its modules are loaded and its wallet open."
+        for session in &sessions {
+            // A session that can't come back stays as it is.
+            session.info()?;
+            session.logosctl().stop()?;
+            self.resume_session(session, false)
+                .with_context(|| format!("restarting session {}", session.name))?;
+        }
+        let message = match names {
+            [name] => {
+                format!("Restarted session {name}: its modules are loaded and its wallet open.")
+            }
+            names => format!(
+                "Restarted sessions {}: their modules are loaded and their wallets open.",
+                names.join(", ")
             ),
-        })
+        };
+        Ok(Done { message })
     }
 
     /// The sessions whose logosctl daemon doesn't run.
@@ -1825,11 +1837,16 @@ mod tests {
     fn restarts_only_a_session_on_a_running_devnet() {
         let dir = tempfile::tempdir().unwrap();
         let devnet = devnet_in(&dir.path().join("home"));
-        let err = devnet.session_restart("nobody").unwrap_err();
+        let err = devnet.session_restart(&["nobody".into()]).unwrap_err();
         assert!(err.to_string().contains("no session nobody"), "{err}");
         std::fs::create_dir_all(devnet.home.sessions_dir().join("alice")).unwrap();
-        let err = devnet.session_restart("alice").unwrap_err();
+        let err = devnet.session_restart(&["alice".into()]).unwrap_err();
         assert!(err.to_string().contains("not running"), "{err}");
+        // Every name is checked before any session restarts.
+        let err = devnet
+            .session_restart(&["alice".into(), "nobody".into()])
+            .unwrap_err();
+        assert!(err.to_string().contains("no session nobody"), "{err}");
     }
 
     #[test]
