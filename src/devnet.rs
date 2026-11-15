@@ -32,8 +32,17 @@ const FAUCET_BALANCE: u64 = 1_000_000_000_000_000_000;
 const FAUCET_LABEL: &str = "faucet";
 /// What `fund`, sessions and account groups send when no amount is given.
 pub const DEFAULT_FUND: u64 = 10_000_000_000;
-/// How long `up` waits for the first block.
-const READY_TIMEOUT: Duration = Duration::from_secs(180);
+/// How `up` waits for a starting sequencer's first block. A long chain loads for minutes first
+/// (166k blocks took 15), logging as it goes, so `up` waits as long as the log grows.
+const READY_WAIT: ReadyWait = ReadyWait {
+    quiet: Duration::from_secs(180),
+    limit: Duration::from_secs(3600),
+    poll: Duration::from_millis(500),
+    log_every: Duration::from_secs(10),
+};
+/// When `up` says it's still waiting, and then how often.
+const LOADING_NOTICE: Duration = Duration::from_secs(30);
+const LOADING_NOTICE_EVERY: Duration = Duration::from_secs(120);
 /// How long `status` waits for the runtime to say whether the sequencer runs.
 const RUNTIME_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long `status`, `doctor` and `session ls` wait for a session's daemon to answer: a wedged
@@ -858,22 +867,14 @@ impl Devnet {
 
     fn wait_ready(&self) -> Result<()> {
         let rpc = self.rpc();
-        let deadline = Instant::now() + READY_TIMEOUT;
-        loop {
-            if rpc.last_block_id().is_ok_and(|head| head >= 1) {
-                return Ok(());
-            }
-            if !self.runtime.running() {
-                bail!("the sequencer stopped while starting. See `logos-devnet logs`");
-            }
-            if Instant::now() > deadline {
-                bail!(
-                    "no block within {}s. See `logos-devnet logs`",
-                    READY_TIMEOUT.as_secs()
-                );
-            }
-            std::thread::sleep(Duration::from_millis(500));
-        }
+        wait_for_blocks(
+            &Startup {
+                serves: &|| rpc.last_block_id().is_ok_and(|head| head >= 1),
+                running: &|| self.runtime.running(),
+                log_mark: &|| self.runtime.log_mark(),
+            },
+            &READY_WAIT,
+        )
     }
 
     /// Writes the env file: `env`'s sequencer and programs, and every account group.
@@ -1834,6 +1835,87 @@ fn labelled(list: &str, label: &str) -> Option<PublicId> {
         .find_map(first_public_id)
 }
 
+/// How long `wait_for_blocks` waits.
+struct ReadyWait {
+    /// The longest the sequencer's log may go without a new line.
+    quiet: Duration,
+    /// The longest it waits in all, however busy the log.
+    limit: Duration,
+    /// How often it asks for a block.
+    poll: Duration,
+    /// How often it looks at the log.
+    log_every: Duration,
+}
+
+/// What `wait_for_blocks` watches while the sequencer starts.
+struct Startup<'a> {
+    /// Whether it serves a block.
+    serves: &'a dyn Fn() -> bool,
+    /// Whether it still runs.
+    running: &'a dyn Fn() -> bool,
+    /// Something that changes whenever it writes to its log, e.g. its last line.
+    log_mark: &'a dyn Fn() -> Option<String>,
+}
+
+/// Waits until the sequencer serves a block. It may take as long as it keeps writing to its
+/// log, up to `wait.limit`: it fails after `wait.quiet` without a new line, or when the
+/// sequencer stops. A log that can't be read counts as busy, since not knowing isn't quiet.
+fn wait_for_blocks(startup: &Startup, wait: &ReadyWait) -> Result<()> {
+    let start = Instant::now();
+    let mut mark = (startup.log_mark)();
+    let mut last_change = start;
+    let mut last_check = start;
+    let mut next_notice = LOADING_NOTICE;
+    loop {
+        if (startup.serves)() {
+            return Ok(());
+        }
+        if !(startup.running)() {
+            bail!("the sequencer stopped while starting. See `logos-devnet logs`");
+        }
+        if last_check.elapsed() >= wait.log_every {
+            last_check = Instant::now();
+            let now = (startup.log_mark)();
+            if now.is_none() || now != mark {
+                mark = now;
+                last_change = last_check;
+            }
+        }
+        if last_change.elapsed() > wait.quiet {
+            bail!(
+                "no block, and nothing in the sequencer's log for {} s. See `logos-devnet logs`",
+                wait.quiet.as_secs()
+            );
+        }
+        let waited = start.elapsed();
+        if waited > wait.limit {
+            bail!(
+                "no block within {} min, though the sequencer keeps logging. See `logos-devnet \
+                 logs`",
+                wait.limit.as_secs() / 60
+            );
+        }
+        if waited >= next_notice {
+            eprintln!(
+                "No block yet after {}: a long chain takes a while to load. Waiting as long as \
+                 the sequencer keeps logging, up to {} min; `logos-devnet logs -f` shows it.",
+                duration_text(waited),
+                wait.limit.as_secs() / 60
+            );
+            next_notice += LOADING_NOTICE_EVERY;
+        }
+        std::thread::sleep(wait.poll);
+    }
+}
+
+/// `30 s`, or `4 min` from two minutes on.
+fn duration_text(d: Duration) -> String {
+    match d.as_secs() {
+        s if s < 120 => format!("{s} s"),
+        s => format!("{} min", s / 60),
+    }
+}
+
 /// A logosctl daemon's log, in its config directory.
 fn daemon_log(logosctl_dir: &Path) -> PathBuf {
     logosctl_dir.join("logs").join("daemon.log")
@@ -2036,6 +2118,73 @@ mod tests {
             logs[2].1,
             devnet.home.messaging_dir().join("logosctl/logs/daemon.log")
         );
+    }
+
+    /// How a sequencer behaves while it starts.
+    enum Log {
+        Busy,
+        Quiet,
+        Unreadable,
+    }
+
+    /// A sequencer that serves its first block after `ready`, and stops after `stops` if given.
+    fn starting_for(ready: Duration, log: Log, stops: Option<Duration>) -> Result<()> {
+        let start = Instant::now();
+        let serves = move || start.elapsed() >= ready;
+        let running = move || stops.is_none_or(|at| start.elapsed() < at);
+        let log_mark = move || match log {
+            Log::Busy => Some(format!("{:?}", start.elapsed())),
+            Log::Quiet => Some("the same line".to_owned()),
+            Log::Unreadable => None,
+        };
+        wait_for_blocks(
+            &Startup {
+                serves: &serves,
+                running: &running,
+                log_mark: &log_mark,
+            },
+            &ReadyWait {
+                quiet: Duration::from_millis(200),
+                limit: Duration::from_millis(1500),
+                poll: Duration::from_millis(10),
+                log_every: Duration::from_millis(10),
+            },
+        )
+    }
+
+    #[test]
+    fn waits_while_a_long_chain_loads() {
+        // Replaying 166k blocks took 15 min, far past the quiet limit, the log busy throughout.
+        starting_for(Duration::from_millis(600), Log::Busy, None).unwrap();
+    }
+
+    #[test]
+    fn gives_up_on_a_sequencer_that_went_quiet() {
+        let err = starting_for(Duration::from_secs(60), Log::Quiet, None).unwrap_err();
+        assert!(
+            err.to_string().contains("nothing in the sequencer's log"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn waits_on_a_log_it_cant_read_up_to_the_limit() {
+        starting_for(Duration::from_millis(600), Log::Unreadable, None).unwrap();
+        let err = starting_for(Duration::from_secs(60), Log::Busy, None).unwrap_err();
+        assert!(err.to_string().contains("keeps logging"), "{err}");
+    }
+
+    #[test]
+    fn gives_up_on_a_sequencer_that_stopped() {
+        let stops = Some(Duration::from_millis(50));
+        let err = starting_for(Duration::from_secs(60), Log::Busy, stops).unwrap_err();
+        assert!(err.to_string().contains("stopped while starting"), "{err}");
+    }
+
+    #[test]
+    fn says_how_long_it_waited() {
+        assert_eq!(duration_text(Duration::from_secs(30)), "30 s");
+        assert_eq!(duration_text(Duration::from_secs(250)), "4 min");
     }
 
     #[test]
