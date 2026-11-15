@@ -747,10 +747,10 @@ impl Devnet {
         funded
     }
 
-    /// Restarts a session's daemon and brings it back as `up` does: a fresh start for modules
-    /// that keep state while loaded, e.g. `libp2p_module`, which advertises one service per load.
-    /// Its packages, keys and funded wallet stay.
-    /// Restarts each of `names`, in order. Every name is checked first, so a typo restarts none.
+    /// Restarts each of `names`' daemons, in order, and brings it back as `up` does: a fresh
+    /// start for modules that keep state while loaded, e.g. `libp2p_module`, which advertises one
+    /// service per load. Their packages, keys and funded wallets stay. Every name is checked
+    /// first, so a typo restarts none.
     pub fn session_restart(&self, names: &[String]) -> Result<Done> {
         let sessions = names
             .iter()
@@ -1487,14 +1487,9 @@ impl Devnet {
     pub fn logs(&self, follow: bool, session: Option<&str>, hub: bool) -> Result<()> {
         let daemon = match session {
             Some(name) => self.existing_session(name)?.logosctl_dir(),
-            None if hub => {
-                if !self.home.messaging_dir().exists() {
-                    bail!(
-                        "this devnet has no hub: a project's [messaging] or [storage] starts one"
-                    );
-                }
-                self.home.messaging_dir().join("logosctl")
-            }
+            None if hub => self.hub_logosctl_dir().context(
+                "this devnet has no hub: a project's [messaging] or [storage] starts one",
+            )?,
             None => return self.runtime.logs(follow),
         };
         tail(&daemon_log(&daemon), follow)
@@ -1523,13 +1518,16 @@ impl Devnet {
             .sessions()
             .into_iter()
             .map(|s| (format!("session {}", s.name), daemon_log(&s.logosctl_dir())));
-        let hub = self.home.messaging_dir().exists().then(|| {
-            (
-                "hub".to_owned(),
-                daemon_log(&self.home.messaging_dir().join("logosctl")),
-            )
-        });
+        let hub = self
+            .hub_logosctl_dir()
+            .map(|dir| ("hub".to_owned(), daemon_log(&dir)));
         sessions.chain(hub).collect()
+    }
+
+    /// The hub's logosctl config directory, when the devnet has a hub.
+    fn hub_logosctl_dir(&self) -> Option<PathBuf> {
+        let hub = self.home.messaging_dir();
+        hub.exists().then(|| hub.join("logosctl"))
     }
 
     /// Writes `<dir>/wallet_config.json` for a project's own wallet (`lez_core` or the LEZ
