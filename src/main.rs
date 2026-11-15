@@ -160,7 +160,8 @@ enum SessionCommand {
     /// Make a session: its own logosctl daemon with lez_core and a funded devnet wallet.
     New {
         name: String,
-        /// Another module to install from the catalog, e.g. `chat_module`. Repeatable.
+        /// Another module to install from the catalog, e.g. `chat_module`, or
+        /// `chat_module@0.3.0` for that version. Repeatable.
         #[arg(long = "module")]
         modules: Vec<String>,
         /// Lepta to fund the session's account with.
