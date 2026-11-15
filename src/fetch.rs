@@ -144,6 +144,30 @@ pub(crate) mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
+    /// Reads a whole HTTP request, head and body. A server that answers and closes with some
+    /// of it unread makes the OS reset the connection, and the client sees no answer.
+    pub(crate) fn read_request(stream: &mut impl Read) {
+        let mut seen = Vec::new();
+        let mut chunk = [0u8; 4096];
+        // The request's length, once its head is in: the head and a Content-Length body.
+        let length = |seen: &[u8]| {
+            let end = seen.windows(4).position(|w| w == b"\r\n\r\n")?;
+            let head = String::from_utf8_lossy(&seen[..end]).to_ascii_lowercase();
+            let body = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .and_then(|n| n.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            Some(end + 4 + body)
+        };
+        while length(&seen).is_none_or(|wanted| seen.len() < wanted) {
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => seen.extend_from_slice(&chunk[..n]),
+            }
+        }
+    }
+
     /// Serves `body` to each of `requests` requests on 127.0.0.1, with `status`.
     pub(crate) fn serve(status: &'static str, body: &'static [u8], requests: usize) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -151,8 +175,7 @@ pub(crate) mod tests {
         std::thread::spawn(move || {
             for stream in listener.incoming().take(requests) {
                 let mut stream = stream.unwrap();
-                let mut request = [0u8; 1024];
-                let _ = stream.read(&mut request);
+                read_request(&mut stream);
                 let head = format!(
                     "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
