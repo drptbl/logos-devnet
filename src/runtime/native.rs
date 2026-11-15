@@ -229,9 +229,8 @@ impl Runtime for Native {
         run_attached(cmd.arg(self.log_file()))
     }
 
-    fn log_mark(&self) -> Option<String> {
-        let size = std::fs::metadata(self.log_file()).ok()?.len();
-        Some(size.to_string())
+    fn last_log_line(&self) -> Option<String> {
+        super::last_line(&self.log_file())
     }
 }
 
