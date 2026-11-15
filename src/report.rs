@@ -31,6 +31,8 @@ pub struct Status {
     pub programs: Vec<Program>,
     pub account_groups: Vec<GroupSummary>,
     pub sessions: Vec<String>,
+    /// Sessions whose daemon is stopped while the chain runs: `up` starts them again.
+    pub sessions_stopped: Vec<String>,
     /// The local messaging hub, when the devnet has one.
     pub messaging: Option<Messaging>,
     /// The hub's storage node, when a project asked for local storage.
@@ -226,6 +228,14 @@ impl Report for Status {
         if !self.sessions.is_empty() {
             out += &format!("sessions   {}\n", self.sessions.join(", "));
         }
+        if !self.sessions_stopped.is_empty() {
+            let one = self.sessions_stopped.len() == 1;
+            out += &format!(
+                "           {} stopped. `logos-devnet up` starts {}\n",
+                self.sessions_stopped.join(", "),
+                if one { "it" } else { "them" },
+            );
+        }
         if let Some(m) = &self.messaging {
             let down: Vec<&str> = [
                 (m.delivery_node, "delivery"),
@@ -408,7 +418,8 @@ mod tests {
             faucet: None,
             programs: vec![],
             account_groups: vec![],
-            sessions: vec![],
+            sessions: vec!["alice".into(), "bob".into()],
+            sessions_stopped: vec!["bob".into()],
             messaging: Some(Messaging {
                 running: true,
                 delivery_node: true,
@@ -430,6 +441,7 @@ mod tests {
             "programs",
             "account_groups",
             "sessions",
+            "sessions_stopped",
             "messaging",
             "env_file",
         ] {
@@ -452,6 +464,13 @@ mod tests {
             status.human()
         );
         assert_eq!(json["messaging"]["discovery_node"], false);
+        assert!(
+            status.human().contains(
+                "sessions   alice, bob\n           bob stopped. `logos-devnet up` starts it\n"
+            ),
+            "{}",
+            status.human()
+        );
     }
 
     #[test]
@@ -472,6 +491,7 @@ mod tests {
             programs: vec![],
             account_groups: vec![],
             sessions: vec![],
+            sessions_stopped: vec![],
             messaging: None,
             storage: None,
             env_file: None,

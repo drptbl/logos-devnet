@@ -133,6 +133,20 @@ pub fn run(devnet: &Devnet, project_error: Option<&anyhow::Error>) -> Doctor {
         )
     });
 
+    // A session's daemon stops with the chain, so it's only news while the chain runs.
+    let stopped = if running && session::logosctl_on_path() {
+        devnet.stopped_sessions()
+    } else {
+        Vec::new()
+    };
+    if !stopped.is_empty() {
+        checks.push(fail(
+            "sessions",
+            format!("{} stopped while the chain runs", stopped.join(", ")),
+            "`logos-devnet up` starts them, or `logos-devnet session restart <name>`",
+        ));
+    }
+
     if running {
         checks.push(match devnet.faucet_balance() {
             Some(b) if b > 0 => pass("faucet", format!("{b} lepta")),

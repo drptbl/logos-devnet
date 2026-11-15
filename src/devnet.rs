@@ -764,6 +764,15 @@ impl Devnet {
         })
     }
 
+    /// The sessions whose logosctl daemon doesn't run.
+    pub fn stopped_sessions(&self) -> Vec<String> {
+        self.sessions()
+            .into_iter()
+            .filter(|s| !s.logosctl().running())
+            .map(|s| s.name)
+            .collect()
+    }
+
     /// The sessions, or none (with a note) when their directory can't be read.
     fn sessions(&self) -> Vec<Session> {
         session::list(&self.home.sessions_dir()).unwrap_or_else(|e| {
@@ -948,6 +957,12 @@ impl Devnet {
             programs,
             account_groups: self.group_summaries().unwrap_or_default(),
             sessions: self.sessions().into_iter().map(|s| s.name).collect(),
+            // After `down`, every daemon is stopped, and that's no news.
+            sessions_stopped: if running {
+                self.stopped_sessions()
+            } else {
+                Vec::new()
+            },
             messaging: self.hub_status(),
             storage: self.storage_status(),
             env_file: env.map(|_| self.home.env_file()),
@@ -1886,6 +1901,17 @@ mod tests {
     }
 
     #[test]
+    fn names_sessions_whose_daemon_is_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let devnet = devnet_in(&dir.path().join("home"));
+        assert!(devnet.stopped_sessions().is_empty());
+        for name in ["bob", "alice"] {
+            std::fs::create_dir_all(devnet.home.sessions_dir().join(name)).unwrap();
+        }
+        assert_eq!(devnet.stopped_sessions(), ["alice", "bob"]);
+    }
+
+    #[test]
     fn logs_name_what_they_cant_show() {
         let dir = tempfile::tempdir().unwrap();
         let devnet = devnet_in(&dir.path().join("home"));
@@ -2254,6 +2280,7 @@ mod tests {
             programs: vec![],
             account_groups: vec![],
             sessions: vec![],
+            sessions_stopped: vec![],
             messaging: None,
             storage: None,
             env_file: None,
