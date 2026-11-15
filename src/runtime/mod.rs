@@ -89,6 +89,9 @@ pub trait Runtime {
     fn wallet_batch(&self, home: &Path, runs: &[Vec<String>]) -> Result<Vec<String>>;
     /// Prints the sequencer's log.
     fn logs(&self, follow: bool) -> Result<()>;
+    /// Something that changes whenever the sequencer writes to its log, to tell one still
+    /// working from one that went quiet. `None` when it can't be read.
+    fn log_mark(&self) -> Option<String>;
 }
 
 /// Runs `cmd` with stdin closed and returns its stdout. On failure the error carries both

@@ -82,7 +82,7 @@ Each refusal changes nothing. `up` prefixes a program's refusal with `program <n
 | `the session has <module> <version>, not <version>` or `its daemon has no <module> package` | A session keeps the versions it was made with: `session rm <name>`, then `up` makes it again. |
 | `not a RISC Zero program binary` | Deploy the guest's `.bin` from `cargo risczero build`, not its ELF. |
 | `no Docker daemon answers` | Start Docker (OrbStack, Docker Desktop or Colima). |
-| `no block within` / `the sequencer stopped while starting` | Read `logos-devnet logs`. |
+| `no block, and nothing in the sequencer's log` / `the sequencer stopped while starting` | Read `logos-devnet logs`. A long chain loading is no error: `up` waits as long as the log grows. |
 
 ## Debugging
 

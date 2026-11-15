@@ -274,6 +274,20 @@ impl Runtime for Docker {
         }
         run_attached(cmd.arg("sequencer"))
     }
+
+    fn log_mark(&self) -> Option<String> {
+        // Its last line, with Docker's timestamp to the nanosecond, so a repeated line counts.
+        let mut cmd = self.compose();
+        cmd.args([
+            "logs",
+            "--tail",
+            "1",
+            "--timestamps",
+            "--no-log-prefix",
+            "sequencer",
+        ]);
+        stdout_within(&mut cmd, Duration::from_secs(10)).ok()
+    }
 }
 
 /// `logos-devnet` for the default home, and a name derived from the path for any other, so
