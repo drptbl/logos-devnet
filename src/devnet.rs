@@ -1132,6 +1132,14 @@ impl Devnet {
             session.save_info(&info)?;
             ctl.load(one)?;
         }
+        // An install that upgraded what other modules depend on unloads them, and an upgraded
+        // lez_core comes back with its wallet closed: bring the whole session back.
+        ctl.resume(
+            &info.modules,
+            &session.wallet_config(),
+            &session.wallet_storage(),
+            &self.settings.sequencer_url(),
+        )?;
         self.join_hub(&ctl)?;
         Ok(missing)
     }

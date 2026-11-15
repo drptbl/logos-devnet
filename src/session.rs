@@ -432,7 +432,8 @@ impl Logosctl {
         Ok(())
     }
 
-    /// Installs what `package install <module>` would, package by package, from `packages`.
+    /// Installs what `package install <module>` would, package by package, from `packages`,
+    /// leaving alone what the daemon already has at that version.
     fn install_one(&self, module: &str, packages: &Path) -> Result<()> {
         let mut plan = vec!["package", "install", split_module(module).0];
         if let Some(version) = pinned_version(module) {
@@ -449,6 +450,11 @@ impl Logosctl {
             else {
                 continue;
             };
+            // Already there at that version. Installed again from a file, it would count as a
+            // reinstall, which unloads the modules that depend on it and leaves them so.
+            if change["action"] == "installed" {
+                continue;
+            }
             check_module_name(name)?;
             check_version(version)?;
             self.install_package(name, version, packages)?;
@@ -1347,6 +1353,29 @@ esac"#,
         assert!(!left.exists(), "the crash's download is cleaned up");
         let parts = std::fs::read_dir(&packages).unwrap().count();
         assert_eq!(parts, 1, "nothing of this download is kept");
+    }
+
+    #[test]
+    fn leaves_alone_what_a_daemon_already_has() {
+        let dir = tempfile::tempdir().unwrap();
+        let sha = crate::binary::sha256_hex(b"chat_module-0.3.0");
+        let ctl = fake_logosctl(
+            dir.path(),
+            &format!(
+                r#"case "$2 $3 $4" in
+  "package install chat_module") echo '{{"changes":[{{"name":"delivery_module","action":"installed","toVersion":"0.3.3"}},{{"name":"chat_module","action":"install","toVersion":"0.3.0"}}]}}' ;;
+  "package show chat_module") echo '{{"versions":[{{"manifest":{{"version":"0.3.0"}},"sha256":"{sha}"}}]}}' ;;
+  "package download "*) printf '%s' "$4-$6" > "$8/$4-$6.lgx"; echo '{{"status":"ok"}}' ;;
+  *) echo '{{"status":"ok"}}' ;;
+esac"#
+            ),
+        );
+        ctl.install(&["chat_module".into()], &dir.path().join("packages"))
+            .unwrap();
+        let log = calls(dir.path());
+        // Installing it again from a file would unload what depends on it, e.g. chat_module.
+        assert!(!log.contains("delivery_module"), "{log}");
+        assert!(log.contains("chat_module-0.3.0.lgx --yes"), "{log}");
     }
 
     #[test]
