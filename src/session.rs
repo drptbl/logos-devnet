@@ -180,8 +180,8 @@ pub fn list(dir: &Path) -> Result<Vec<Session>> {
 /// The modules `extra` adds (as `modules_with` takes them) that a session with `have` lacks, in
 /// order. A module left out of `extra` is not removed. A session keeps the version it
 /// installed: asking for another one is refused, since only a new session takes it. A pin on a
-/// module the session installed unpinned is checked against `installed`, the version its daemon
-/// reports, and recorded in `have` when it matches.
+/// module the session installed unpinned, or got through another module, is checked against
+/// `installed`, the version its daemon reports, and recorded in `have` when it matches.
 pub fn missing_modules(
     have: &mut [String],
     extra: &[String],
@@ -197,21 +197,27 @@ pub fn missing_modules(
             }
             continue;
         };
-        let Some(at) = have.iter().position(|h| split_module(h).0 == name) else {
-            missing.push(module);
-            continue;
+        let at = have.iter().position(|h| split_module(h).0 == name);
+        // Listed unpinned, or brought along by another module: the daemon knows its version.
+        let had = match at.and_then(|at| pinned_version(&have[at])) {
+            Some(had) => Some(had.to_owned()),
+            None => installed(name)?,
         };
-        let had = match pinned_version(&have[at]) {
-            Some(had) => had.to_owned(),
-            None => installed(name)?.unwrap_or_default(),
-        };
-        if had != version {
-            bail!(
+        match (at, had) {
+            (None, None) => missing.push(module),
+            (_, Some(had)) if had != version => bail!(
                 "the session has {name} {had}, not {version}: `logos-devnet session rm` it, and \
                  `up` makes it again with {module}"
-            );
+            ),
+            // There at that version through another module: recorded and loaded, and
+            // `install` finds nothing to change.
+            (None, Some(_)) => missing.push(module),
+            (Some(at), Some(_)) => pinned.push((at, module.clone())),
+            (Some(_), None) => bail!(
+                "the session lists {name}, but its daemon has no {name} package: \
+                 `logos-devnet session rm` it, and `up` makes it again with {module}"
+            ),
         }
-        pinned.push((at, module.clone()));
     }
     // Recorded only once every pin checks out, so a refusal changes nothing.
     for (at, module) in pinned {
@@ -432,7 +438,8 @@ impl Logosctl {
         Ok(())
     }
 
-    /// Installs what `package install <module>` would, package by package, from `packages`.
+    /// Installs what `package install <module>` would, package by package, from `packages`,
+    /// leaving alone what the daemon already has at that version.
     fn install_one(&self, module: &str, packages: &Path) -> Result<()> {
         let mut plan = vec!["package", "install", split_module(module).0];
         if let Some(version) = pinned_version(module) {
@@ -449,6 +456,11 @@ impl Logosctl {
             else {
                 continue;
             };
+            // Already there at that version. Installed again from a file, it would count as a
+            // reinstall, which unloads the modules that depend on it and leaves them so.
+            if change["action"] == "installed" {
+                continue;
+            }
             check_module_name(name)?;
             check_version(version)?;
             self.install_package(name, version, packages)?;
@@ -865,6 +877,20 @@ esac"#,
         // Another version would need the session made again: say so, rather than ignore it.
         let err = missing("chat_module@0.4.0").unwrap_err();
         assert!(format!("{err:#}").contains("session rm"), "{err:#}");
+    }
+
+    #[test]
+    fn a_pin_on_what_a_session_has_through_another_module_asks_the_daemon() {
+        // chat_module brought delivery_module 0.3.3 along.
+        let have = ["lez_core", "chat_module"];
+        let (missing, _) = reconcile(&have, &["delivery_module@0.3.2"], Some("0.3.3"));
+        let err = missing.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("has delivery_module 0.3.3"),
+            "{err:#}"
+        );
+        let (missing, _) = reconcile(&have, &["delivery_module@0.3.3"], Some("0.3.3"));
+        assert_eq!(missing.unwrap(), ["delivery_module@0.3.3"]);
     }
 
     #[test]
@@ -1347,6 +1373,29 @@ esac"#,
         assert!(!left.exists(), "the crash's download is cleaned up");
         let parts = std::fs::read_dir(&packages).unwrap().count();
         assert_eq!(parts, 1, "nothing of this download is kept");
+    }
+
+    #[test]
+    fn leaves_alone_what_a_daemon_already_has() {
+        let dir = tempfile::tempdir().unwrap();
+        let sha = crate::binary::sha256_hex(b"chat_module-0.3.0");
+        let ctl = fake_logosctl(
+            dir.path(),
+            &format!(
+                r#"case "$2 $3 $4" in
+  "package install chat_module") echo '{{"changes":[{{"name":"delivery_module","action":"installed","toVersion":"0.3.3"}},{{"name":"chat_module","action":"install","toVersion":"0.3.0"}}]}}' ;;
+  "package show chat_module") echo '{{"versions":[{{"manifest":{{"version":"0.3.0"}},"sha256":"{sha}"}}]}}' ;;
+  "package download "*) printf '%s' "$4-$6" > "$8/$4-$6.lgx"; echo '{{"status":"ok"}}' ;;
+  *) echo '{{"status":"ok"}}' ;;
+esac"#
+            ),
+        );
+        ctl.install(&["chat_module".into()], &dir.path().join("packages"))
+            .unwrap();
+        let log = calls(dir.path());
+        // Installing it again from a file would unload what depends on it, e.g. chat_module.
+        assert!(!log.contains("delivery_module"), "{log}");
+        assert!(log.contains("chat_module-0.3.0.lgx --yes"), "{log}");
     }
 
     #[test]

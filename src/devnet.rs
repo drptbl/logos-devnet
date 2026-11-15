@@ -36,6 +36,9 @@ pub const DEFAULT_FUND: u64 = 10_000_000_000;
 const READY_TIMEOUT: Duration = Duration::from_secs(180);
 /// How long `status` waits for the runtime to say whether the sequencer runs.
 const RUNTIME_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long `status`, `doctor` and `session ls` wait for a session's daemon to answer: a wedged
+/// one would sit out logosctl's 20 s.
+const SESSION_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 /// How often wallets poll the devnet for a transaction: a block or two.
 const WALLET_POLL_TIMEOUT: &str = "2s";
 
@@ -749,17 +752,20 @@ impl Devnet {
 
     /// Restarts each of `names`' daemons, in order, and brings it back as `up` does: a fresh
     /// start for modules that keep state while loaded, e.g. `libp2p_module`, which advertises one
-    /// service per load. Their packages, keys and funded wallets stay. Every name is checked
-    /// first, so a typo restarts none.
+    /// service per load. Their packages, keys and funded wallets stay. Every session is checked
+    /// first, so a typo or a broken one restarts none.
     pub fn session_restart(&self, names: &[String]) -> Result<Done> {
+        // A session that can't come back stays as it is, and so do the others.
         let sessions = names
             .iter()
-            .map(|name| self.existing_session(name))
+            .map(|name| {
+                let session = self.existing_session(name)?;
+                session.info()?;
+                Ok(session)
+            })
             .collect::<Result<Vec<_>>>()?;
         self.require_running()?;
         for session in &sessions {
-            // A session that can't come back stays as it is.
-            session.info()?;
             session.logosctl().stop()?;
             self.resume_session(session, false)
                 .with_context(|| format!("restarting session {}", session.name))?;
@@ -788,7 +794,7 @@ impl Devnet {
     fn sessions_not_running(&self) -> Vec<String> {
         self.sessions()
             .into_iter()
-            .filter(|s| !s.logosctl().running())
+            .filter(|s| !s.logosctl().answers_within(SESSION_CHECK_TIMEOUT))
             .map(|s| s.name)
             .collect()
     }
@@ -997,6 +1003,15 @@ impl Devnet {
         })
     }
 
+    /// The parts of the hub that should run and don't, or `None` when the devnet has no hub or
+    /// no logosctl to ask it with.
+    pub fn hub_down(&self) -> Option<Vec<&'static str>> {
+        let hub = self.hub();
+        let (messaging, storage) = (hub.runs_messaging(), hub.runs_storage());
+        ((messaging || storage) && session::logosctl_on_path())
+            .then(|| hub.health().down(messaging, storage))
+    }
+
     fn storage_status(&self) -> Option<report::Storage> {
         let hub = self.hub();
         hub.runs_storage().then(|| report::Storage {
@@ -1106,23 +1121,31 @@ impl Devnet {
         let mut info = session.info()?;
         let ctl = session.logosctl();
         let had = info.modules.clone();
-        let missing =
-            session::missing_modules(&mut info.modules, extra, |m| ctl.installed_version(m))?;
+        // Started only when needed: to ask it what a pin names, or to install. `up` may get
+        // here before it resumes the session.
+        let wake = || -> Result<()> {
+            if session.start_daemon(&ctl, self.settings.dev_mode, &self.session_storage())? {
+                // A daemon that started now has nothing loaded: bring the session back first.
+                ctl.resume(
+                    &had,
+                    &session.wallet_config(),
+                    &session.wallet_storage(),
+                    &self.settings.sequencer_url(),
+                )?;
+            }
+            Ok(())
+        };
+        let missing = session::missing_modules(&mut info.modules, extra, |m| {
+            wake()?;
+            ctl.installed_version(m)
+        })?;
         if info.modules != had {
             session.save_info(&info)?;
         }
         if missing.is_empty() {
             return Ok(missing);
         }
-        if session.start_daemon(&ctl, self.settings.dev_mode, &self.session_storage())? {
-            // A daemon that started now has nothing loaded: bring the session back first.
-            ctl.resume(
-                &info.modules,
-                &session.wallet_config(),
-                &session.wallet_storage(),
-                &self.settings.sequencer_url(),
-            )?;
-        }
+        wake()?;
         // Recorded one at a time, so a module that fails keeps the ones before it.
         for module in &missing {
             let one = std::slice::from_ref(module);
@@ -1132,6 +1155,14 @@ impl Devnet {
             session.save_info(&info)?;
             ctl.load(one)?;
         }
+        // An install that upgraded what other modules depend on unloads them, and an upgraded
+        // lez_core comes back with its wallet closed: bring the whole session back.
+        ctl.resume(
+            &info.modules,
+            &session.wallet_config(),
+            &session.wallet_storage(),
+            &self.settings.sequencer_url(),
+        )?;
         self.join_hub(&ctl)?;
         Ok(missing)
     }
@@ -1176,7 +1207,7 @@ impl Devnet {
         let rows = session::list(&self.home.sessions_dir())?
             .into_iter()
             .map(|session| {
-                let running = session.logosctl().running();
+                let running = session.logosctl().answers_within(SESSION_CHECK_TIMEOUT);
                 match session.info() {
                     Ok(info) => SessionRow {
                         balance: chain_up
@@ -1886,9 +1917,21 @@ mod tests {
         let devnet = devnet_in(&dir.path().join("home"));
         let err = devnet.session_restart(&["nobody".into()]).unwrap_err();
         assert!(err.to_string().contains("no session nobody"), "{err}");
-        std::fs::create_dir_all(devnet.home.sessions_dir().join("alice")).unwrap();
+        let alice = devnet.home.sessions_dir().join("alice");
+        std::fs::create_dir_all(&alice).unwrap();
+        let info = format!(r#"{{"modules":["lez_core"],"account":"{ID}","funded":1}}"#);
+        std::fs::write(alice.join("session.json"), info).unwrap();
         let err = devnet.session_restart(&["alice".into()]).unwrap_err();
         assert!(err.to_string().contains("not running"), "{err}");
+        // A session that couldn't come back is found before any restarts.
+        std::fs::create_dir_all(devnet.home.sessions_dir().join("bob")).unwrap();
+        let err = devnet
+            .session_restart(&["alice".into(), "bob".into()])
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("session bob is incomplete"),
+            "{err:#}"
+        );
         // Every name is checked before any session restarts.
         let err = devnet
             .session_restart(&["alice".into(), "nobody".into()])
