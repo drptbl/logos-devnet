@@ -451,49 +451,56 @@ impl Logosctl {
             };
             check_module_name(name)?;
             check_version(version)?;
-            let file = self.cached_package(name, version, packages)?;
-            self.run(&["package", "install", &path_text(&file), "--yes"])?;
+            self.install_package(name, version, packages)?;
         }
         Ok(())
     }
 
-    /// `<packages>/<name>-<version>.lgx`, checked against the catalog's SHA-256: a file that
-    /// doesn't match is downloaded again. A download lands in a directory of its own first, so
-    /// an interrupted one never takes the file's place.
-    fn cached_package(&self, name: &str, version: &str, packages: &Path) -> Result<PathBuf> {
+    /// Installs `name` at `version`, from `<packages>/<name>-<version>.lgx` when it matches the
+    /// catalog's SHA-256, else from a new download, which is kept there once it matches. Every
+    /// home shares `packages`, so what's installed is this process's own: a hard link to the
+    /// kept file, checked after it's made, since another home may rename a file into its place
+    /// but never changes one, or the download, in a directory of its own. A package the catalog
+    /// gives no SHA-256 for is never kept, since nothing could check it.
+    fn install_package(&self, name: &str, version: &str, packages: &Path) -> Result<()> {
         let file_name = format!("{name}-{version}.lgx");
-        let file = packages.join(&file_name);
+        let kept = packages.join(&file_name);
         let sha256 = self.catalog_sha256(name, version)?;
-        let matches = |path: &Path| match &sha256 {
-            Some(wanted) => crate::binary::file_sha256(path).is_ok_and(|got| &got == wanted),
-            None => path.exists(),
+        let checked = |path: &Path| {
+            sha256.as_ref().is_some_and(|wanted| {
+                crate::binary::file_sha256(path).is_ok_and(|got| &got == wanted)
+            })
         };
-        if matches(&file) {
-            return Ok(file);
-        }
-        let part = packages.join(format!(".part-{}-{file_name}", std::process::id()));
+        crate::fetch::remove_stale_parts(packages);
+        let part = packages.join(crate::fetch::part_name(&file_name));
         std::fs::create_dir_all(&part).with_context(|| format!("creating {}", part.display()))?;
-        let downloaded = part.join(&file_name);
-        let fetched = self
-            .run(&[
-                "package",
-                "download",
-                name,
-                "--version",
-                version,
-                "-o",
-                &path_text(&part),
-            ])
-            .and_then(|_| {
-                if !matches(&downloaded) {
+        let mine = part.join(&file_name);
+        let installed = (|| {
+            let reused = std::fs::hard_link(&kept, &mine).is_ok() && checked(&mine);
+            if !reused {
+                let _ = std::fs::remove_file(&mine);
+                self.run(&[
+                    "package",
+                    "download",
+                    name,
+                    "--version",
+                    version,
+                    "-o",
+                    &path_text(&part),
+                ])?;
+                if sha256.is_some() && !checked(&mine) {
                     bail!("{name} {version} downloaded, but not with the catalog's SHA-256");
                 }
-                std::fs::rename(&downloaded, &file)
-                    .with_context(|| format!("keeping {}", file.display()))
-            });
+            }
+            self.run(&["package", "install", &path_text(&mine), "--yes"])?;
+            if !reused && sha256.is_some() {
+                std::fs::rename(&mine, &kept)
+                    .with_context(|| format!("keeping {}", kept.display()))?;
+            }
+            Ok(())
+        })();
         let _ = std::fs::remove_dir_all(&part);
-        fetched?;
-        Ok(file)
+        installed
     }
 
     /// The SHA-256 the catalog gives for `name`'s package at `version`, when it gives one.
@@ -1250,7 +1257,13 @@ esac"#
             "delivery_module-0.3.3",
         ] {
             let file = packages.join(format!("{package}.lgx"));
-            assert!(first.contains(&format!("package install {} --yes", file.display())));
+            assert!(file.exists(), "{package} is kept");
+            let mine = format!("/{package}.lgx --yes");
+            assert!(
+                first.contains(&format!("package install {}/.part-", packages.display()))
+                    && first.contains(&mine),
+                "installed from this process's own copy: {first}"
+            );
         }
         // Another daemon, the same devnet: everything comes from the files.
         std::fs::remove_file(dir.path().join("calls.log")).unwrap();
@@ -1292,6 +1305,48 @@ esac"#
             0,
             "nothing kept"
         );
+    }
+
+    #[test]
+    fn installs_a_package_the_catalog_gives_no_sha256_for_from_its_own_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let packages = dir.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        // Another home put it in the shared directory, and nothing can check it.
+        let planted = packages.join("lez_core-0.5.1.lgx");
+        std::fs::write(&planted, "planted").unwrap();
+        // A download a crashed process left a day ago.
+        let left = packages.join(".part-1-lez_core-0.5.1.lgx");
+        std::fs::create_dir(&left).unwrap();
+        let day_ago = std::time::SystemTime::now() - Duration::from_secs(25 * 3600);
+        std::fs::File::open(&left)
+            .unwrap()
+            .set_modified(day_ago)
+            .unwrap();
+        let ctl = fake_logosctl(
+            dir.path(),
+            r#"case "$2 $3 $4" in
+  "package install lez_core") echo '{"changes":[{"name":"lez_core","toVersion":"0.5.1"}]}' ;;
+  "package show lez_core") echo '{"versions":[{"manifest":{"version":"0.5.1"}}]}' ;;
+  "package download "*) printf fresh > "$8/$4-$6.lgx"; echo '{"status":"ok"}' ;;
+  *) echo '{"status":"ok"}' ;;
+esac"#,
+        );
+        ctl.install(&["lez_core".into()], &packages).unwrap();
+        let log = calls(dir.path());
+        assert!(log.contains("package download lez_core"), "{log}");
+        assert!(
+            log.contains(&format!("package install {}/.part-", packages.display())),
+            "installed from its own download: {log}"
+        );
+        assert!(
+            !log.contains(&format!("install {} ", planted.display())),
+            "{log}"
+        );
+        assert_eq!(std::fs::read_to_string(&planted).unwrap(), "planted");
+        assert!(!left.exists(), "the crash's download is cleaned up");
+        let parts = std::fs::read_dir(&packages).unwrap().count();
+        assert_eq!(parts, 1, "nothing of this download is kept");
     }
 
     #[test]
