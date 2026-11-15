@@ -36,6 +36,9 @@ pub const DEFAULT_FUND: u64 = 10_000_000_000;
 const READY_TIMEOUT: Duration = Duration::from_secs(180);
 /// How long `status` waits for the runtime to say whether the sequencer runs.
 const RUNTIME_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long `status`, `doctor` and `session ls` wait for a session's daemon to answer: a wedged
+/// one would sit out logosctl's 20 s.
+const SESSION_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 /// How often wallets poll the devnet for a transaction: a block or two.
 const WALLET_POLL_TIMEOUT: &str = "2s";
 
@@ -788,7 +791,7 @@ impl Devnet {
     fn sessions_not_running(&self) -> Vec<String> {
         self.sessions()
             .into_iter()
-            .filter(|s| !s.logosctl().running())
+            .filter(|s| !s.logosctl().answers_within(SESSION_CHECK_TIMEOUT))
             .map(|s| s.name)
             .collect()
     }
@@ -1192,7 +1195,7 @@ impl Devnet {
         let rows = session::list(&self.home.sessions_dir())?
             .into_iter()
             .map(|session| {
-                let running = session.logosctl().running();
+                let running = session.logosctl().answers_within(SESSION_CHECK_TIMEOUT);
                 match session.info() {
                     Ok(info) => SessionRow {
                         balance: chain_up
