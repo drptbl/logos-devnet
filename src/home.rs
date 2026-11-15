@@ -11,7 +11,8 @@
 //! sessions/       throwaway logosctl sessions with devnet wallets (see session)
 //! accounts/       account groups: many funded keys for tests (see groups)
 //! programs.json   the binary hash each program was deployed from
-//! downloads/      program binaries the project file names by URL, and module packages
+//! downloads/      program binaries the project file names by URL, and module packages. Every
+//!                 home uses the one in `~/.logos-devnet` (see `with_shared_downloads`)
 //! messaging/      the local messaging hub, when a project asks for one (see messaging)
 //! lock            held by the command changing the home, so two take turns
 //! ```
@@ -127,6 +128,7 @@ impl Settings {
 #[derive(Debug, Clone)]
 pub struct Home {
     root: PathBuf,
+    downloads: PathBuf,
 }
 
 impl Home {
@@ -139,7 +141,23 @@ impl Home {
             Some(path) => resolve(&path)?,
             None => default_root()?,
         };
-        Ok(Self { root })
+        let downloads = root.join("downloads");
+        Ok(Self { root, downloads })
+    }
+
+    /// This home, downloading into `~/.logos-devnet/downloads` like every other home, so a
+    /// project's own home or a worktree's doesn't download the same files again. Each file is
+    /// checked against its SHA-256 before use, whichever home put it there. Without `HOME`,
+    /// the home keeps its own.
+    pub fn with_shared_downloads(self) -> Self {
+        match default_root() {
+            Ok(root) => self.with_downloads(root.join("downloads")),
+            Err(_) => self,
+        }
+    }
+
+    fn with_downloads(self, downloads: PathBuf) -> Self {
+        Self { downloads, ..self }
     }
 
     pub fn root(&self) -> &Path {
@@ -223,10 +241,10 @@ impl Home {
     }
     /// Program binaries downloaded from a URL, named by their SHA-256.
     pub fn downloads_dir(&self) -> PathBuf {
-        self.root.join("downloads")
+        self.downloads.clone()
     }
     /// Module packages from the catalog, `<name>-<version>.lgx`, downloaded once for every
-    /// daemon of the devnet.
+    /// daemon.
     pub fn packages_dir(&self) -> PathBuf {
         self.downloads_dir().join("packages")
     }
@@ -384,6 +402,17 @@ mod tests {
         assert!(home.chain_dev_mode());
         home.record_chain_dev_mode(false).unwrap();
         assert!(!home.chain_dev_mode());
+    }
+
+    #[test]
+    fn homes_can_share_one_download_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Home::locate(Some(dir.path().join("a"))).unwrap();
+        assert_eq!(home.downloads_dir(), home.root().join("downloads"));
+        let shared = dir.path().join("shared");
+        let home = home.with_downloads(shared.clone());
+        assert_eq!(home.downloads_dir(), shared);
+        assert_eq!(home.packages_dir(), shared.join("packages"));
     }
 
     #[test]

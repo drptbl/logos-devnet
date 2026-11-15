@@ -215,7 +215,7 @@ fn main() -> Result<()> {
     let home = cli
         .home
         .or_else(|| project.as_ref().and_then(|p| p.home.clone()));
-    let home = Home::locate(home)?;
+    let home = Home::locate(home)?.with_shared_downloads();
     let _lock = cli
         .command
         .changes_devnet()
