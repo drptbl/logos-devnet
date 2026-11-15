@@ -1106,23 +1106,31 @@ impl Devnet {
         let mut info = session.info()?;
         let ctl = session.logosctl();
         let had = info.modules.clone();
-        let missing =
-            session::missing_modules(&mut info.modules, extra, |m| ctl.installed_version(m))?;
+        // Started only when needed: to ask it what a pin names, or to install. `up` may get
+        // here before it resumes the session.
+        let wake = || -> Result<()> {
+            if session.start_daemon(&ctl, self.settings.dev_mode, &self.session_storage())? {
+                // A daemon that started now has nothing loaded: bring the session back first.
+                ctl.resume(
+                    &had,
+                    &session.wallet_config(),
+                    &session.wallet_storage(),
+                    &self.settings.sequencer_url(),
+                )?;
+            }
+            Ok(())
+        };
+        let missing = session::missing_modules(&mut info.modules, extra, |m| {
+            wake()?;
+            ctl.installed_version(m)
+        })?;
         if info.modules != had {
             session.save_info(&info)?;
         }
         if missing.is_empty() {
             return Ok(missing);
         }
-        if session.start_daemon(&ctl, self.settings.dev_mode, &self.session_storage())? {
-            // A daemon that started now has nothing loaded: bring the session back first.
-            ctl.resume(
-                &info.modules,
-                &session.wallet_config(),
-                &session.wallet_storage(),
-                &self.settings.sequencer_url(),
-            )?;
-        }
+        wake()?;
         // Recorded one at a time, so a module that fails keeps the ones before it.
         for module in &missing {
             let one = std::slice::from_ref(module);
