@@ -79,7 +79,7 @@ Each refusal changes nothing. `up` prefixes a program's refusal with `program <n
 | `port <n> on 127.0.0.1 is taken` | `up --port <free port>`, remembered unless the file sets a fixed `port`. A new project home with `[devnet] port = 0` takes a free one on its first `up`. |
 | `sessions and the messaging hub need logosctl` | Install the Logos Core CLI, or remove the sessions and `[messaging]`. |
 | `port <n> on 127.0.0.1, which the messaging hub keeps, is taken` | Stop what holds it, or `messaging rm` and `up` for new ports and peer ids. |
-| `the session has <module>, not <module@version>` | A session keeps the versions it was made with: `session rm <name>`, then `up` makes it again. |
+| `the session has <module> <version>, not <version>` or `its daemon has no <module> package` | A session keeps the versions it was made with: `session rm <name>`, then `up` makes it again. |
 | `not a RISC Zero program binary` | Deploy the guest's `.bin` from `cargo risczero build`, not its ELF. |
 | `no Docker daemon answers` | Start Docker (OrbStack, Docker Desktop or Colima). |
 | `no block within` / `the sequencer stopped while starting` | Read `logos-devnet logs`. |
