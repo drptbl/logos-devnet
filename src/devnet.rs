@@ -1489,20 +1489,39 @@ impl Devnet {
             }
             None => return self.runtime.logs(follow),
         };
-        let log = daemon.join("logs").join("daemon.log");
-        if !log.exists() {
-            bail!(
-                "{} doesn't exist yet: the daemon hasn't started",
-                log.display()
-            );
+        tail(&daemon_log(&daemon), follow)
+    }
+
+    /// Prints the last lines of every log in turn, each under a `==> <name> <==` line: the
+    /// sequencer's, each session's and the hub's, for a CI step that runs when a test fails. A
+    /// log that can't be shown says why and the next one follows.
+    pub fn logs_all(&self) -> Result<()> {
+        println!("==> sequencer <==");
+        if let Err(e) = self.runtime.logs(false) {
+            println!("{e:#}");
         }
-        let mut cmd = std::process::Command::new("tail");
-        cmd.args(["-n", "200"]);
-        if follow {
-            // By name, so it keeps following after a daemon restart starts a new log.
-            cmd.arg("-F");
+        for (label, log) in self.daemon_logs() {
+            println!("\n==> {label} <==");
+            if let Err(e) = tail(&log, false) {
+                println!("{e:#}");
+            }
         }
-        crate::runtime::run_attached(cmd.arg(&log))
+        Ok(())
+    }
+
+    /// Each logosctl daemon's log, sessions first, then the hub's when there is one.
+    fn daemon_logs(&self) -> Vec<(String, PathBuf)> {
+        let sessions = self
+            .sessions()
+            .into_iter()
+            .map(|s| (format!("session {}", s.name), daemon_log(&s.logosctl_dir())));
+        let hub = self.home.messaging_dir().exists().then(|| {
+            (
+                "hub".to_owned(),
+                daemon_log(&self.home.messaging_dir().join("logosctl")),
+            )
+        });
+        sessions.chain(hub).collect()
     }
 
     /// Writes `<dir>/wallet_config.json` for a project's own wallet (`lez_core` or the LEZ
@@ -1778,6 +1797,28 @@ fn labelled(list: &str, label: &str) -> Option<PublicId> {
         .find_map(first_public_id)
 }
 
+/// A logosctl daemon's log, in its config directory.
+fn daemon_log(logosctl_dir: &Path) -> PathBuf {
+    logosctl_dir.join("logs").join("daemon.log")
+}
+
+/// Prints `log`'s last 200 lines, and follows it with `follow`.
+fn tail(log: &Path, follow: bool) -> Result<()> {
+    if !log.exists() {
+        bail!(
+            "{} doesn't exist yet: the daemon hasn't started",
+            log.display()
+        );
+    }
+    let mut cmd = std::process::Command::new("tail");
+    cmd.args(["-n", "200"]);
+    if follow {
+        // By name, so it keeps following after a daemon restart starts a new log.
+        cmd.arg("-F");
+    }
+    crate::runtime::run_attached(cmd.arg(log))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1926,6 +1967,24 @@ mod tests {
             std::fs::create_dir_all(devnet.home.sessions_dir().join(name)).unwrap();
         }
         assert_eq!(devnet.stopped_sessions(), ["alice", "bob"]);
+    }
+
+    #[test]
+    fn all_logs_cover_every_session_and_the_hub() {
+        let dir = tempfile::tempdir().unwrap();
+        let devnet = devnet_in(&dir.path().join("home"));
+        assert!(devnet.daemon_logs().is_empty());
+        for name in ["bob", "alice"] {
+            std::fs::create_dir_all(devnet.home.sessions_dir().join(name)).unwrap();
+        }
+        std::fs::create_dir_all(devnet.home.messaging_dir()).unwrap();
+        let logs = devnet.daemon_logs();
+        let labels: Vec<&str> = logs.iter().map(|(label, _)| label.as_str()).collect();
+        assert_eq!(labels, ["session alice", "session bob", "hub"]);
+        assert_eq!(
+            logs[2].1,
+            devnet.home.messaging_dir().join("logosctl/logs/daemon.log")
+        );
     }
 
     #[test]

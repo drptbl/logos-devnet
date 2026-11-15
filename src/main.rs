@@ -111,10 +111,13 @@ enum Command {
     /// Show an account: balance, nonce and data, its id in base58 and hex. Takes
     /// `Public/<id>`, base58, hex or a deployed program's name.
     Account { account: String },
-    /// Print the sequencer's log, or a session's or the hub's.
+    /// Print the sequencer's log, or a session's or the hub's, or all of them.
     Logs {
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with = "all")]
         follow: bool,
+        /// Every log in turn: the sequencer's, each session's and the hub's.
+        #[arg(long, conflicts_with_all = ["session", "hub"])]
+        all: bool,
         /// A session's logosctl daemon log, with its modules' output.
         #[arg(long, conflicts_with = "hub")]
         session: Option<String>,
@@ -266,10 +269,12 @@ fn main() -> Result<()> {
             json,
         ),
         Command::Account { account } => emit(&devnet.account(&account)?, json),
+        Command::Logs { all: true, .. } => devnet.logs_all(),
         Command::Logs {
             follow,
             session,
             hub,
+            ..
         } => devnet.logs(follow, session.as_deref(), hub),
         Command::Session(command) => match command {
             SessionCommand::New {
