@@ -752,17 +752,20 @@ impl Devnet {
 
     /// Restarts each of `names`' daemons, in order, and brings it back as `up` does: a fresh
     /// start for modules that keep state while loaded, e.g. `libp2p_module`, which advertises one
-    /// service per load. Their packages, keys and funded wallets stay. Every name is checked
-    /// first, so a typo restarts none.
+    /// service per load. Their packages, keys and funded wallets stay. Every session is checked
+    /// first, so a typo or a broken one restarts none.
     pub fn session_restart(&self, names: &[String]) -> Result<Done> {
+        // A session that can't come back stays as it is, and so do the others.
         let sessions = names
             .iter()
-            .map(|name| self.existing_session(name))
+            .map(|name| {
+                let session = self.existing_session(name)?;
+                session.info()?;
+                Ok(session)
+            })
             .collect::<Result<Vec<_>>>()?;
         self.require_running()?;
         for session in &sessions {
-            // A session that can't come back stays as it is.
-            session.info()?;
             session.logosctl().stop()?;
             self.resume_session(session, false)
                 .with_context(|| format!("restarting session {}", session.name))?;
@@ -1905,9 +1908,18 @@ mod tests {
         let devnet = devnet_in(&dir.path().join("home"));
         let err = devnet.session_restart(&["nobody".into()]).unwrap_err();
         assert!(err.to_string().contains("no session nobody"), "{err}");
-        std::fs::create_dir_all(devnet.home.sessions_dir().join("alice")).unwrap();
+        let alice = devnet.home.sessions_dir().join("alice");
+        std::fs::create_dir_all(&alice).unwrap();
+        let info = format!(r#"{{"modules":["lez_core"],"account":"{ID}","funded":1}}"#);
+        std::fs::write(alice.join("session.json"), info).unwrap();
         let err = devnet.session_restart(&["alice".into()]).unwrap_err();
         assert!(err.to_string().contains("not running"), "{err}");
+        // A session that couldn't come back is found before any restarts.
+        std::fs::create_dir_all(devnet.home.sessions_dir().join("bob")).unwrap();
+        let err = devnet
+            .session_restart(&["alice".into(), "bob".into()])
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("session bob is incomplete"), "{err:#}");
         // Every name is checked before any session restarts.
         let err = devnet
             .session_restart(&["alice".into(), "nobody".into()])
