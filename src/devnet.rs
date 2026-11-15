@@ -1101,11 +1101,16 @@ impl Devnet {
     /// the ones added.
     fn add_session_modules(&self, session: &Session, extra: &[String]) -> Result<Vec<String>> {
         let mut info = session.info()?;
-        let missing = session::missing_modules(&info.modules, extra)?;
+        let ctl = session.logosctl();
+        let had = info.modules.clone();
+        let missing =
+            session::missing_modules(&mut info.modules, extra, |m| ctl.installed_version(m))?;
+        if info.modules != had {
+            session.save_info(&info)?;
+        }
         if missing.is_empty() {
             return Ok(missing);
         }
-        let ctl = session.logosctl();
         if session.start_daemon(&ctl, self.settings.dev_mode, &self.session_storage())? {
             // A daemon that started now has nothing loaded: bring the session back first.
             ctl.resume(
