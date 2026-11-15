@@ -147,12 +147,13 @@ impl Home {
 
     /// This home, downloading into `~/.logos-devnet/downloads` like every other home, so a
     /// project's own home or a worktree's doesn't download the same files again. Each file is
-    /// checked against its SHA-256 before use, whichever home put it there. Without `HOME`,
-    /// the home keeps its own.
+    /// checked against its SHA-256 before use, whichever home put it there. Without `HOME`, or
+    /// when that directory can't be made, the home keeps its own.
     pub fn with_shared_downloads(self) -> Self {
-        match default_root() {
-            Ok(root) => self.with_downloads(root.join("downloads")),
-            Err(_) => self,
+        let shared = default_root().map(|root| root.join("downloads"));
+        match shared {
+            Ok(dir) if std::fs::create_dir_all(&dir).is_ok() => self.with_downloads(dir),
+            _ => self,
         }
     }
 
