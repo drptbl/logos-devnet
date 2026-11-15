@@ -776,8 +776,16 @@ impl Devnet {
         Ok(Done { message })
     }
 
-    /// The sessions whose logosctl daemon doesn't run.
-    pub fn stopped_sessions(&self) -> Vec<String> {
+    /// The sessions whose daemon stopped while the chain runs, which `up` starts again. After
+    /// `down` every daemon is stopped, and without logosctl none can be asked: neither is news.
+    pub fn stopped_sessions(&self, chain_running: bool) -> Vec<String> {
+        if !chain_running || !session::logosctl_on_path() {
+            return Vec::new();
+        }
+        self.sessions_not_running()
+    }
+
+    fn sessions_not_running(&self) -> Vec<String> {
         self.sessions()
             .into_iter()
             .filter(|s| !s.logosctl().running())
@@ -969,12 +977,7 @@ impl Devnet {
             programs,
             account_groups: self.group_summaries().unwrap_or_default(),
             sessions: self.sessions().into_iter().map(|s| s.name).collect(),
-            // After `down`, every daemon is stopped, and that's no news.
-            sessions_stopped: if running {
-                self.stopped_sessions()
-            } else {
-                Vec::new()
-            },
+            sessions_stopped: self.stopped_sessions(running),
             messaging: self.hub_status(),
             storage: self.storage_status(),
             env_file: env.map(|_| self.home.env_file()),
@@ -1967,11 +1970,13 @@ mod tests {
     fn names_sessions_whose_daemon_is_stopped() {
         let dir = tempfile::tempdir().unwrap();
         let devnet = devnet_in(&dir.path().join("home"));
-        assert!(devnet.stopped_sessions().is_empty());
+        assert!(devnet.sessions_not_running().is_empty());
         for name in ["bob", "alice"] {
             std::fs::create_dir_all(devnet.home.sessions_dir().join(name)).unwrap();
         }
-        assert_eq!(devnet.stopped_sessions(), ["alice", "bob"]);
+        assert_eq!(devnet.sessions_not_running(), ["alice", "bob"]);
+        // After `down`, a stopped daemon is no news.
+        assert!(devnet.stopped_sessions(false).is_empty());
     }
 
     #[test]
