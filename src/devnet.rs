@@ -23,7 +23,7 @@ use crate::report::{
     Sessions, Status, WalletConfig,
 };
 use crate::rpc::Rpc;
-use crate::runtime::{BATCH_CHUNK, Docker, Native, Runtime, WalletArg};
+use crate::runtime::{BATCH_CHUNK, Docker, Native, Runtime, WalletArg, log_line_text};
 use crate::session::{self, Session, SessionInfo};
 
 /// The faucet's genesis balance in lepta: enough that a devnet never runs dry.
@@ -32,14 +32,17 @@ const FAUCET_BALANCE: u64 = 1_000_000_000_000_000_000;
 const FAUCET_LABEL: &str = "faucet";
 /// What `fund`, sessions and account groups send when no amount is given.
 pub const DEFAULT_FUND: u64 = 10_000_000_000;
-/// How `up` waits for a starting sequencer's first block. A long chain loads for minutes first
-/// (166k blocks took 15), logging as it goes, so `up` waits as long as the log grows.
+/// How `up` waits for a starting sequencer's first block. A long chain replays first, logging
+/// a different line for each block (186k blocks took 34 min), so `up` waits as long as the log
+/// shows something new. A sequencer stuck repeating one line counts as quiet.
 const READY_WAIT: ReadyWait = ReadyWait {
     quiet: Duration::from_secs(180),
-    limit: Duration::from_secs(3600),
+    limit: Duration::from_secs(4 * 3600),
     poll: Duration::from_millis(500),
     log_every: Duration::from_secs(10),
 };
+/// How many of the sequencer's recent distinct last lines `up` remembers while it waits.
+const RECENT_LINES: usize = 32;
 /// When `up` says it's still waiting, and then how often.
 const LOADING_NOTICE: Duration = Duration::from_secs(30);
 const LOADING_NOTICE_EVERY: Duration = Duration::from_secs(120);
@@ -871,7 +874,7 @@ impl Devnet {
             &Startup {
                 serves: &|| rpc.last_block_id().is_ok_and(|head| head >= 1),
                 running: &|| self.runtime.running(),
-                log_mark: &|| self.runtime.log_mark(),
+                log_mark: &|| self.runtime.last_log_line().map(|l| log_line_text(&l)),
             },
             &READY_WAIT,
         )
@@ -1837,9 +1840,9 @@ fn labelled(list: &str, label: &str) -> Option<PublicId> {
 
 /// How long `wait_for_blocks` waits.
 struct ReadyWait {
-    /// The longest the sequencer's log may go without a new line.
+    /// The longest the sequencer's log may go without a line it didn't just write.
     quiet: Duration,
-    /// The longest it waits in all, however busy the log.
+    /// The longest it waits in all, however busy the log: a last resort, under CI's 6 h.
     limit: Duration,
     /// How often it asks for a block.
     poll: Duration,
@@ -1853,16 +1856,18 @@ struct Startup<'a> {
     serves: &'a dyn Fn() -> bool,
     /// Whether it still runs.
     running: &'a dyn Fn() -> bool,
-    /// Something that changes whenever it writes to its log, e.g. its last line.
+    /// Its last log line, without the time, or `None` when it can't be read.
     log_mark: &'a dyn Fn() -> Option<String>,
 }
 
-/// Waits until the sequencer serves a block. It may take as long as it keeps writing to its
-/// log, up to `wait.limit`: it fails after `wait.quiet` without a new line, or when the
+/// Waits until the sequencer serves a block. It may take as long as its log shows something new,
+/// up to `wait.limit`: it fails after `wait.quiet` with the same last line, or when the
 /// sequencer stops. A log that can't be read counts as busy, since not knowing isn't quiet.
 fn wait_for_blocks(startup: &Startup, wait: &ReadyWait) -> Result<()> {
     let start = Instant::now();
-    let mut mark = (startup.log_mark)();
+    // Recent distinct last lines: one among them is no news, so a sequencer going round a
+    // short loop, e.g. an error and a retry, counts as quiet.
+    let mut recent: std::collections::VecDeque<String> = (startup.log_mark)().into_iter().collect();
     let mut last_change = start;
     let mut last_check = start;
     let mut next_notice = LOADING_NOTICE;
@@ -1875,32 +1880,39 @@ fn wait_for_blocks(startup: &Startup, wait: &ReadyWait) -> Result<()> {
         }
         if last_check.elapsed() >= wait.log_every {
             last_check = Instant::now();
-            let now = (startup.log_mark)();
-            if now.is_none() || now != mark {
-                mark = now;
-                last_change = last_check;
+            match (startup.log_mark)() {
+                // Not knowing isn't quiet.
+                None => last_change = last_check,
+                Some(line) if !recent.contains(&line) => {
+                    if recent.len() == RECENT_LINES {
+                        recent.pop_front();
+                    }
+                    recent.push_back(line);
+                    last_change = last_check;
+                }
+                Some(_) => {}
             }
         }
         if last_change.elapsed() > wait.quiet {
             bail!(
-                "no block, and nothing in the sequencer's log for {} s. See `logos-devnet logs`",
+                "no block, and nothing new in the sequencer's log for {} s. See `logos-devnet logs`",
                 wait.quiet.as_secs()
             );
         }
         let waited = start.elapsed();
         if waited > wait.limit {
             bail!(
-                "no block within {} min, though the sequencer keeps logging. See `logos-devnet \
-                 logs`",
-                wait.limit.as_secs() / 60
+                "no block within {}, though the sequencer keeps logging. See `logos-devnet logs`",
+                duration_text(wait.limit)
             );
         }
         if waited >= next_notice {
             eprintln!(
                 "No block yet after {}: a long chain takes a while to load. Waiting as long as \
-                 the sequencer keeps logging, up to {} min; `logos-devnet logs -f` shows it.",
+                 the sequencer's log shows something new, up to {}; `logos-devnet logs -f` shows \
+                 it.",
                 duration_text(waited),
-                wait.limit.as_secs() / 60
+                duration_text(wait.limit)
             );
             next_notice += LOADING_NOTICE_EVERY;
         }
@@ -1908,11 +1920,12 @@ fn wait_for_blocks(startup: &Startup, wait: &ReadyWait) -> Result<()> {
     }
 }
 
-/// `30 s`, or `4 min` from two minutes on.
+/// `30 s`, `4 min` from two minutes on, or `4 h` from two hours on.
 fn duration_text(d: Duration) -> String {
     match d.as_secs() {
         s if s < 120 => format!("{s} s"),
-        s => format!("{} min", s / 60),
+        s if s < 7200 => format!("{} min", s / 60),
+        s => format!("{} h", s / 3600),
     }
 }
 
@@ -2124,6 +2137,8 @@ mod tests {
     enum Log {
         Busy,
         Quiet,
+        /// Two lines in turn, as a sequencer retrying an error logs them.
+        Looping,
         Unreadable,
     }
 
@@ -2135,6 +2150,10 @@ mod tests {
         let log_mark = move || match log {
             Log::Busy => Some(format!("{:?}", start.elapsed())),
             Log::Quiet => Some("the same line".to_owned()),
+            Log::Looping => Some(
+                ["error: no peer", "retrying in 5s"][start.elapsed().as_millis() as usize / 10 % 2]
+                    .to_owned(),
+            ),
             Log::Unreadable => None,
         };
         wait_for_blocks(
@@ -2154,15 +2173,27 @@ mod tests {
 
     #[test]
     fn waits_while_a_long_chain_loads() {
-        // Replaying 166k blocks took 15 min, far past the quiet limit, the log busy throughout.
+        // Replaying 186k blocks took 34 min, far past the quiet limit, the log busy throughout.
         starting_for(Duration::from_millis(600), Log::Busy, None).unwrap();
     }
 
     #[test]
     fn gives_up_on_a_sequencer_that_went_quiet() {
         let err = starting_for(Duration::from_secs(60), Log::Quiet, None).unwrap_err();
+        // A sequencer stuck repeating one line, e.g. retrying an error, never got further.
         assert!(
-            err.to_string().contains("nothing in the sequencer's log"),
+            err.to_string()
+                .contains("nothing new in the sequencer's log"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn gives_up_on_a_sequencer_going_round_in_a_loop() {
+        let err = starting_for(Duration::from_secs(60), Log::Looping, None).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("nothing new in the sequencer's log"),
             "{err}"
         );
     }
@@ -2185,6 +2216,7 @@ mod tests {
     fn says_how_long_it_waited() {
         assert_eq!(duration_text(Duration::from_secs(30)), "30 s");
         assert_eq!(duration_text(Duration::from_secs(250)), "4 min");
+        assert_eq!(duration_text(Duration::from_secs(4 * 3600)), "4 h");
     }
 
     #[test]

@@ -89,9 +89,33 @@ pub trait Runtime {
     fn wallet_batch(&self, home: &Path, runs: &[Vec<String>]) -> Result<Vec<String>>;
     /// Prints the sequencer's log.
     fn logs(&self, follow: bool) -> Result<()>;
-    /// Something that changes whenever the sequencer writes to its log, to tell one still
-    /// working from one that went quiet. `None` when it can't be read.
-    fn log_mark(&self) -> Option<String>;
+    /// The sequencer's last log line, empty while it has logged nothing, to tell one still
+    /// working from one that went quiet or repeats itself. `None` when it can't be read.
+    fn last_log_line(&self) -> Option<String>;
+}
+
+/// A sequencer log line without the time it starts with, `[2026-11-15T18:45:51Z INFO ...`, so
+/// a line repeated later reads the same.
+pub(crate) fn log_line_text(line: &str) -> String {
+    let line = line.trim();
+    let text = line
+        .strip_prefix('[')
+        .and_then(|rest| rest.split_once(' '))
+        .map_or(line, |(_, rest)| rest);
+    text.to_owned()
+}
+
+/// The last non-empty line of the file at `path`, read from its end: empty when it has none.
+pub(crate) fn last_line(path: &Path) -> Option<String> {
+    use std::io::{Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(8192))).ok()?;
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail).ok()?;
+    let tail = String::from_utf8_lossy(&tail);
+    let line = tail.lines().rev().find(|l| !l.trim().is_empty());
+    Some(line.unwrap_or_default().to_owned())
 }
 
 /// Runs `cmd` with stdin closed and returns its stdout. On failure the error carries both
@@ -335,6 +359,33 @@ fn combined(output: &Output) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_log_line_without_its_time() {
+        let at = |t: &str| {
+            format!("[2026-11-15T18:45:{t}Z INFO  risc0_zkvm::exec] execution time: 1.3ms")
+        };
+        assert_eq!(log_line_text(&at("51")), log_line_text(&at("52")));
+        assert_eq!(
+            log_line_text(&at("51")),
+            "INFO  risc0_zkvm::exec] execution time: 1.3ms"
+        );
+        assert_eq!(log_line_text("plain\n"), "plain");
+    }
+
+    #[test]
+    fn reads_the_last_line_of_a_long_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("sequencer.log");
+        let mut text = "x".repeat(20_000);
+        text.push_str("\nfirst\nlast line\n");
+        std::fs::write(&log, text).unwrap();
+        assert_eq!(last_line(&log).as_deref(), Some("last line"));
+        assert_eq!(last_line(&dir.path().join("missing")), None);
+        // A sequencer that has logged nothing yet is quiet, not unknown.
+        std::fs::write(&log, "").unwrap();
+        assert_eq!(last_line(&log).as_deref(), Some(""));
+    }
 
     #[test]
     fn gives_up_on_a_command_that_hangs() {
