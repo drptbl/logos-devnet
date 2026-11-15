@@ -178,29 +178,97 @@ pub fn list(dir: &Path) -> Result<Vec<Session>> {
 }
 
 /// The modules `extra` adds (as `modules_with` takes them) that a session with `have` lacks, in
-/// order. A module left out of `extra` is not removed.
-pub fn missing_modules(have: &[String], extra: &[String]) -> Result<Vec<String>> {
-    Ok(modules_with(extra)?
-        .into_iter()
-        .filter(|module| !have.contains(module))
-        .collect())
+/// order. A module left out of `extra` is not removed. A session keeps the version it
+/// installed: asking for another one is refused, since only a new session takes it. A pin on a
+/// module the session installed unpinned is checked against `installed`, the version its daemon
+/// reports, and recorded in `have` when it matches.
+pub fn missing_modules(
+    have: &mut [String],
+    extra: &[String],
+    installed: impl Fn(&str) -> Result<Option<String>>,
+) -> Result<Vec<String>> {
+    let wanted = modules_with(extra)?;
+    let mut missing = Vec::new();
+    let mut pinned = Vec::new();
+    for module in wanted {
+        let (name, Some(version)) = split_module(&module) else {
+            if !have.iter().any(|h| split_module(h).0 == module) {
+                missing.push(module);
+            }
+            continue;
+        };
+        let Some(at) = have.iter().position(|h| split_module(h).0 == name) else {
+            missing.push(module);
+            continue;
+        };
+        let had = match pinned_version(&have[at]) {
+            Some(had) => had.to_owned(),
+            None => installed(name)?.unwrap_or_default(),
+        };
+        if had != version {
+            bail!(
+                "the session has {name} {had}, not {version}: `logos-devnet session rm` it, and \
+                 `up` makes it again with {module}"
+            );
+        }
+        pinned.push((at, module.clone()));
+    }
+    // Recorded only once every pin checks out, so a refusal changes nothing.
+    for (at, module) in pinned {
+        have[at] = module;
+    }
+    Ok(missing)
 }
 
-/// The modules a session installs: `lez_core`, then the extras in order, without repeats.
+/// The modules a session installs: `lez_core`, then the extras in order, one per name. A
+/// version given for a name replaces the one before.
 pub fn modules_with(extra: &[String]) -> Result<Vec<String>> {
     let mut modules = vec![LEZ_CORE.to_owned()];
     for module in extra {
         check_module(module)?;
-        if !modules.contains(module) {
-            modules.push(module.clone());
+        let (name, version) = split_module(module);
+        match modules.iter().position(|m| split_module(m).0 == name) {
+            Some(i) if version.is_some() => modules[i] = module.clone(),
+            Some(_) => {}
+            None => modules.push(module.clone()),
         }
     }
     Ok(modules)
 }
 
-/// A catalog module name: letters, digits, `_` and `-`, starting with a letter or digit, so a
-/// name can't reach logosctl as a flag.
-fn check_module(name: &str) -> Result<()> {
+/// A module as a session lists it, `name` or `name@version`: its name and the version asked for.
+fn split_module(module: &str) -> (&str, Option<&str>) {
+    match module.split_once('@') {
+        Some((name, version)) => (name, Some(version)),
+        None => (module, None),
+    }
+}
+
+/// The version `install` takes for `module`: the one it names, else `lez_core`'s pin, else the
+/// catalog's latest (`None`).
+fn pinned_version(module: &str) -> Option<&str> {
+    match split_module(module) {
+        (_, Some(version)) => Some(version),
+        (LEZ_CORE, None) => Some(LEZ_CORE_VERSION),
+        _ => None,
+    }
+}
+
+/// A catalog module, `name` or `name@version`, with a version a package version, so neither
+/// can reach logosctl as a flag.
+fn check_module(module: &str) -> Result<()> {
+    let (name, version) = split_module(module);
+    check_module_name(name)?;
+    if let Some(version) = version
+        && !version_ok(version)
+    {
+        bail!("not a package version: {module:?}, e.g. chat_module@0.3.0");
+    }
+    Ok(())
+}
+
+/// A catalog module name: letters, digits, `_` and `-`, starting with a letter or digit.
+fn check_module_name(name: &str) -> Result<()> {
     let ok = name
         .chars()
         .next()
@@ -349,7 +417,8 @@ impl Logosctl {
     }
 
     /// Installs `modules` from the catalog, unsigned ones included (`lez_core` is unsigned).
-    /// `lez_core` is pinned to `LEZ_CORE_VERSION`, the others are the catalog's latest. Each
+    /// Each at the version it names (`name@version`), else `lez_core` at `LEZ_CORE_VERSION` and
+    /// the others at the catalog's latest. Each
     /// package a module needs, dependencies included, is downloaded once into `packages` and
     /// installed from there, so the next daemon that needs it doesn't download it again.
     pub fn install(&self, modules: &[String], packages: &Path) -> Result<()> {
@@ -365,9 +434,9 @@ impl Logosctl {
 
     /// Installs what `package install <module>` would, package by package, from `packages`.
     fn install_one(&self, module: &str, packages: &Path) -> Result<()> {
-        let mut plan = vec!["package", "install", module];
-        if module == LEZ_CORE {
-            plan.extend(["--version", LEZ_CORE_VERSION]);
+        let mut plan = vec!["package", "install", split_module(module).0];
+        if let Some(version) = pinned_version(module) {
+            plan.extend(["--version", version]);
         }
         plan.push("--dry-run");
         let plan = self.run(&plan)?;
@@ -380,7 +449,7 @@ impl Logosctl {
             else {
                 continue;
             };
-            check_module(name)?;
+            check_module_name(name)?;
             check_version(version)?;
             let file = self.cached_package(name, version, packages)?;
             self.run(&["package", "install", &path_text(&file), "--yes"])?;
@@ -439,6 +508,18 @@ impl Logosctl {
             .map(str::to_ascii_lowercase))
     }
 
+    /// The version of `module` installed in the daemon, if it is.
+    pub fn installed_version(&self, module: &str) -> Result<Option<String>> {
+        let listed = self.run(&["package", "ls"])?;
+        Ok(listed
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|m| m["name"] == module)
+            .and_then(|m| m["version"].as_str())
+            .map(str::to_owned))
+    }
+
     /// The modules loaded in the daemon, declared or loaded for another one.
     pub fn loaded_modules(&self) -> Result<Vec<String>> {
         let listed = self.run(&["module", "ls"])?;
@@ -456,7 +537,8 @@ impl Logosctl {
     /// Loads the `modules` that aren't loaded yet.
     pub fn load(&self, modules: &[String]) -> Result<()> {
         let listed = self.run(&["module", "ls"])?;
-        for module in modules.iter().filter(|m| !module_loaded(&listed, m)) {
+        let names = modules.iter().map(|m| split_module(m).0);
+        for module in names.filter(|m| !module_loaded(&listed, m)) {
             self.run(&["module", "load", module])
                 .with_context(|| format!("loading {module}"))?;
         }
@@ -561,17 +643,20 @@ fn install_hint(e: anyhow::Error) -> anyhow::Error {
 /// A package version as the catalog gives it, e.g. `0.5.1`: it reaches logosctl's argv and a
 /// file name, so never a flag or a path.
 fn check_version(version: &str) -> Result<()> {
-    let ok = version
+    if !version_ok(version) {
+        bail!("the catalog gave an odd version: {version}");
+    }
+    Ok(())
+}
+
+fn version_ok(version: &str) -> bool {
+    version
         .chars()
         .next()
         .is_some_and(|c| c.is_ascii_alphanumeric())
         && version
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'));
-    if !ok {
-        bail!("the catalog gave an odd version: {version}");
-    }
-    Ok(())
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
 }
 
 /// `logosctl call`'s arguments, each of `args` as a string.
@@ -733,20 +818,79 @@ esac"#,
         )
     }
 
+    /// `missing_modules` on a copy of `have`, with `installed` as what the daemon reports:
+    /// the modules missing, or the error, and `have` afterwards.
+    fn reconcile(
+        have: &[&str],
+        extra: &[&str],
+        installed: Option<&str>,
+    ) -> (Result<Vec<String>>, Vec<String>) {
+        let mut have: Vec<String> = have.iter().map(|m| (*m).to_owned()).collect();
+        let extra: Vec<String> = extra.iter().map(|m| (*m).to_owned()).collect();
+        let missing = missing_modules(&mut have, &extra, |_| Ok(installed.map(str::to_owned)));
+        (missing, have)
+    }
+
     #[test]
     fn finds_the_modules_a_session_lacks() {
-        let have = ["lez_core".to_owned(), "chat_module".to_owned()];
-        let wanted = |extra: &[&str]| {
-            let extra: Vec<String> = extra.iter().map(|m| (*m).to_owned()).collect();
-            missing_modules(&have, &extra).unwrap()
-        };
+        let have = ["lez_core", "chat_module"];
+        let wanted = |extra: &[&str]| reconcile(&have, extra, None).0.unwrap();
         assert!(wanted(&["chat_module"]).is_empty());
         assert_eq!(
             wanted(&["chat_module", "storage_module"]),
             ["storage_module"]
         );
         assert!(wanted(&[]).is_empty(), "a module left out stays installed");
-        assert!(missing_modules(&have, &["Bad Name".to_owned()]).is_err());
+        assert!(reconcile(&have, &["Bad Name"], None).0.is_err());
+        assert_eq!(wanted(&["storage_module@1.0.0"]), ["storage_module@1.0.0"]);
+    }
+
+    #[test]
+    fn a_session_keeps_the_version_it_installed() {
+        let have = ["lez_core", "chat_module@0.3.0"];
+        let missing = |extra: &str| reconcile(&have, &[extra], None).0;
+        assert!(missing("chat_module@0.3.0").unwrap().is_empty());
+        assert!(missing("chat_module").unwrap().is_empty());
+        assert!(
+            missing("lez_core@0.5.1").unwrap().is_empty(),
+            "lez_core's pin"
+        );
+        // Another version would need the session made again: say so, rather than ignore it.
+        let err = missing("chat_module@0.4.0").unwrap_err();
+        assert!(format!("{err:#}").contains("session rm"), "{err:#}");
+    }
+
+    #[test]
+    fn a_pin_on_what_a_session_installed_unpinned_asks_the_daemon() {
+        let have = ["lez_core", "chat_module"];
+        // The version it installed then: the pin is recorded, nothing installs.
+        let (missing, after) = reconcile(&have, &["chat_module@0.3.0"], Some("0.3.0"));
+        assert!(missing.unwrap().is_empty());
+        assert_eq!(after, ["lez_core", "chat_module@0.3.0"]);
+        // Another one: refused, and nothing recorded.
+        let (missing, after) = reconcile(&have, &["chat_module@0.4.0"], Some("0.3.0"));
+        let err = missing.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("has chat_module 0.3.0"),
+            "{err:#}"
+        );
+        assert_eq!(after, have);
+    }
+
+    #[test]
+    fn reads_a_module_version_from_the_daemon() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctl = fake_logosctl(
+            dir.path(),
+            r#"case "$2 $3" in
+  "package ls") echo '[{"name":"lez_core","version":"0.5.1"},{"name":"chat_module","version":"0.3.0"}]' ;;
+esac"#,
+        );
+        assert_eq!(
+            ctl.installed_version("chat_module").unwrap().as_deref(),
+            Some("0.3.0")
+        );
+        assert_eq!(ctl.installed_version("storage_module").unwrap(), None);
     }
 
     #[test]
@@ -1009,6 +1153,35 @@ esac"#,
         assert_eq!(modules, ["lez_core", "chat_module"]);
         assert!(modules_with(&["bad name".into()]).is_err());
         assert!(modules_with(&["--yes".into()]).is_err(), "never a flag");
+    }
+
+    #[test]
+    fn takes_a_module_at_a_version() {
+        let modules = modules_with(&["chat_module@0.2.0".into(), "lez_core@0.5.2".into()]).unwrap();
+        assert_eq!(modules, ["lez_core@0.5.2", "chat_module@0.2.0"]);
+        for bad in [
+            "chat_module@",
+            "chat_module@--yes",
+            "@0.2.0",
+            "chat_module@0.2/0",
+        ] {
+            assert!(modules_with(&[bad.into()]).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn installs_a_module_at_its_version_and_loads_it_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctl = package_manager(dir.path(), None);
+        ctl.install(&["chat_module@0.3.0".into()], &dir.path().join("packages"))
+            .unwrap();
+        ctl.load(&["chat_module@0.3.0".into()]).unwrap();
+        let log = calls(dir.path());
+        assert!(
+            log.contains("--json package install chat_module --version 0.3.0 --dry-run\n"),
+            "{log}"
+        );
+        assert!(log.contains("module load chat_module\n"), "{log}");
     }
 
     /// A logosctl whose catalog plans `lez_core` alone and `chat_module` with

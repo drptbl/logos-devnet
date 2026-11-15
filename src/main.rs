@@ -111,10 +111,13 @@ enum Command {
     /// Show an account: balance, nonce and data, its id in base58 and hex. Takes
     /// `Public/<id>`, base58, hex or a deployed program's name.
     Account { account: String },
-    /// Print the sequencer's log, or a session's or the hub's.
+    /// Print the sequencer's log, or a session's or the hub's, or all of them.
     Logs {
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with = "all")]
         follow: bool,
+        /// Every log in turn: the sequencer's, each session's and the hub's.
+        #[arg(long, conflicts_with_all = ["session", "hub"])]
+        all: bool,
         /// A session's logosctl daemon log, with its modules' output.
         #[arg(long, conflicts_with = "hub")]
         session: Option<String>,
@@ -157,7 +160,8 @@ enum SessionCommand {
     /// Make a session: its own logosctl daemon with lez_core and a funded devnet wallet.
     New {
         name: String,
-        /// Another module to install from the catalog, e.g. `chat_module`. Repeatable.
+        /// Another module to install from the catalog, e.g. `chat_module`, or
+        /// `chat_module@0.3.0` for that version. Repeatable.
         #[arg(long = "module")]
         modules: Vec<String>,
         /// Lepta to fund the session's account with.
@@ -170,9 +174,12 @@ enum SessionCommand {
     Env { name: String },
     /// Stop a session's daemon and delete it, wallet and all.
     Rm { name: String },
-    /// Restart a session's daemon and load its modules again, wallet and keys kept: a fresh
+    /// Restart sessions' daemons and load their modules again, wallets and keys kept: a fresh
     /// start for modules that keep state while loaded.
-    Restart { name: String },
+    Restart {
+        #[arg(required = true)]
+        names: Vec<String>,
+    },
 }
 
 impl Command {
@@ -215,7 +222,7 @@ fn main() -> Result<()> {
     let home = cli
         .home
         .or_else(|| project.as_ref().and_then(|p| p.home.clone()));
-    let home = Home::locate(home)?;
+    let home = Home::locate(home)?.with_shared_downloads();
     let _lock = cli
         .command
         .changes_devnet()
@@ -263,10 +270,12 @@ fn main() -> Result<()> {
             json,
         ),
         Command::Account { account } => emit(&devnet.account(&account)?, json),
+        Command::Logs { all: true, .. } => devnet.logs_all(),
         Command::Logs {
             follow,
             session,
             hub,
+            ..
         } => devnet.logs(follow, session.as_deref(), hub),
         Command::Session(command) => match command {
             SessionCommand::New {
@@ -277,7 +286,7 @@ fn main() -> Result<()> {
             SessionCommand::Ls => emit(&devnet.session_list()?, json),
             SessionCommand::Env { name } => emit(&devnet.session_env(&name)?, json),
             SessionCommand::Rm { name } => emit(&devnet.session_rm(&name)?, json),
-            SessionCommand::Restart { name } => emit(&devnet.session_restart(&name)?, json),
+            SessionCommand::Restart { names } => emit(&devnet.session_restart(&names)?, json),
         },
         Command::Messaging(MessagingCommand::Rm) => emit(&devnet.messaging_rm()?, json),
     }

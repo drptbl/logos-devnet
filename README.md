@@ -13,7 +13,7 @@ cargo install --locked logos-devnet
 Or take a binary from the [latest release](https://github.com/drptbl/logos-devnet/releases/latest), built for macOS (`aarch64-apple-darwin`, `x86_64-apple-darwin`) and Linux (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, static, so any distribution), and check it against its `.sha256`:
 
 ```bash
-v=v0.8.0 t=aarch64-apple-darwin
+v=v0.9.0 t=aarch64-apple-darwin
 curl -fsSL --remote-name-all https://github.com/drptbl/logos-devnet/releases/download/$v/logos-devnet-$v-$t.tar.gz{,.sha256}
 shasum -a 256 -c logos-devnet-$v-$t.tar.gz.sha256 \
   && tar -xzf logos-devnet-$v-$t.tar.gz \
@@ -40,8 +40,8 @@ source ~/.logos-devnet/env                         # LOGOS_DEVNET_SEQUENCER, LOG
 | `up` | Starts the devnet, or resumes it, and makes it match your `logos-devnet.toml`. Takes `--docker` or `--native`, `--lez <tag>` (a v0.3 tag), `--port`, `--block-time`, `--max-txs-per-block`, `--dev-mode` and `--log-filter`, and remembers them. `--rebuild` builds the image or binaries again. |
 | `down` | Stops it. The chain is kept. |
 | `reset` | Deletes the chain and starts a new one, every account group funded at genesis. Takes the same options as `up`. |
-| `status` | What runs, the chain head, the faucet, programs, account groups, sessions, the messaging hub and local storage. |
-| `doctor` | Checks the project file, Docker and the image (or git and cargo with `--native`), whether the chain takes the project's settings, the `[programs]` files, the port, the hub's ports, the faucet, `curl` for programs from a release and, when sessions or the hub need it, `logosctl`, and says how to fix what fails. |
+| `status` | What runs, the chain head, the faucet, programs, account groups, sessions (and which stopped while the chain runs), the messaging hub and local storage. |
+| `doctor` | Checks the project file, Docker and the image (or git and cargo with `--native`), whether the chain takes the project's settings, the `[programs]` files, the port, the hub's ports, the faucet, sessions that stopped while the chain runs, `curl` for programs from a release and, when sessions or the hub need it, `logosctl`, and says how to fix what fails. |
 | `fund <account> [amount]` | Sends lepta from the faucet to a public account, 10B by default. |
 | `deploy <name> <bin> [--mutable]` | Deploys a program, from its `.bin` (what `cargo risczero build` makes, not the bare ELF), and adds `LOGOS_PROGRAM_<NAME>` and `LOGOS_PROGRAM_<NAME>_HEX` to the env file. Names are lower-case letters, digits and `-`. With `--mutable`, a new build updates it in place. |
 | `wallet-config <dir>` | Writes a `wallet_config.json` pointing at the devnet into a new wallet directory. |
@@ -50,9 +50,10 @@ source ~/.logos-devnet/env                         # LOGOS_DEVNET_SEQUENCER, LOG
 | `tx <hash> [--wait] [--timeout <s>]` | Shows which block holds a transaction, by its 64-hex hash. `--wait` waits until one does, instead of a `sleep`, and fails after 60 s. |
 | `account <id>` | Shows an account's balance, nonce and data, and its id in base58 and hex. Takes `Public/<id>`, base58, hex as `lez_core` prints it, or a deployed program's name. |
 | `logs [-f] [--session <name> \| --hub]` | Prints the sequencer's log, or a session's or the hub's daemon log, with its modules' output. |
-| `session new <name> [--module <m>]` | Makes a `logosctl` session with a funded devnet wallet, see below. |
+| `logs --all` | Prints every log in turn: the sequencer's, each session's and the hub's, for a CI step after a failed test. |
+| `session new <name> [--module <m>]` | Makes a `logosctl` session with a funded devnet wallet, see below. `--module chat_module@0.3.0` installs that version. |
 | `session ls`, `session env <name>`, `session rm <name>` | Lists sessions, prints one's env to `source`, deletes one. |
-| `session restart <name>` | Restarts a session's daemon and loads its modules again, keeping its packages, keys and funded wallet: a fresh start for a module that keeps state while loaded, safer than `logosctl module reload`. Calls in flight fail, and modules an app loaded itself need loading again. |
+| `session restart <name>...` | Restarts each session's daemon in turn and loads its modules again, keeping its packages, keys and funded wallet: a fresh start for a module that keeps state while loaded, safer than `logosctl module reload`. Calls in flight fail, and modules an app loaded itself need loading again. |
 | `accounts new <name> --count <n> [--amount <a>]` | Makes a group of funded accounts, see below. |
 | `accounts ls` | Lists account groups. |
 | `messaging rm` | Stops the messaging hub and deletes it, see below. |
@@ -93,16 +94,16 @@ count = 100
 amount = 5_000_000_000   # lepta each, 10B when left out
 
 [sessions.alice]         # a logosctl session, as session new
-modules = ["chat_module"]
+modules = ["chat_module"]   # or "chat_module@0.3.0" for that version
 
 [messaging]              # a local messaging hub, see Messaging
 ```
 
-A program can come from a release instead of a path: `up` downloads its `url` once, with `curl`, into the home, and deploys it only if its SHA-256 is the `sha256` given (as `shasum -a 256` prints it).
+A program can come from a release instead of a path: `up` downloads its `url` once, with `curl`, into `~/.logos-devnet/downloads`, which every home shares, and deploys it only if its SHA-256 is the `sha256` given (as `shasum -a 256` prints it).
 
-`up` deploys missing programs, makes and funds missing accounts and sessions, and changes nothing the second time (0.6 s). A `mutable` program whose binary changed is updated in place, with the same id. An immutable one keeps its old build, and `up` and `deploy` fail saying so, so tests don't run against it: `reset` deploys the new build. A module added to a session's `modules` is installed into it. `up` checks the whole file before it touches the devnet.
+`up` deploys missing programs, makes and funds missing accounts and sessions, and changes nothing the second time (0.6 s). A `mutable` program whose binary changed is updated in place, with the same id. An immutable one keeps its old build, and `up` and `deploy` fail saying so, so tests don't run against it: `reset` deploys the new build. A module added to a session's `modules` is installed into it. Modules come from the catalog at its latest version, `lez_core` at `0.5.1`, unless the file names one: `chat_module@0.3.0`. A session keeps the versions it was made with, so `up` refuses another version for an existing one: `session rm` it, and `up` makes it again. A pin on what it installed unpinned is checked against the version its daemon reports, and recorded when it matches. `up` checks the whole file before it touches the devnet.
 
-Projects share one devnet, `~/.logos-devnet` on port 3040, unless the file sets `home`, e.g. `home = ".logos-devnet"`, for a devnet of the project's own. Give it `[devnet] port = 0` too: it takes a free port on the first `up` and keeps it, so it runs next to other devnets, and `logos-devnet env` shows it. With a fixed `port` in the file, `--port` applies for that run, and the next `up` goes back to the file's port. With `port = 0`, `--port` is remembered. On a shared devnet, a `[devnet]` section that disagrees with the running chain is refused rather than restarting the chain under the other projects: `down` and `up` apply it, or `reset` for `lez` and `dev_mode`, which only a new chain takes. A `reset` there funds every project's account groups again, and each project's next `up` deploys its programs on the new chain.
+Projects share one devnet, `~/.logos-devnet` on port 3040, unless the file sets `home`, e.g. `home = ".logos-devnet"`, for a devnet of the project's own. Downloads stay shared. Give it `[devnet] port = 0` too: it takes a free port on the first `up` and keeps it, so it runs next to other devnets, and `logos-devnet env` shows it. With a fixed `port` in the file, `--port` applies for that run, and the next `up` goes back to the file's port. With `port = 0`, `--port` is remembered. On a shared devnet, a `[devnet]` section that disagrees with the running chain is refused rather than restarting the chain under the other projects: `down` and `up` apply it, or `reset` for `lez` and `dev_mode`, which only a new chain takes. A `reset` there funds every project's account groups again, and each project's next `up` deploys its programs on the new chain.
 
 ## Many accounts
 
@@ -248,7 +249,7 @@ Everything is in `~/.logos-devnet` (or `LOGOS_DEVNET_HOME`):
 | `sessions/` | one directory per session: its `logosctl` home, its daemon's `HOME` with its storage, wallet and `session.json` |
 | `accounts/` | one directory per account group: its wallet and `accounts.json` |
 | `programs.json` | the binary hash each program was deployed from |
-| `downloads/` | program binaries the project file names by URL, by SHA-256, and in `packages/` the module packages every daemon installs from, downloaded once and checked against the catalog's SHA-256 |
+| `downloads/` | program binaries the project file names by URL, by SHA-256, and in `packages/` the module packages every daemon installs from, downloaded once and checked against the catalog's SHA-256. Every home uses the one in `~/.logos-devnet`, so a project's own home or a worktree's doesn't download them again. One left in another home from before v0.9.0 can be deleted |
 | `messaging/` | the hub, for `[messaging]` and `[storage]`: its `logosctl` home, its daemon's `HOME`, message store, ports and node keys in `hub.json` |
 | `lock` | held while a command changes the devnet, so two projects sharing the home take turns |
 
@@ -260,7 +261,7 @@ With `--json`, a command prints one JSON document and nothing else on stdout. No
 
 | Command | Fields |
 | --- | --- |
-| `up`, `reset`, `status` | `lez`, `runtime`, `sequencer` (`url`, `running`, `runtime_answered`, `block`, `max_txs_per_block`, `block_time`, `dev_mode`), `faucet` (`account`, `balance`), `programs`, `account_groups`, `sessions`, `messaging` (`running`, `delivery_node`, `discovery_node`, `delivery`, `discovery`, or `null` without a hub), `storage` (`running`, or `null` until a project asks for `[storage]`), `env_file` |
+| `up`, `reset`, `status` | `lez`, `runtime`, `sequencer` (`url`, `running`, `runtime_answered`, `block`, `max_txs_per_block`, `block_time`, `dev_mode`), `faucet` (`account`, `balance`), `programs`, `account_groups`, `sessions`, `sessions_stopped` (sessions whose daemon stopped while the chain runs), `messaging` (`running`, `delivery_node`, `discovery_node`, `delivery`, `discovery`, or `null` without a hub), `storage` (`running`, or `null` until a project asks for `[storage]`), `env_file` |
 | `deploy` | `name`, `id`, `hex`, `var`, `deployed_now`, `updated` |
 | `fund` | `account`, `balance` |
 | `tx` | `hash`, `block` (or `null` while no block holds it) |
@@ -278,12 +279,12 @@ With `--json`, a command prints one JSON document and nothing else on stdout. No
 The repo is a GitHub Action. On a Linux runner it installs `logos-devnet`, starts the devnet from your project file and exports the env into the job:
 
 ```yaml
-- uses: drptbl/logos-devnet@v0.8.0
+- uses: drptbl/logos-devnet@v0.9.0
   with:
     args: --max-txs-per-block 100     # optional, more options for up
 - run: cargo test                     # LOGOS_DEVNET_SEQUENCER, LOGOS_PROGRAM_*, LOGOS_DEVNET_ACCOUNTS_*, RISC0_DEV_MODE are set
 - if: failure()
-  run: logos-devnet logs              # the sequencer's log, when a test fails
+  run: logos-devnet logs --all        # the sequencer's, sessions' and hub's logs, when a test fails
 ```
 
 Inputs: `version` (default: the release tag you use the action at, or, pinned to a commit, the release that commit's `Cargo.toml` names), `config`, `working-directory`, `args` (space-separated, without shell quoting. Set the home with `LOGOS_DEVNET_HOME`, not `--home`), `start: "false"` to only install, which also works on macOS runners, and `logosctl-version` (default `0.3.2`). When the project file has sessions, `[messaging]` or `[storage]` and no `logosctl` is on `PATH`, the action installs that release of the Logos Core CLI, checked against its SHA-256. Output: `sequencer`. When `up` itself fails, the action prints the sequencer's log, each session's and the hub's. Starting the devnet needs a Linux runner, for Docker.

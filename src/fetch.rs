@@ -1,5 +1,5 @@
 //! Program binaries the project file names by URL, e.g. a program's GitHub release: downloaded
-//! once into the home with `curl`, and kept only when their SHA-256 is the one the file names.
+//! once with `curl`, and kept only when their SHA-256 is the one the file names.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -30,14 +30,15 @@ pub fn check_url(url: &str) -> Result<()> {
 }
 
 /// The file at `url` whose SHA-256 is `sha256`, kept in `dir`: downloaded the first time, and
-/// from then on read from `dir`.
+/// from then on read from `dir`. Several homes share `dir`, so a download lands under a name of
+/// this process's own and is renamed into place.
 pub fn cached(dir: &Path, url: &str, sha256: &str) -> Result<PathBuf> {
     let path = dir.join(format!("{sha256}.bin"));
     if std::fs::read(&path).is_ok_and(|bytes| sha256_hex(&bytes) == sha256) {
         return Ok(path);
     }
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let part = dir.join(format!("{sha256}.part"));
+    let part = dir.join(format!("{sha256}.part-{}", std::process::id()));
     eprintln!("Downloading {url}...");
     let status = Command::new("curl")
         .args([
@@ -147,6 +148,19 @@ pub(crate) mod tests {
         std::fs::write(dir.path().join(format!("{sha}.bin")), b"damaged").unwrap();
         let path = cached(dir.path(), &serve("200 OK", body, 1), &sha).unwrap();
         assert_eq!(std::fs::read(path).unwrap(), body);
+    }
+
+    #[test]
+    fn leaves_another_process_download_alone() {
+        // Homes share one download directory, so another `up` may be downloading the same file.
+        let dir = tempfile::tempdir().unwrap();
+        let body: &[u8] = b"a program";
+        let sha = sha256_hex(body);
+        let theirs = dir.path().join(format!("{sha}.part"));
+        std::fs::create_dir(&theirs).unwrap();
+        let path = cached(dir.path(), &serve("200 OK", body, 1), &sha).unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), body);
+        assert!(theirs.is_dir(), "the other download was touched");
     }
 
     #[test]

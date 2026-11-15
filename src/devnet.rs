@@ -747,21 +747,50 @@ impl Devnet {
         funded
     }
 
-    /// Restarts a session's daemon and brings it back as `up` does: a fresh start for modules
-    /// that keep state while loaded, e.g. `libp2p_module`, which advertises one service per load.
-    /// Its packages, keys and funded wallet stay.
-    pub fn session_restart(&self, name: &str) -> Result<Done> {
-        let session = self.existing_session(name)?;
+    /// Restarts each of `names`' daemons, in order, and brings it back as `up` does: a fresh
+    /// start for modules that keep state while loaded, e.g. `libp2p_module`, which advertises one
+    /// service per load. Their packages, keys and funded wallets stay. Every name is checked
+    /// first, so a typo restarts none.
+    pub fn session_restart(&self, names: &[String]) -> Result<Done> {
+        let sessions = names
+            .iter()
+            .map(|name| self.existing_session(name))
+            .collect::<Result<Vec<_>>>()?;
         self.require_running()?;
-        // A session that can't come back stays as it is.
-        session.info()?;
-        session.logosctl().stop()?;
-        self.resume_session(&session, false)?;
-        Ok(Done {
-            message: format!(
-                "Restarted session {name}: its modules are loaded and its wallet open."
+        for session in &sessions {
+            // A session that can't come back stays as it is.
+            session.info()?;
+            session.logosctl().stop()?;
+            self.resume_session(session, false)
+                .with_context(|| format!("restarting session {}", session.name))?;
+        }
+        let message = match names {
+            [name] => {
+                format!("Restarted session {name}: its modules are loaded and its wallet open.")
+            }
+            names => format!(
+                "Restarted sessions {}: their modules are loaded and their wallets open.",
+                names.join(", ")
             ),
-        })
+        };
+        Ok(Done { message })
+    }
+
+    /// The sessions whose daemon stopped while the chain runs, which `up` starts again. After
+    /// `down` every daemon is stopped, and without logosctl none can be asked: neither is news.
+    pub fn stopped_sessions(&self, chain_running: bool) -> Vec<String> {
+        if !chain_running || !session::logosctl_on_path() {
+            return Vec::new();
+        }
+        self.sessions_not_running()
+    }
+
+    fn sessions_not_running(&self) -> Vec<String> {
+        self.sessions()
+            .into_iter()
+            .filter(|s| !s.logosctl().running())
+            .map(|s| s.name)
+            .collect()
     }
 
     /// The sessions, or none (with a note) when their directory can't be read.
@@ -948,6 +977,7 @@ impl Devnet {
             programs,
             account_groups: self.group_summaries().unwrap_or_default(),
             sessions: self.sessions().into_iter().map(|s| s.name).collect(),
+            sessions_stopped: self.stopped_sessions(running),
             messaging: self.hub_status(),
             storage: self.storage_status(),
             env_file: env.map(|_| self.home.env_file()),
@@ -1074,11 +1104,16 @@ impl Devnet {
     /// the ones added.
     fn add_session_modules(&self, session: &Session, extra: &[String]) -> Result<Vec<String>> {
         let mut info = session.info()?;
-        let missing = session::missing_modules(&info.modules, extra)?;
+        let ctl = session.logosctl();
+        let had = info.modules.clone();
+        let missing =
+            session::missing_modules(&mut info.modules, extra, |m| ctl.installed_version(m))?;
+        if info.modules != had {
+            session.save_info(&info)?;
+        }
         if missing.is_empty() {
             return Ok(missing);
         }
-        let ctl = session.logosctl();
         if session.start_daemon(&ctl, self.settings.dev_mode, &self.session_storage())? {
             // A daemon that started now has nothing loaded: bring the session back first.
             ctl.resume(
@@ -1452,30 +1487,47 @@ impl Devnet {
     pub fn logs(&self, follow: bool, session: Option<&str>, hub: bool) -> Result<()> {
         let daemon = match session {
             Some(name) => self.existing_session(name)?.logosctl_dir(),
-            None if hub => {
-                if !self.home.messaging_dir().exists() {
-                    bail!(
-                        "this devnet has no hub: a project's [messaging] or [storage] starts one"
-                    );
-                }
-                self.home.messaging_dir().join("logosctl")
-            }
+            None if hub => self.hub_logosctl_dir().context(
+                "this devnet has no hub: a project's [messaging] or [storage] starts one",
+            )?,
             None => return self.runtime.logs(follow),
         };
-        let log = daemon.join("logs").join("daemon.log");
-        if !log.exists() {
-            bail!(
-                "{} doesn't exist yet: the daemon hasn't started",
-                log.display()
-            );
+        tail(&daemon_log(&daemon), follow)
+    }
+
+    /// Prints the last lines of every log in turn, each under a `==> <name> <==` line: the
+    /// sequencer's, each session's and the hub's, for a CI step that runs when a test fails. A
+    /// log that can't be shown says why and the next one follows.
+    pub fn logs_all(&self) -> Result<()> {
+        println!("==> sequencer <==");
+        if let Err(e) = self.runtime.logs(false) {
+            println!("{e:#}");
         }
-        let mut cmd = std::process::Command::new("tail");
-        cmd.args(["-n", "200"]);
-        if follow {
-            // By name, so it keeps following after a daemon restart starts a new log.
-            cmd.arg("-F");
+        for (label, log) in self.daemon_logs() {
+            println!("\n==> {label} <==");
+            if let Err(e) = tail(&log, false) {
+                println!("{e:#}");
+            }
         }
-        crate::runtime::run_attached(cmd.arg(&log))
+        Ok(())
+    }
+
+    /// Each logosctl daemon's log, sessions first, then the hub's when there is one.
+    fn daemon_logs(&self) -> Vec<(String, PathBuf)> {
+        let sessions = self
+            .sessions()
+            .into_iter()
+            .map(|s| (format!("session {}", s.name), daemon_log(&s.logosctl_dir())));
+        let hub = self
+            .hub_logosctl_dir()
+            .map(|dir| ("hub".to_owned(), daemon_log(&dir)));
+        sessions.chain(hub).collect()
+    }
+
+    /// The hub's logosctl config directory, when the devnet has a hub.
+    fn hub_logosctl_dir(&self) -> Option<PathBuf> {
+        let hub = self.home.messaging_dir();
+        hub.exists().then(|| hub.join("logosctl"))
     }
 
     /// Writes `<dir>/wallet_config.json` for a project's own wallet (`lez_core` or the LEZ
@@ -1751,6 +1803,28 @@ fn labelled(list: &str, label: &str) -> Option<PublicId> {
         .find_map(first_public_id)
 }
 
+/// A logosctl daemon's log, in its config directory.
+fn daemon_log(logosctl_dir: &Path) -> PathBuf {
+    logosctl_dir.join("logs").join("daemon.log")
+}
+
+/// Prints `log`'s last 200 lines, and follows it with `follow`.
+fn tail(log: &Path, follow: bool) -> Result<()> {
+    if !log.exists() {
+        bail!(
+            "{} doesn't exist yet: the daemon hasn't started",
+            log.display()
+        );
+    }
+    let mut cmd = std::process::Command::new("tail");
+    cmd.args(["-n", "200"]);
+    if follow {
+        // By name, so it keeps following after a daemon restart starts a new log.
+        cmd.arg("-F");
+    }
+    crate::runtime::run_attached(cmd.arg(log))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1810,11 +1884,16 @@ mod tests {
     fn restarts_only_a_session_on_a_running_devnet() {
         let dir = tempfile::tempdir().unwrap();
         let devnet = devnet_in(&dir.path().join("home"));
-        let err = devnet.session_restart("nobody").unwrap_err();
+        let err = devnet.session_restart(&["nobody".into()]).unwrap_err();
         assert!(err.to_string().contains("no session nobody"), "{err}");
         std::fs::create_dir_all(devnet.home.sessions_dir().join("alice")).unwrap();
-        let err = devnet.session_restart("alice").unwrap_err();
+        let err = devnet.session_restart(&["alice".into()]).unwrap_err();
         assert!(err.to_string().contains("not running"), "{err}");
+        // Every name is checked before any session restarts.
+        let err = devnet
+            .session_restart(&["alice".into(), "nobody".into()])
+            .unwrap_err();
+        assert!(err.to_string().contains("no session nobody"), "{err}");
     }
 
     #[test]
@@ -1883,6 +1962,37 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("after 1 s"), "{err}");
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn names_sessions_whose_daemon_is_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let devnet = devnet_in(&dir.path().join("home"));
+        assert!(devnet.sessions_not_running().is_empty());
+        for name in ["bob", "alice"] {
+            std::fs::create_dir_all(devnet.home.sessions_dir().join(name)).unwrap();
+        }
+        assert_eq!(devnet.sessions_not_running(), ["alice", "bob"]);
+        // After `down`, a stopped daemon is no news.
+        assert!(devnet.stopped_sessions(false).is_empty());
+    }
+
+    #[test]
+    fn all_logs_cover_every_session_and_the_hub() {
+        let dir = tempfile::tempdir().unwrap();
+        let devnet = devnet_in(&dir.path().join("home"));
+        assert!(devnet.daemon_logs().is_empty());
+        for name in ["bob", "alice"] {
+            std::fs::create_dir_all(devnet.home.sessions_dir().join(name)).unwrap();
+        }
+        std::fs::create_dir_all(devnet.home.messaging_dir()).unwrap();
+        let logs = devnet.daemon_logs();
+        let labels: Vec<&str> = logs.iter().map(|(label, _)| label.as_str()).collect();
+        assert_eq!(labels, ["session alice", "session bob", "hub"]);
+        assert_eq!(
+            logs[2].1,
+            devnet.home.messaging_dir().join("logosctl/logs/daemon.log")
+        );
     }
 
     #[test]
@@ -2254,6 +2364,7 @@ mod tests {
             programs: vec![],
             account_groups: vec![],
             sessions: vec![],
+            sessions_stopped: vec![],
             messaging: None,
             storage: None,
             env_file: None,

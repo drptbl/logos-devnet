@@ -133,6 +133,15 @@ pub fn run(devnet: &Devnet, project_error: Option<&anyhow::Error>) -> Doctor {
         )
     });
 
+    let stopped = devnet.stopped_sessions(running);
+    if !stopped.is_empty() {
+        checks.push(fail(
+            "sessions",
+            format!("{} stopped while the chain runs", stopped.join(", ")),
+            "`logos-devnet up` starts them",
+        ));
+    }
+
     if running {
         checks.push(match devnet.faucet_balance() {
             Some(b) if b > 0 => pass("faucet", format!("{b} lepta")),

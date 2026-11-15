@@ -17,7 +17,7 @@
 //! amount = 10_000_000_000
 //!
 //! [sessions.alice]                 # a logosctl session, as `session new`
-//! modules = ["chat_module"]
+//! modules = ["chat_module"]       # or "chat_module@0.3.0" for that version
 //! ```
 
 use std::collections::BTreeMap;
