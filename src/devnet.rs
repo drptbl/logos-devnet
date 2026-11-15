@@ -1003,6 +1003,15 @@ impl Devnet {
         })
     }
 
+    /// The parts of the hub that should run and don't, or `None` when the devnet has no hub or
+    /// no logosctl to ask it with.
+    pub fn hub_down(&self) -> Option<Vec<&'static str>> {
+        let hub = self.hub();
+        let (messaging, storage) = (hub.runs_messaging(), hub.runs_storage());
+        ((messaging || storage) && session::logosctl_on_path())
+            .then(|| hub.health().down(messaging, storage))
+    }
+
     fn storage_status(&self) -> Option<report::Storage> {
         let hub = self.hub();
         hub.runs_storage().then(|| report::Storage {
@@ -1919,7 +1928,10 @@ mod tests {
         let err = devnet
             .session_restart(&["alice".into(), "bob".into()])
             .unwrap_err();
-        assert!(format!("{err:#}").contains("session bob is incomplete"), "{err:#}");
+        assert!(
+            format!("{err:#}").contains("session bob is incomplete"),
+            "{err:#}"
+        );
         // Every name is checked before any session restarts.
         let err = devnet
             .session_restart(&["alice".into(), "nobody".into()])

@@ -133,6 +133,23 @@ pub fn run(devnet: &Devnet, project_error: Option<&anyhow::Error>) -> Doctor {
         )
     });
 
+    // The hub stops with the chain, so like sessions it's only news while the chain runs.
+    if running && let Some(down) = devnet.hub_down() {
+        checks.push(if down.is_empty() {
+            pass("hub", "running")
+        } else {
+            fail(
+                "hub",
+                format!(
+                    "its {} {} running",
+                    down.join(" and "),
+                    if down.len() == 1 { "isn't" } else { "aren't" }
+                ),
+                "`logos-devnet up` starts it",
+            )
+        });
+    }
+
     let stopped = devnet.stopped_sessions(running);
     if !stopped.is_empty() {
         checks.push(fail(

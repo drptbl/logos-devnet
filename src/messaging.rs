@@ -130,6 +130,23 @@ pub struct Health {
     pub storage: bool,
 }
 
+impl Health {
+    /// The parts that should run and don't, for a hub that runs messaging, storage or both.
+    pub fn down(&self, messaging: bool, storage: bool) -> Vec<&'static str> {
+        if !self.daemon {
+            return vec!["daemon"];
+        }
+        [
+            (messaging && !self.delivery, "delivery node"),
+            (messaging && !self.discovery, "discovery node"),
+            (storage && !self.storage, "storage node"),
+        ]
+        .into_iter()
+        .filter_map(|(down, part)| down.then_some(part))
+        .collect()
+    }
+}
+
 impl Hub {
     pub fn new(dir: PathBuf, packages: PathBuf) -> Self {
         let ctl = Logosctl::new(dir.join("logosctl"));
@@ -706,6 +723,35 @@ esac"#
         hub
     }
 
+    #[test]
+    fn names_the_parts_of_the_hub_that_are_down() {
+        let all = Health {
+            daemon: true,
+            delivery: true,
+            discovery: true,
+            storage: true,
+        };
+        assert!(all.down(true, true).is_empty());
+        let no_storage = Health {
+            storage: false,
+            ..all
+        };
+        assert_eq!(no_storage.down(true, true), ["storage node"]);
+        assert!(
+            no_storage.down(true, false).is_empty(),
+            "storage wasn't asked for"
+        );
+        let no_discovery = Health {
+            discovery: false,
+            ..all
+        };
+        assert_eq!(no_discovery.down(true, false), ["discovery node"]);
+        let no_daemon = Health {
+            daemon: false,
+            ..all
+        };
+        assert_eq!(no_daemon.down(true, true), ["daemon"]);
+    }
     #[test]
     fn a_storage_hub_records_its_bootstrap_and_runs_no_messaging_nodes() {
         let dir = tempfile::tempdir().unwrap();

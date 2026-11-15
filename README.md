@@ -41,7 +41,7 @@ source ~/.logos-devnet/env                         # LOGOS_DEVNET_SEQUENCER, LOG
 | `down` | Stops it. The chain is kept. |
 | `reset` | Deletes the chain and starts a new one, every account group funded at genesis. Takes the same options as `up`. |
 | `status` | What runs, the chain head, the faucet, programs, account groups, sessions (and which stopped while the chain runs), the messaging hub and local storage. |
-| `doctor` | Checks the project file, Docker and the image (or git and cargo with `--native`), whether the chain takes the project's settings, the `[programs]` files, the port, the hub's ports, the faucet, sessions that stopped while the chain runs, `curl` for programs from a release and, when sessions or the hub need it, `logosctl`, and says how to fix what fails. |
+| `doctor` | Checks the project file, Docker and the image (or git and cargo with `--native`), whether the chain takes the project's settings, the `[programs]` files, the port, the hub's ports, the faucet, the hub's nodes and sessions that stopped while the chain runs, `curl` for programs from a release and, when sessions or the hub need it, `logosctl`, and says how to fix what fails. |
 | `fund <account> [amount]` | Sends lepta from the faucet to a public account, 10B by default. |
 | `deploy <name> <bin> [--mutable]` | Deploys a program, from its `.bin` (what `cargo risczero build` makes, not the bare ELF), and adds `LOGOS_PROGRAM_<NAME>` and `LOGOS_PROGRAM_<NAME>_HEX` to the env file. Names are lower-case letters, digits and `-`. With `--mutable`, a new build updates it in place. |
 | `wallet-config <dir>` | Writes a `wallet_config.json` pointing at the devnet into a new wallet directory. |
