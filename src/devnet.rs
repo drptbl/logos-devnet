@@ -1519,8 +1519,10 @@ impl Devnet {
         let id = self.account_id(account)?;
         let rpc = self.rpc();
         let state = rpc.account(&id)?;
+        // Each program's bytes: `shards` on LEZ v0.3, `actor_states` on v0.4.
         let shards: BTreeMap<String, Vec<u8>> = state["data"]["shards"]
             .as_object()
+            .or_else(|| state["data"]["actor_states"].as_object())
             .map(|shards| {
                 shards
                     .iter()

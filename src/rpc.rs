@@ -87,11 +87,16 @@ fn result_of(reply: Value, method: &str) -> Result<Value> {
         .with_context(|| format!("{method} returned no result: {reply}"))
 }
 
+/// Whether `getAccount`'s answer is an account in use: it sent something, or a program keeps
+/// data in it. LEZ v0.3 keeps that data under `shards`, v0.4 under `actor_states`, and v0.4
+/// answers null for an account never used.
 pub(crate) fn in_use(account: &Value) -> bool {
     let nonce = account["nonce"].as_u64().unwrap_or(0);
-    let has_data = account["data"]["shards"]
-        .as_object()
-        .is_some_and(|shards| !shards.is_empty());
+    let has_data = ["shards", "actor_states"].iter().any(|key| {
+        account["data"][key]
+            .as_object()
+            .is_some_and(|data| !data.is_empty())
+    });
     nonce > 0 || has_data
 }
 
@@ -142,5 +147,14 @@ mod tests {
         let fresh = json!({ "nonce": 0, "data": { "shards": {} } });
         assert!(in_use(&header));
         assert!(!in_use(&fresh));
+        // LEZ v0.4: `getAccount` answers null for an account never used, and keeps program data
+        // under `actor_states`.
+        assert!(!in_use(&Value::Null));
+        assert!(!in_use(
+            &json!({ "nonce": 0, "data": { "actor_states": {} } })
+        ));
+        assert!(in_use(
+            &json!({ "nonce": 0, "data": { "actor_states": { "P": [1] } } })
+        ));
     }
 }
