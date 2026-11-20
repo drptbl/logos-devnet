@@ -37,11 +37,20 @@ pub fn clear_new_chain(owner: &Path) -> Result<()> {
 type Raw = Box<RawValue>;
 type RawObject = BTreeMap<String, Raw>;
 
-/// The LEZ wallet's state of a fresh account: what every account holds on a new chain.
-fn fresh_account() -> Result<Raw> {
-    Ok(RawValue::from_string(
-        r#"{"nonce":0,"data":{"shards":{}}}"#.into(),
-    )?)
+/// The LEZ wallet's state of a fresh account, what every account holds on a new chain, in the
+/// shape of `was`: v0.4 keeps program data under `actor_states` and refuses v0.3's `shards`.
+fn fresh_account(was: &Raw) -> Result<Raw> {
+    let data: Option<RawObject> = serde_json::from_str::<RawObject>(was.get())?
+        .get("data")
+        .map(|data| serde_json::from_str(data.get()))
+        .transpose()?;
+    let key = match data {
+        Some(data) if data.contains_key("actor_states") => "actor_states",
+        _ => "shards",
+    };
+    Ok(RawValue::from_string(format!(
+        r#"{{"nonce":0,"data":{{"{key}":{{}}}}}}"#
+    ))?)
 }
 
 /// `raw`, an object, with `change` applied to its members.
@@ -72,6 +81,13 @@ fn forget_chain(text: &str) -> Result<String> {
         "last_synced_block".into(),
         RawValue::from_string("0".into())?,
     );
+    // v0.4 also records the block its sync started from.
+    if storage.contains_key("synced_from_block") {
+        storage.insert(
+            "synced_from_block".into(),
+            RawValue::from_string("0".into())?,
+        );
+    }
     edit_member(&mut storage, "key_chain", |key_chain| {
         edit_object(key_chain, |key_chain| {
             edit_member(key_chain, "accounts", |accounts| {
@@ -94,8 +110,9 @@ fn forget_chain(text: &str) -> Result<String> {
                 let mut entries: RawObject = serde_json::from_str(shared.get())?;
                 for entry in entries.values_mut() {
                     edit_object(entry, |entry| {
-                        if entry.contains_key("account") {
-                            entry.insert("account".into(), fresh_account()?);
+                        if let Some(account) = entry.get("account") {
+                            let fresh = fresh_account(account)?;
+                            entry.insert("account".into(), fresh);
                         }
                         Ok(())
                     })?;
@@ -114,7 +131,7 @@ fn forget_private_states(value: &mut Raw) -> Result<()> {
     let (keys, states): (Raw, Vec<(Raw, Raw)>) = serde_json::from_str(value.get())?;
     let states = states
         .into_iter()
-        .map(|(kind, _)| Ok((kind, fresh_account()?)))
+        .map(|(kind, account)| Ok((kind, fresh_account(&account)?)))
         .collect::<Result<Vec<_>>>()?;
     *value = serde_json::value::to_raw_value(&(keys, states))?;
     Ok(())
@@ -135,7 +152,15 @@ pub fn forget_chain_in(storage: &Path) -> Result<()> {
         )
     })?;
     replace_file(storage, forgotten.as_bytes())
-        .with_context(|| format!("replacing {}", storage.display()))
+        .with_context(|| format!("replacing {}", storage.display()))?;
+    // v0.4 caches the nullifiers it saw spent next to the storage: the old chain's.
+    let nullifiers = storage.with_extension("nullifiers");
+    match std::fs::remove_file(&nullifiers) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(e).with_context(|| format!("deleting {}", nullifiers.display()))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Replaces `path` with `contents` in one step, keeping its permissions: it never holds half of
@@ -223,6 +248,48 @@ pub(crate) mod tests {
         expected["key_chain"]["accounts"][1] = storage["key_chain"]["accounts"][1].clone();
         expected["key_chain"]["shared_private_accounts"]["S"]["account"] = fresh;
         assert_eq!(storage, expected);
+    }
+
+    /// A v0.4 wallet's `storage.json` after a chain ran, in the layout LEZ v0.4.0-rc3's wallet
+    /// writes: the private state keeps program data under `actor_states`, and the wallet
+    /// records where its sync started.
+    const SYNCED_STORAGE_V04: &str = r#"{
+  "key_chain": {
+    "accounts": [
+      { "Private": { "account_id": "Q", "chain_index": "/0", "data": {
+        "value": [ { "keys": 2 }, [
+          [ "Regular", { "nonce": 7, "data": { "actor_states": { "T": [1, 2] } } } ]
+        ] ] } } }
+    ],
+    "shared_private_accounts": {}
+  },
+  "last_synced_block": 42,
+  "synced_from_block": 40
+}"#;
+
+    #[test]
+    fn forgets_a_v0_4_chain_in_its_own_shape() {
+        let storage: Value =
+            serde_json::from_str(&forget_chain(SYNCED_STORAGE_V04).unwrap()).unwrap();
+        assert_eq!(storage["last_synced_block"], 0);
+        assert_eq!(storage["synced_from_block"], 0);
+        let state = &storage["key_chain"]["accounts"][0]["Private"]["data"]["value"][1][0];
+        // v0.4 refuses `shards`: a fresh account has to be in the shape it read.
+        assert_eq!(
+            state,
+            &serde_json::json!(["Regular", { "nonce": 0, "data": { "actor_states": {} } }])
+        );
+    }
+
+    #[test]
+    fn drops_the_spent_nullifiers_a_v0_4_wallet_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dir.path().join(STORAGE_FILE);
+        std::fs::write(&storage, SYNCED_STORAGE_V04).unwrap();
+        let nullifiers = dir.path().join("storage.nullifiers");
+        std::fs::write(&nullifiers, "old chain").unwrap();
+        forget_chain_in(&storage).unwrap();
+        assert!(!nullifiers.exists());
     }
 
     #[test]
