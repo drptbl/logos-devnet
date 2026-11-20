@@ -71,6 +71,21 @@ pub struct GroupAccount {
     pub key: Option<String>,
 }
 
+impl GroupAccount {
+    /// Its public key, once checked to name this account: genesis and payments by key would
+    /// otherwise fund another. `None` for an account from before keys were kept.
+    pub fn checked_key(&self) -> Result<Option<&str>> {
+        match &self.key {
+            Some(key) if PublicId::of_key(key)? != self.id => anyhow::bail!(
+                "{} has a public key in accounts.json that names another account: delete its \
+                 group, and `up` makes it again",
+                self.id.wallet_form()
+            ),
+            key => Ok(key.as_deref()),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Group {
     pub name: String,
@@ -168,6 +183,20 @@ mod tests {
 
     const A: &str = "HpavNGFYxjyhLsy171aXsvv146yUeXmRWiho22uvT43d";
     const B: &str = "6YvesSEDWW25kpi8SSki2c8o5m3uACsigvGnNQ6wMruh";
+
+    #[test]
+    fn trusts_a_recorded_key_only_when_it_names_its_account() {
+        let secret = "01".repeat(32);
+        let key = crate::account::public_key_of(&secret).unwrap();
+        let id = PublicId::of_key(&key).unwrap();
+        let info = Group::extended(GroupInfo::default(), vec![(id, key.clone())]);
+        assert_eq!(info.accounts[0].checked_key().unwrap(), Some(key.as_str()));
+        let wrong = Group::extended(
+            GroupInfo::default(),
+            vec![(PublicId::parse(A).unwrap(), key)],
+        );
+        assert!(wrong.accounts[0].checked_key().is_err());
+    }
 
     #[test]
     fn numbers_new_accounts_after_the_existing_ones() {

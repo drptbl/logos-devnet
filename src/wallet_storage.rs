@@ -163,6 +163,38 @@ pub fn forget_chain_in(storage: &Path) -> Result<()> {
     }
 }
 
+/// The public key, in hex, of the public account `id` in the wallet whose storage is at
+/// `storage`: as written for an account the wallet made, or derived from an imported one's
+/// private key. Only a key that names `id` counts. `None` when the wallet holds no such account.
+pub fn public_key(storage: &Path, id: &crate::account::PublicId) -> Result<Option<String>> {
+    use crate::account::{PublicId, public_key_of};
+    let text = match std::fs::read_to_string(storage) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", storage.display())),
+    };
+    let wallet: serde_json::Value = serde_json::from_str(&text)
+        .with_context(|| format!("{} is not a LEZ wallet storage", storage.display()))?;
+    let accounts = wallet["key_chain"]["accounts"]
+        .as_array()
+        .into_iter()
+        .flatten();
+    for account in accounts {
+        let key = if account["Public"]["account_id"] == id.as_str() {
+            account["Public"]["data"]["pk"].as_str().map(str::to_owned)
+        } else if account["ImportedPublic"]["account_id"] == id.as_str() {
+            account["ImportedPublic"]["pub_sign_key"]
+                .as_str()
+                .map(public_key_of)
+                .transpose()?
+        } else {
+            continue;
+        };
+        return Ok(key.filter(|key| PublicId::of_key(key).is_ok_and(|of| &of == id)));
+    }
+    Ok(None)
+}
+
 /// Replaces `path` with `contents` in one step, keeping its permissions: it never holds half of
 /// either, and the new file is on disk before it takes the old one's place.
 fn replace_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
@@ -290,6 +322,39 @@ pub(crate) mod tests {
         std::fs::write(&nullifiers, "old chain").unwrap();
         forget_chain_in(&storage).unwrap();
         assert!(!nullifiers.exists());
+    }
+
+    #[test]
+    fn reads_an_accounts_public_key_from_the_wallet() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dir.path().join(STORAGE_FILE);
+        // As LEZ's wallet writes them: a generated account keeps its key as `pk`, an imported
+        // one its private key as `pub_sign_key`.
+        let made = "4afc5da3b6acabc4892dddb1e49226599326ae3a6a700828e395b5bc9a4b30ba";
+        let text = format!(
+            r#"{{"key_chain":{{"accounts":[
+              {{"Public":{{"account_id":"23cbN9uZbLU1zhcuiZ1qu1eneL8ed8HeHzDEF1br6rEd","chain_index":[0],"data":{{"sk":"x","pk":"{made}"}}}}}},
+              {{"ImportedPublic":{{"account_id":"B1UN3hPgxacgHKBRoThcAmsPajGcUf6YXUhgB36x4DAd","pub_sign_key":"{}"}}}}
+            ]}},"last_synced_block":1}}"#,
+            "01".repeat(32)
+        );
+        std::fs::write(&storage, text).unwrap();
+        let key = |id: &str| public_key(&storage, &crate::account::PublicId::parse(id).unwrap());
+        assert_eq!(
+            key("23cbN9uZbLU1zhcuiZ1qu1eneL8ed8HeHzDEF1br6rEd")
+                .unwrap()
+                .as_deref(),
+            Some(made)
+        );
+        let imported = key("B1UN3hPgxacgHKBRoThcAmsPajGcUf6YXUhgB36x4DAd").unwrap();
+        assert_eq!(
+            imported,
+            Some(crate::account::public_key_of(&"01".repeat(32)).unwrap())
+        );
+        assert_eq!(
+            key("HpavNGFYxjyhLsy171aXsvv146yUeXmRWiho22uvT43d").unwrap(),
+            None
+        );
     }
 
     #[test]

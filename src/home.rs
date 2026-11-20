@@ -107,10 +107,6 @@ pub struct Settings {
     /// The dev wallet's faucet account, funded at genesis. Created on the first `up`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub faucet: Option<PublicId>,
-    /// The faucet's public key, in hex, which a LEZ v0.4 genesis funds by. The wallet prints it
-    /// only when it makes the account.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub faucet_key: Option<String>,
 }
 
 impl Default for Settings {
@@ -124,7 +120,6 @@ impl Default for Settings {
             dev_mode: false,
             log_filter: DEFAULT_LOG_FILTER.into(),
             faucet: None,
-            faucet_key: None,
         }
     }
 }

@@ -368,7 +368,7 @@ impl Devnet {
         }
 
         next.runtime.prepare(opts.rebuild)?;
-        let (faucet, faucet_key) = next.dev_faucet()?;
+        let faucet = next.dev_faucet()?;
         if continuing && funds_another_faucet(self.settings.faucet.as_ref(), &faucet) {
             bail!(
                 "this chain's genesis funds another faucet than the dev wallet holds. \
@@ -376,7 +376,6 @@ impl Devnet {
             );
         }
         next.settings.faucet = Some(faucet);
-        next.settings.faucet_key = faucet_key;
         // Keys first, so a new chain funds every group at genesis.
         next.make_project_groups()?;
         let config = next.chain_config()?;
@@ -742,7 +741,7 @@ impl Devnet {
                 group.name
             );
             for account in unfunded {
-                self.send(&account.id, account.key.as_deref(), u128::from(info.amount))?;
+                self.send(&account.id, account.checked_key()?, u128::from(info.amount))?;
             }
         }
         Ok(())
@@ -753,11 +752,13 @@ impl Devnet {
         let mut accounts = Vec::new();
         for group in groups::list(&self.groups_dir())? {
             let info = group.info()?;
-            accounts.extend(info.accounts.into_iter().map(|a| Funded {
-                id: a.id,
-                key: a.key,
-                balance: info.amount,
-            }));
+            for account in &info.accounts {
+                accounts.push(Funded {
+                    key: account.checked_key()?.map(str::to_owned),
+                    id: account.id.clone(),
+                    balance: info.amount,
+                });
+            }
         }
         Ok(accounts)
     }
@@ -884,22 +885,25 @@ impl Devnet {
         self.rpc().balance(to)
     }
 
-    /// The dev wallet's faucet account, made on first use, with its public key when known.
-    /// Read from the wallet rather than the settings, so a lost settings file finds the same
-    /// faucet. The wallet prints the key only when it makes the account, so it's kept in the
-    /// settings, and used only while it still matches the faucet.
-    fn dev_faucet(&self) -> Result<(PublicId, Option<String>)> {
+    /// The dev wallet's faucet account, made on first use. Read from the wallet rather than
+    /// the settings, so a lost settings file finds the same faucet.
+    fn dev_faucet(&self) -> Result<PublicId> {
         match self.labelled_account(FAUCET_LABEL)? {
-            Some(faucet) => {
-                let key = self
-                    .settings
-                    .faucet_key
-                    .clone()
-                    .filter(|key| PublicId::of_key(key).is_ok_and(|id| id == faucet));
-                Ok((faucet, key))
-            }
-            None => self.new_keyed_account(FAUCET_LABEL),
+            Some(faucet) => Ok(faucet),
+            None => self.new_account(Some(FAUCET_LABEL)),
         }
+    }
+
+    /// The public key of `id` when logos-devnet holds it: a group account's, or one in the dev
+    /// wallet, such as the faucet. Read where the key lives, so it can't drift from it.
+    fn known_key(&self, id: &PublicId) -> Result<Option<String>> {
+        for group in groups::list(&self.groups_dir())? {
+            if let Some(account) = group.info()?.accounts.iter().find(|a| &a.id == id) {
+                return Ok(account.checked_key()?.map(str::to_owned));
+            }
+        }
+        let storage = self.wallet_dir().join(crate::wallet_storage::STORAGE_FILE);
+        crate::wallet_storage::public_key(&storage, id)
     }
 
     /// Sets a new LEZ v0.4 chain up from `config`: `setup` writes its channel signing key and
@@ -920,9 +924,10 @@ impl Devnet {
 
     fn chain_config(&self) -> Result<Value> {
         let genesis_accounts = self.genesis_accounts()?;
+        let faucet = self.faucet()?;
         let faucet = Funded {
-            id: self.faucet()?.clone(),
-            key: self.settings.faucet_key.clone(),
+            key: self.known_key(faucet)?,
+            id: faucet.clone(),
             balance: FAUCET_BALANCE,
         };
         chain_config::patch(
@@ -1113,17 +1118,22 @@ impl Devnet {
         // Fails before any work when there is no faucet yet.
         self.faucet()?;
         self.require_running()?;
+        let key = match key {
+            Some(key) => Some(key.to_owned()),
+            None => self.known_key(&to)?,
+        };
         if self.settings.line() == LezLine::V04
             && key.is_none()
             && !self.rpc().account_in_use(&to)?
         {
             bail!(
                 "{} has never been used, and LEZ v0.4 pays such an account only by its public \
-                 key: pass it with `--key <hex>`, as `wallet account new public` printed it",
+                 key: pass it with `--key <hex>`, as `wallet account new public` printed it or \
+                 `wallet account get --keys` prints it",
                 to.wallet_form()
             );
         }
-        let balance = self.send(&to, key, amount)?;
+        let balance = self.send(&to, key.as_deref(), amount)?;
         Ok(Balance {
             account: to.wallet_form(),
             balance: Some(balance),
@@ -1480,25 +1490,6 @@ impl Devnet {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
             Err(e) => Err(e).context("reading programs.json"),
         }
-    }
-
-    /// A new labelled account and its public key, as `account new public` prints it once.
-    fn new_keyed_account(&self, label: &str) -> Result<(PublicId, Option<String>)> {
-        let output = self.wallet(vec![
-            "account".into(),
-            "new".into(),
-            "public".into(),
-            "--label".into(),
-            label.into(),
-        ])?;
-        let id = first_public_id(&output)
-            .with_context(|| format!("the wallet made no account:\n{output}"))?;
-        let key = output
-            .lines()
-            .find_map(|line| line.trim().strip_prefix("With pk "))
-            .map(|key| key.trim().to_owned())
-            .filter(|key| PublicId::of_key(key).is_ok_and(|of| of == id));
-        Ok((id, key))
     }
 
     fn new_account(&self, label: Option<&str>) -> Result<PublicId> {
