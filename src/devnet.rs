@@ -32,6 +32,11 @@ const FAUCET_BALANCE: u64 = 1_000_000_000_000_000_000;
 const FAUCET_LABEL: &str = "faucet";
 /// What `fund`, sessions and account groups send when no amount is given.
 pub const DEFAULT_FUND: u64 = 10_000_000_000;
+/// Why sessions don't run on LEZ v0.4 yet.
+const SESSIONS_ON_V04: &str = "sessions don't run on LEZ v0.4 yet: the Logos catalog has no \
+     lez_core for v0.4, and lez_core 0.5.1 can't drive a v0.4 chain. Drop [sessions] from the \
+     project file and `logos-devnet session rm` any session, or stay on v0.3";
+
 /// How `up` waits for a starting sequencer's first block. A long chain replays first, logging
 /// a different line for each block (186k blocks took 34 min), so `up` waits as long as the log
 /// shows something new. A sequencer stuck repeating one line counts as quiet.
@@ -476,6 +481,15 @@ impl Devnet {
                     .with_context(|| format!("[programs] {name}: {}", binary.display()))?;
                 self.runtime.check_wallet_file(&binary)?;
             }
+        }
+        if self.settings.line() == LezLine::V04
+            && (!self.sessions().is_empty()
+                || self
+                    .project
+                    .as_ref()
+                    .is_some_and(|p| !p.sessions.is_empty()))
+        {
+            bail!("{SESSIONS_ON_V04}");
         }
         if self.needs_logosctl() && !logosctl_on_path() {
             bail!(
@@ -1151,6 +1165,9 @@ impl Devnet {
         let session = Session::new(&self.home.sessions_dir(), name)?;
         if session.exists() {
             bail!("session {name} exists. `logos-devnet session rm {name}` first");
+        }
+        if self.settings.line() == LezLine::V04 {
+            bail!("{SESSIONS_ON_V04}");
         }
         let modules = session::modules_with(extra)?;
         // Fails before any work when there is no faucet yet.
@@ -2605,6 +2622,25 @@ mod tests {
             "--to and --to-pk conflict"
         );
         assert!(args(LezLine::V04, None).contains(&to_id));
+    }
+
+    #[test]
+    fn refuses_sessions_on_lez_v0_4() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = "home = \"home\"\n[devnet]\nlez = \"v0.4.0-rc3\"\n[sessions.alice]\n";
+        let devnet = devnet_with_file(dir.path(), file);
+        let next = Devnet::with(
+            devnet.home.clone(),
+            devnet.settings_for_up(),
+            devnet.project.clone(),
+        );
+        let err = next.check_needs(|| true).unwrap_err();
+        assert!(err.to_string().contains("lez_core"), "{err}");
+        let mut v04 = devnet.settings.clone();
+        v04.lez = "v0.4.0-rc3".into();
+        let bare = Devnet::with(devnet.home.clone(), v04, None);
+        let err = bare.session_new("bob", &[], 1).unwrap_err();
+        assert!(err.to_string().contains("lez_core"), "{err}");
     }
 
     #[test]
