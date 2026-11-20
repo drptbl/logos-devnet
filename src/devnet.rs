@@ -1113,6 +1113,16 @@ impl Devnet {
         // Fails before any work when there is no faucet yet.
         self.faucet()?;
         self.require_running()?;
+        if self.settings.line() == LezLine::V04
+            && key.is_none()
+            && !self.rpc().account_in_use(&to)?
+        {
+            bail!(
+                "{} has never been used, and LEZ v0.4 pays such an account only by its public \
+                 key: pass it with `--key <hex>`, as `wallet account new public` printed it",
+                to.wallet_form()
+            );
+        }
         let balance = self.send(&to, key, amount)?;
         Ok(Balance {
             account: to.wallet_form(),
