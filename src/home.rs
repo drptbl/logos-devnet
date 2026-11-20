@@ -236,9 +236,10 @@ impl Home {
     pub fn setup_template(&self) -> PathBuf {
         self.chain_dir().join("setup-template.json")
     }
-    /// Whether a LEZ v0.4 chain here has been set up: `setup` makes its channel signing key.
+    /// Whether a LEZ v0.4 chain here has been set up. `setup` writes its channel signing key,
+    /// then this file, then the config, which `up` writes again anyway.
     pub fn chain_set_up(&self) -> bool {
-        self.chain_dir().join("channel_signing_key").exists()
+        self.chain_dir().join("bedrock_funding_public_key").exists()
     }
     /// The chain's own record of its dev mode, which `reset` deletes with it.
     fn chain_dev_mode_file(&self) -> PathBuf {
@@ -422,6 +423,18 @@ mod tests {
             assert!(check_lez(tag).is_err(), "{tag}");
         }
         assert_eq!(LezLine::of(DEFAULT_LEZ).unwrap(), LezLine::V03);
+    }
+
+    #[test]
+    fn a_v0_4_chain_is_set_up_once_setup_wrote_its_funding_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Home::locate(Some(dir.path().to_path_buf())).unwrap();
+        std::fs::create_dir_all(home.chain_dir()).unwrap();
+        // `setup` writes the channel key first: stopped there, it must run again.
+        std::fs::write(home.chain_dir().join("channel_signing_key"), "k").unwrap();
+        assert!(!home.chain_set_up());
+        std::fs::write(home.chain_dir().join("bedrock_funding_public_key"), "f").unwrap();
+        assert!(home.chain_set_up());
     }
 
     #[test]
