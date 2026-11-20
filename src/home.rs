@@ -271,8 +271,13 @@ impl Home {
     pub fn native_dir(&self) -> PathBuf {
         self.root.join("native")
     }
-    pub fn sessions_dir(&self) -> PathBuf {
-        self.root.join("sessions")
+    /// Sessions, one set per LEZ line like the dev wallet: a v0.3 session's wallet and
+    /// `lez_core` can't work on v0.4, and stay as they were for a return to v0.3.
+    pub fn sessions_dir(&self, line: LezLine) -> PathBuf {
+        self.root.join(match line {
+            LezLine::V03 => "sessions",
+            LezLine::V04 => "sessions-v0.4",
+        })
     }
     /// Account groups, each with a wallet: one set per LEZ line, like the dev wallet.
     pub fn groups_dir(&self, line: LezLine) -> PathBuf {
@@ -433,6 +438,14 @@ mod tests {
         assert_eq!(
             home.groups_dir(LezLine::V04),
             home.root().join("accounts-v0.4")
+        );
+        assert_eq!(
+            home.sessions_dir(LezLine::V03),
+            home.root().join("sessions")
+        );
+        assert_eq!(
+            home.sessions_dir(LezLine::V04),
+            home.root().join("sessions-v0.4")
         );
     }
 

@@ -35,7 +35,7 @@ pub const DEFAULT_FUND: u64 = 10_000_000_000;
 /// Why sessions don't run on LEZ v0.4 yet.
 const SESSIONS_ON_V04: &str = "sessions don't run on LEZ v0.4 yet: the Logos catalog has no \
      lez_core for v0.4, and lez_core 0.5.1 can't drive a v0.4 chain. Drop [sessions] from the \
-     project file and `logos-devnet session rm` any session, or stay on v0.3";
+     project file, or stay on v0.3, whose sessions wait as they were";
 
 /// How `up` waits for a starting sequencer's first block. A long chain replays first, logging
 /// a different line for each block (186k blocks took 34 min), so `up` waits as long as the log
@@ -301,6 +301,11 @@ impl Devnet {
         self.home.groups_dir(self.settings.line())
     }
 
+    /// The sessions of the chain's LEZ line.
+    fn sessions_dir(&self) -> PathBuf {
+        self.home.sessions_dir(self.settings.line())
+    }
+
     fn faucet(&self) -> Result<&PublicId> {
         self.settings
             .faucet
@@ -481,13 +486,7 @@ impl Devnet {
                 self.runtime.check_wallet_file(&binary)?;
             }
         }
-        if self.settings.line() == LezLine::V04
-            && (!self.sessions().is_empty()
-                || self
-                    .project
-                    .as_ref()
-                    .is_some_and(|p| !p.sessions.is_empty()))
-        {
+        if self.refuses_sessions() {
             bail!("{SESSIONS_ON_V04}");
         }
         if self.needs_logosctl() && !logosctl_on_path() {
@@ -499,6 +498,15 @@ impl Devnet {
             );
         }
         self.check_hub_ports()
+    }
+
+    /// Whether the project asks for sessions on LEZ v0.4, which can't run them yet.
+    pub fn refuses_sessions(&self) -> bool {
+        self.settings.line() == LezLine::V04
+            && self
+                .project
+                .as_ref()
+                .is_some_and(|p| !p.sessions.is_empty())
     }
 
     /// Fails when a port the hub keeps is taken while the hub doesn't run, so `up` couldn't
@@ -611,7 +619,7 @@ impl Devnet {
         }
         if let Some(project) = &self.project {
             for (name, spec) in &project.sessions {
-                let session = Session::new(&self.home.sessions_dir(), name)?;
+                let session = Session::new(&self.sessions_dir(), name)?;
                 if session.exists() {
                     match self.add_session_modules(&session, &spec.modules) {
                         Ok(added) if !added.is_empty() => {
@@ -862,7 +870,7 @@ impl Devnet {
 
     /// The sessions, or none (with a note) when their directory can't be read.
     fn sessions(&self) -> Vec<Session> {
-        session::list(&self.home.sessions_dir()).unwrap_or_else(|e| {
+        session::list(&self.sessions_dir()).unwrap_or_else(|e| {
             eprintln!("sessions: {e:#}");
             Vec::new()
         })
@@ -1186,7 +1194,7 @@ impl Devnet {
     /// from the catalog, a devnet wallet opened in it, and a public account funded with
     /// `amount`. A failed attempt leaves nothing behind.
     pub fn session_new(&self, name: &str, extra: &[String], amount: u128) -> Result<SessionMade> {
-        let session = Session::new(&self.home.sessions_dir(), name)?;
+        let session = Session::new(&self.sessions_dir(), name)?;
         if session.exists() {
             bail!("session {name} exists. `logos-devnet session rm {name}` first");
         }
@@ -1316,7 +1324,7 @@ impl Devnet {
 
     pub fn session_list(&self) -> Result<Sessions> {
         let chain_up = self.runtime.running();
-        let rows = session::list(&self.home.sessions_dir())?
+        let rows = session::list(&self.sessions_dir())?
             .into_iter()
             .map(|session| {
                 let running = session.logosctl().answers_within(SESSION_CHECK_TIMEOUT);
@@ -1404,7 +1412,7 @@ impl Devnet {
     }
 
     fn existing_session(&self, name: &str) -> Result<Session> {
-        let session = Session::new(&self.home.sessions_dir(), name)?;
+        let session = Session::new(&self.sessions_dir(), name)?;
         if !session.exists() {
             bail!("no session {name}. `logos-devnet session ls` lists them");
         }
@@ -2150,14 +2158,14 @@ mod tests {
         let devnet = devnet_in(&dir.path().join("home"));
         let err = devnet.session_restart(&["nobody".into()]).unwrap_err();
         assert!(err.to_string().contains("no session nobody"), "{err}");
-        let alice = devnet.home.sessions_dir().join("alice");
+        let alice = devnet.sessions_dir().join("alice");
         std::fs::create_dir_all(&alice).unwrap();
         let info = format!(r#"{{"modules":["lez_core"],"account":"{ID}","funded":1}}"#);
         std::fs::write(alice.join("session.json"), info).unwrap();
         let err = devnet.session_restart(&["alice".into()]).unwrap_err();
         assert!(err.to_string().contains("not running"), "{err}");
         // A session that couldn't come back is found before any restarts.
-        std::fs::create_dir_all(devnet.home.sessions_dir().join("bob")).unwrap();
+        std::fs::create_dir_all(devnet.sessions_dir().join("bob")).unwrap();
         let err = devnet
             .session_restart(&["alice".into(), "bob".into()])
             .unwrap_err();
@@ -2246,7 +2254,7 @@ mod tests {
         let devnet = devnet_in(&dir.path().join("home"));
         assert!(devnet.sessions_not_running().is_empty());
         for name in ["bob", "alice"] {
-            std::fs::create_dir_all(devnet.home.sessions_dir().join(name)).unwrap();
+            std::fs::create_dir_all(devnet.sessions_dir().join(name)).unwrap();
         }
         assert_eq!(devnet.sessions_not_running(), ["alice", "bob"]);
         // After `down`, a stopped daemon is no news.
@@ -2259,7 +2267,7 @@ mod tests {
         let devnet = devnet_in(&dir.path().join("home"));
         assert!(devnet.daemon_logs().is_empty());
         for name in ["bob", "alice"] {
-            std::fs::create_dir_all(devnet.home.sessions_dir().join(name)).unwrap();
+            std::fs::create_dir_all(devnet.sessions_dir().join(name)).unwrap();
         }
         std::fs::create_dir_all(devnet.home.messaging_dir()).unwrap();
         let logs = devnet.daemon_logs();
@@ -2365,7 +2373,7 @@ mod tests {
         assert!(err.to_string().contains("no hub"), "{err}");
         let err = devnet.logs(false, Some("alice"), false).unwrap_err();
         assert!(err.to_string().contains("no session alice"), "{err}");
-        std::fs::create_dir_all(devnet.home.sessions_dir().join("alice")).unwrap();
+        std::fs::create_dir_all(devnet.sessions_dir().join("alice")).unwrap();
         let err = devnet.logs(false, Some("alice"), false).unwrap_err();
         assert!(err.to_string().contains("hasn't started"), "{err}");
     }
@@ -2540,7 +2548,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let home = Home::locate(Some(dir.path().to_path_buf())).unwrap();
         // No project file: the session was made with `session new`.
-        std::fs::create_dir_all(home.sessions_dir().join("alice")).unwrap();
+        std::fs::create_dir_all(home.sessions_dir(LezLine::V03).join("alice")).unwrap();
         let devnet = Devnet::open(home, None).unwrap();
         let err = devnet.check_needs(|| false).unwrap_err();
         assert!(format!("{err:#}").contains("logosctl"), "{err:#}");
