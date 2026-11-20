@@ -1948,8 +1948,8 @@ fn wallet_config(line: LezLine, sequencer: &str) -> Value {
         "sequencer_addr": sequencer,
         "sequencers": [{ "sequencer_addr": sequencer }]
     });
-    // v0.3 declares this much gas on each transaction. v0.4 measures it, and without a
-    // `gas_limit` budgets up to the block's cap, which a 96 KiB program segment needs.
+    // v0.3 declares this much gas on each transaction. v0.4 measures it within the
+    // `gas_limit` budget, whose default (2M at rc3) leaves room for a 96 KiB program segment.
     if line == LezLine::V03 {
         config["gas_limit"] = json!(200_000);
     }

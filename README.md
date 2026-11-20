@@ -236,8 +236,8 @@ Private calls still prove on your machine, so they take as long as on the testne
 - A v0.4 wallet can't read v0.3 storage, so v0.4 has its own dev wallet and account groups, in `wallet-v0.4/` and `accounts-v0.4/`, and so its own program ids. Switching back with `reset --lez v0.3.1` finds the v0.3 ones as they were.
 - Programs must be built for v0.4: a v0.3 binary doesn't run there.
 - Genesis funds accounts by their public key, which `accounts.json` records for each account.
-- An account that was never used is paid only by its public key: `fund <account> --key <hex>`. Group accounts are paid by theirs.
-- Sessions aren't supported yet: the Logos catalog has no `lez_core` for v0.4, and 0.5.1 can't drive a v0.4 chain. `up` refuses `[sessions]` on v0.4.
+- An account that was never used is paid only by its public key: `fund <account> --key <hex>`. The devnet's own accounts, its groups' and the dev wallet's, are paid by theirs without it.
+- Sessions aren't supported yet: the Logos catalog has no `lez_core` for v0.4, and 0.5.1 can't drive a v0.4 chain. `up` refuses `[sessions]` on v0.4, and v0.3's sessions wait in `sessions/` as they were.
 - `upstream_accounts = true` under `[devnet]` keeps LEZ's own genesis accounts funded, whose keys LEZ publishes for its examples and tools.
 
 ## Dev mode
@@ -260,7 +260,7 @@ Everything is in `~/.logos-devnet` (or `LOGOS_DEVNET_HOME`):
 | `wallet/` | the dev wallet: the faucet and each program's header key. Kept across resets. `wallet-v0.4/` is LEZ v0.4's |
 | `compose.yaml` | the Docker runtime's compose file |
 | `native/` | the native runtime's LEZ checkout, build, log and pid file |
-| `sessions/` | one directory per session: its `logosctl` home, its daemon's `HOME` with its storage, wallet and `session.json` |
+| `sessions/` | one directory per session: its `logosctl` home, its daemon's `HOME` with its storage, wallet and `session.json`. `sessions-v0.4/` is LEZ v0.4's |
 | `accounts/` | one directory per account group: its wallet and `accounts.json`. `accounts-v0.4/` holds LEZ v0.4's |
 | `programs.json` | the binary hash each program was deployed from |
 | `downloads/` | program binaries the project file names by URL, by SHA-256, and in `packages/` the module packages every daemon installs from, downloaded once and checked against the catalog's SHA-256. Every home uses the one in `~/.logos-devnet`, so a project's own home or a worktree's doesn't download them again. One left in another home from before v0.9.0 can be deleted |

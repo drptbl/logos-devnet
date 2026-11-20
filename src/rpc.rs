@@ -71,7 +71,8 @@ impl Rpc {
             .with_context(|| format!("getTransaction returned {value}"))
     }
 
-    /// An account's state: its `nonce` and its `data` shards, by program id.
+    /// An account's state: its `nonce` and its `data` by program id (`shards` on LEZ v0.3,
+    /// `actor_states` on v0.4), or null on v0.4 for an account never used.
     pub fn account(&self, account: &PublicId) -> Result<Value> {
         self.call("getAccount", json!([account.as_str()]))
     }
