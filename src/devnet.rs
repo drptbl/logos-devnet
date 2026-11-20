@@ -15,7 +15,7 @@ use crate::chain_config::{self, ChainOptions, Funded};
 use crate::envfile::{self, Env};
 use crate::fetch;
 use crate::groups::{self, Group, GroupInfo};
-use crate::home::{Home, RuntimeKind, Settings, write_json};
+use crate::home::{Home, LezLine, RuntimeKind, Settings, write_json};
 use crate::messaging::{Hub, Wants};
 use crate::project::{ProgramSource, ProgramSpec, Project};
 use crate::report::{
@@ -380,6 +380,7 @@ impl Devnet {
         }
         next.home.save_settings(&next.settings)?;
         std::fs::create_dir_all(next.home.chain_dir())?;
+        next.set_chain_up(&config)?;
         write_json(&next.home.chain_config(), &config)?;
         next.home.record_chain_dev_mode(next.settings.dev_mode)?;
         // Every one is tried, and a failure is reported once the chain runs.
@@ -890,6 +891,22 @@ impl Devnet {
             }
             None => self.new_keyed_account(FAUCET_LABEL),
         }
+    }
+
+    /// Sets a new LEZ v0.4 chain up from `config`: `setup` writes its channel signing key and
+    /// funding key file beside a copy of the config, which `up` then keeps up to date. A chain
+    /// set up before, and every v0.3 chain, has nothing to do.
+    fn set_chain_up(&self, config: &Value) -> Result<()> {
+        if self.settings.line() == LezLine::V03 || self.home.chain_set_up() {
+            return Ok(());
+        }
+        // `setup` refuses a home that has a config, e.g. from one that stopped halfway.
+        remove_if_present(&self.home.chain_config(), |p| std::fs::remove_file(p))?;
+        let template = self.home.setup_template();
+        write_json(&template, config)?;
+        let set_up = self.runtime.setup_chain();
+        remove_if_present(&template, |p| std::fs::remove_file(p))?;
+        set_up
     }
 
     fn chain_config(&self) -> Result<Value> {

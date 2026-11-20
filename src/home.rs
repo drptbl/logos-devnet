@@ -236,6 +236,14 @@ impl Home {
     pub fn chain_config(&self) -> PathBuf {
         self.chain_dir().join("sequencer_config.json")
     }
+    /// The config a new LEZ v0.4 chain is set up from; `setup` copies it to `chain_config`.
+    pub fn setup_template(&self) -> PathBuf {
+        self.chain_dir().join("setup-template.json")
+    }
+    /// Whether a LEZ v0.4 chain here has been set up: `setup` makes its channel signing key.
+    pub fn chain_set_up(&self) -> bool {
+        self.chain_dir().join("channel_signing_key").exists()
+    }
     /// The chain's own record of its dev mode, which `reset` deletes with it.
     fn chain_dev_mode_file(&self) -> PathBuf {
         self.chain_dir().join("dev-mode")

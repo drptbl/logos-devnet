@@ -17,7 +17,7 @@ use super::{
     redact_recovery_phrase, redacted, run_attached, run_building, sequencer_env, split_batch,
     stdout_of,
 };
-use crate::home::{Home, Settings};
+use crate::home::{Home, LezLine, Settings};
 
 pub struct Native {
     home: Home,
@@ -150,10 +150,19 @@ impl Runtime for Native {
             .create(true)
             .append(true)
             .open(self.log_file())?;
-        let child = Command::new(self.bin("sequencer_service"))
-            .arg(self.home.chain_config())
-            .args(["--listen-address", "127.0.0.1", "--port"])
-            .arg(self.settings.port.to_string())
+        let mut cmd = Command::new(self.bin("sequencer_service"));
+        match self.settings.line() {
+            LezLine::V03 => cmd
+                .arg(self.home.chain_config())
+                .args(["--listen-address", "127.0.0.1", "--port"])
+                .arg(self.settings.port.to_string()),
+            LezLine::V04 => cmd
+                .arg("start")
+                .arg(self.home.chain_dir())
+                .arg("--rpc-listen-address")
+                .arg(format!("127.0.0.1:{}", self.settings.port)),
+        };
+        let child = without_sequencer_vars(&mut cmd)
             .current_dir(self.home.chain_dir())
             .envs(sequencer_env(
                 self.settings.dev_mode,
@@ -168,6 +177,17 @@ impl Runtime for Native {
             .context("could not start sequencer_service")?;
         std::fs::write(self.pid_file(), child.id().to_string())?;
         Ok(())
+    }
+
+    fn setup_chain(&self) -> Result<()> {
+        let args = super::setup_args(
+            &self.home.chain_dir().to_string_lossy(),
+            &self.home.setup_template().to_string_lossy(),
+        );
+        let mut cmd = Command::new(self.bin("sequencer_service"));
+        stdout_of(without_sequencer_vars(&mut cmd).args(args))
+            .map(drop)
+            .context("setting the chain up")
     }
 
     fn stop(&self) -> Result<()> {
@@ -199,6 +219,7 @@ impl Runtime for Native {
         all_output_of(
             Command::new(self.bin("wallet"))
                 .env("LEE_WALLET_HOME_DIR", home)
+                .env("LEE_WALLET_PASSWORD", "")
                 .args(args),
         )
         .map(|out| redact_recovery_phrase(&out))
@@ -210,6 +231,7 @@ impl Runtime for Native {
         let out = all_output_of(
             Command::new("sh")
                 .env("LEE_WALLET_HOME_DIR", home)
+                .env("LEE_WALLET_PASSWORD", "")
                 .arg("-c")
                 .arg(script),
         )
@@ -231,6 +253,17 @@ impl Runtime for Native {
     }
 }
 
+/// `cmd` without the `SEQUENCER_*` variables this process has: a v0.4 sequencer reads each of
+/// its flags from one, and a stray one would change the devnet.
+fn without_sequencer_vars(cmd: &mut Command) -> &mut Command {
+    for (var, _) in std::env::vars_os() {
+        if var.to_string_lossy().starts_with("SEQUENCER_") {
+            cmd.env_remove(var);
+        }
+    }
+    cmd
+}
+
 /// Whether a process's command line (as `ps -o command=` prints it) runs `bin`: it starts
 /// with that path, then ends or goes on to the arguments.
 fn runs(command: &str, bin: &Path) -> bool {
@@ -243,9 +276,15 @@ fn runs(command: &str, bin: &Path) -> bool {
 fn find_debug_config(dir: &Path) -> Option<PathBuf> {
     let mut stack = vec![(dir.to_path_buf(), 0)];
     while let Some((dir, depth)) = stack.pop() {
-        let file = dir.join("sequencer_config.json");
-        if dir.ends_with("sequencer/service/configs/debug") && file.exists() {
-            return Some(file);
+        // v0.3's debug config, or v0.4's local one.
+        for (parent, name) in [
+            ("sequencer/service/configs/debug", "sequencer_config.json"),
+            ("sequencer/service/networks", "local.json"),
+        ] {
+            let file = dir.join(name);
+            if dir.ends_with(parent) && file.exists() {
+                return Some(file);
+            }
         }
         if depth >= 6 {
             continue;
@@ -308,6 +347,19 @@ mod tests {
             let found = find_debug_config(dir.path()).unwrap();
             assert_eq!(found, debug.join("sequencer_config.json"), "{layout}");
         }
+    }
+
+    #[test]
+    fn finds_the_v0_4_local_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let networks = dir.path().join("lez/sequencer/service/networks");
+        std::fs::create_dir_all(&networks).unwrap();
+        std::fs::write(networks.join("testnet.json"), "{}").unwrap();
+        std::fs::write(networks.join("local.json"), "{}").unwrap();
+        assert_eq!(
+            find_debug_config(dir.path()).unwrap(),
+            networks.join("local.json")
+        );
     }
 
     #[test]
