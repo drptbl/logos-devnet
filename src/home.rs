@@ -36,21 +36,38 @@ pub const DEFAULT_MAX_TXS_PER_BLOCK: u32 = 20;
 /// The sequencer's log filter (`RUST_LOG`): its own progress, without its actor framework's.
 pub const DEFAULT_LOG_FILTER: &str = "info,kameo=warn";
 
-/// A LEZ tag logos-devnet runs: one of the v0.3 line, e.g. `v0.3.1`. LEZ v0.4 changes the
-/// sequencer's config and commands, the wallet's format and how accounts are funded.
-pub fn check_lez(tag: &str) -> Result<()> {
-    let patch = tag.strip_prefix("v0.3.").unwrap_or_default();
-    let numbered = patch
-        .split(['-', '.'])
-        .next()
-        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
-    if !numbered {
-        anyhow::bail!(
-            "logos-devnet runs LEZ v0.3 tags, and {tag} isn't one: use `--lez {DEFAULT_LEZ}` or \
-             another v0.3 tag. LEZ v0.4 changes the sequencer and wallet, and isn't supported yet"
-        );
+/// The LEZ release line a tag belongs to. v0.4 changes how the sequencer starts, its config,
+/// the wallet's storage and how accounts are funded, so each line has its own code path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LezLine {
+    V03,
+    V04,
+}
+
+impl LezLine {
+    /// The line of `tag`, e.g. `v0.3.1` or `v0.4.0-rc3`.
+    pub fn of(tag: &str) -> Result<Self> {
+        let numbered = |prefix: &str| {
+            tag.strip_prefix(prefix)
+                .and_then(|patch| patch.split(['-', '.']).next())
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        };
+        if numbered("v0.3.") {
+            Ok(Self::V03)
+        } else if numbered("v0.4.") {
+            Ok(Self::V04)
+        } else {
+            anyhow::bail!(
+                "logos-devnet runs LEZ v0.3 and v0.4 tags, and {tag} isn't one: use \
+                 `--lez {DEFAULT_LEZ}`, or a v0.4 tag such as `v0.4.0-rc3`"
+            )
+        }
     }
-    Ok(())
+}
+
+/// A LEZ tag logos-devnet runs: one of the v0.3 or v0.4 line.
+pub fn check_lez(tag: &str) -> Result<()> {
+    LezLine::of(tag).map(drop)
 }
 
 /// A log filter the sequencer takes: `RUST_LOG` syntax, e.g. `debug` or
@@ -115,6 +132,12 @@ fn default_log_filter() -> String {
 }
 
 impl Settings {
+    /// The LEZ line the settings' tag belongs to. `up` checks the tag before it saves one, so
+    /// a tag from no line, in a hand-edited file, reads as v0.3.
+    pub fn line(&self) -> LezLine {
+        LezLine::of(&self.lez).unwrap_or(LezLine::V03)
+    }
+
     pub fn image(&self) -> String {
         format!("{IMAGE_REPO}:{}", self.lez)
     }
@@ -225,8 +248,13 @@ impl Home {
         let value = crate::envfile::dev_mode_value(dev_mode);
         std::fs::write(&file, value).with_context(|| format!("writing {}", file.display()))
     }
-    pub fn wallet_dir(&self) -> PathBuf {
-        self.root.join("wallet")
+    /// The dev wallet: the faucet and each program's header key. A v0.4 wallet can't read
+    /// v0.3 storage, so each LEZ line has its own, and its own program ids.
+    pub fn wallet_dir(&self, line: LezLine) -> PathBuf {
+        self.root.join(match line {
+            LezLine::V03 => "wallet",
+            LezLine::V04 => "wallet-v0.4",
+        })
     }
     pub fn compose_file(&self) -> PathBuf {
         self.root.join("compose.yaml")
@@ -237,8 +265,12 @@ impl Home {
     pub fn sessions_dir(&self) -> PathBuf {
         self.root.join("sessions")
     }
-    pub fn groups_dir(&self) -> PathBuf {
-        self.root.join("accounts")
+    /// Account groups, each with a wallet: one set per LEZ line, like the dev wallet.
+    pub fn groups_dir(&self, line: LezLine) -> PathBuf {
+        self.root.join(match line {
+            LezLine::V03 => "accounts",
+            LezLine::V04 => "accounts-v0.4",
+        })
     }
     /// Program binaries downloaded from a URL, named by their SHA-256.
     pub fn downloads_dir(&self) -> PathBuf {
@@ -365,22 +397,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn runs_only_lez_v0_3_tags() {
+    fn runs_lez_v0_3_and_v0_4_tags() {
         for tag in ["v0.3.1", "v0.3.2", "v0.3.10", "v0.3.2-rc1"] {
-            assert!(check_lez(tag).is_ok(), "{tag}");
+            assert_eq!(LezLine::of(tag).unwrap(), LezLine::V03, "{tag}");
         }
-        for tag in [
-            "v0.4.0-rc3",
-            "v0.4.0",
-            "v0.3",
-            "v0.3.",
-            "v0.3.x",
-            "0.3.1",
-            "main",
-        ] {
+        for tag in ["v0.4.0-rc3", "v0.4.0", "v0.4.12"] {
+            assert_eq!(LezLine::of(tag).unwrap(), LezLine::V04, "{tag}");
+        }
+        for tag in ["v0.5.0", "v0.3", "v0.4.", "v0.3.x", "0.3.1", "main"] {
             assert!(check_lez(tag).is_err(), "{tag}");
         }
-        assert!(check_lez(DEFAULT_LEZ).is_ok());
+        assert_eq!(LezLine::of(DEFAULT_LEZ).unwrap(), LezLine::V03);
+    }
+
+    #[test]
+    fn each_lez_line_keeps_its_own_wallets() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Home::locate(Some(dir.path().to_path_buf())).unwrap();
+        // A v0.4 wallet can't read v0.3 storage, so a v0.4 chain starts its own.
+        assert_eq!(home.wallet_dir(LezLine::V03), home.root().join("wallet"));
+        assert_eq!(home.groups_dir(LezLine::V03), home.root().join("accounts"));
+        assert_eq!(home.wallet_dir(LezLine::V04), home.root().join("wallet-v0.4"));
+        assert_eq!(home.groups_dir(LezLine::V04), home.root().join("accounts-v0.4"));
     }
 
     #[test]

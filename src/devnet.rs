@@ -271,7 +271,7 @@ impl Devnet {
     /// Runs the LEZ wallet on the dev wallet. Its config is rewritten first: the wallet would
     /// otherwise create a default one pointing at the public testnet.
     fn wallet(&self, args: Vec<WalletArg>) -> Result<String> {
-        let home = self.home.wallet_dir();
+        let home = self.wallet_dir();
         self.point_wallet_at(&home, &self.runtime.wallet_sequencer_url())?;
         self.runtime.wallet(&home, args)
     }
@@ -281,6 +281,16 @@ impl Devnet {
     fn point_wallet_at(&self, home: &Path, sequencer: &str) -> Result<()> {
         std::fs::create_dir_all(home)?;
         write_json(&home.join("wallet_config.json"), &wallet_config(sequencer))
+    }
+
+    /// The dev wallet of the chain's LEZ line.
+    fn wallet_dir(&self) -> PathBuf {
+        self.home.wallet_dir(self.settings.line())
+    }
+
+    /// The account groups of the chain's LEZ line.
+    fn groups_dir(&self) -> PathBuf {
+        self.home.groups_dir(self.settings.line())
     }
 
     fn faucet(&self) -> Result<&PublicId> {
@@ -505,7 +515,7 @@ impl Devnet {
     /// height. Keys and accounts stay. Every group is tried.
     fn forget_group_chains(&self) -> Result<()> {
         let mut failed = Vec::new();
-        for group in groups::list(&self.home.groups_dir())? {
+        for group in groups::list(&self.groups_dir())? {
             if let Err(e) = group.forget_old_chain() {
                 eprintln!("account group {}: {e:#}", group.name);
                 failed.push(group.name);
@@ -530,7 +540,7 @@ impl Devnet {
                 failed.push(format!("session {}", session.name));
             }
         }
-        for group in groups::list(&self.home.groups_dir())? {
+        for group in groups::list(&self.groups_dir())? {
             if let Err(e) = group.mark_new_chain() {
                 eprintln!("account group {}: {e:#}", group.name);
                 failed.push(format!("account group {}", group.name));
@@ -613,7 +623,7 @@ impl Devnet {
     /// Group `name` with at least `count` accounts, each to be funded with `amount`. Missing
     /// keys are made in one wallet batch. A group never shrinks: its keys stay.
     fn make_group(&self, name: &str, count: usize, amount: u64) -> Result<GroupInfo> {
-        let group = Group::new(&self.home.groups_dir(), name)?;
+        let group = Group::new(&self.groups_dir(), name)?;
         if !group.wallet_dir().exists() {
             groups::check_group_name(name)?;
         }
@@ -676,7 +686,7 @@ impl Devnet {
     /// "Never funded" is read from the chain, so spent accounts aren't topped up.
     fn fund_groups(&self, only: Option<&str>) -> Result<()> {
         let rpc = self.rpc();
-        for group in groups::list(&self.home.groups_dir())? {
+        for group in groups::list(&self.groups_dir())? {
             if only.is_some_and(|name| name != group.name) {
                 continue;
             }
@@ -707,7 +717,7 @@ impl Devnet {
     /// Every account group's accounts with their genesis balance.
     fn genesis_accounts(&self) -> Result<Vec<(PublicId, u64)>> {
         let mut accounts = Vec::new();
-        for group in groups::list(&self.home.groups_dir())? {
+        for group in groups::list(&self.groups_dir())? {
             let info = group.info()?;
             accounts.extend(info.accounts.into_iter().map(|a| (a.id, info.amount)));
         }
@@ -890,7 +900,7 @@ impl Devnet {
             messaging: self.hub().addresses(),
             sessions: BTreeMap::new(),
         };
-        for group in groups::list(&self.home.groups_dir())? {
+        for group in groups::list(&self.groups_dir())? {
             env.groups.insert(group.name.clone(), group.manifest());
         }
         // A session still being made has no account yet: it joins the next env file.
@@ -1061,7 +1071,7 @@ impl Devnet {
     }
 
     fn group_summaries(&self) -> Result<Vec<GroupSummary>> {
-        groups::list(&self.home.groups_dir())?
+        groups::list(&self.groups_dir())?
             .into_iter()
             .map(|group| {
                 let info = group.info()?;
@@ -2547,7 +2557,7 @@ mod tests {
             ("admins", "not json"),
             ("users", crate::wallet_storage::tests::SYNCED_STORAGE),
         ] {
-            let group = Group::new(&home.groups_dir(), name).unwrap();
+            let group = Group::new(&home.groups_dir(crate::home::LezLine::V03), name).unwrap();
             std::fs::create_dir_all(group.wallet_dir()).unwrap();
             std::fs::write(group.wallet_storage(), storage).unwrap();
             group.mark_new_chain().unwrap();
@@ -2900,11 +2910,11 @@ mod tests {
     }
 
     #[test]
-    fn up_refuses_a_lez_tag_outside_v0_3_before_saving_anything() {
+    fn up_refuses_a_lez_tag_outside_v0_3_and_v0_4_before_saving_anything() {
         let dir = tempfile::tempdir().unwrap();
         let home = Home::locate(Some(dir.path().into())).unwrap();
         let opts = UpOptions {
-            lez: Some("v0.4.0-rc3".into()),
+            lez: Some("v0.5.0".into()),
             ..UpOptions::default()
         };
         let err = Devnet::open(home.clone(), None)
