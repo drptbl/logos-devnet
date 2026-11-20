@@ -280,7 +280,10 @@ impl Devnet {
     /// run: without one the wallet creates a default pointing at the public testnet.
     fn point_wallet_at(&self, home: &Path, sequencer: &str) -> Result<()> {
         std::fs::create_dir_all(home)?;
-        write_json(&home.join("wallet_config.json"), &wallet_config(sequencer))
+        write_json(
+            &home.join("wallet_config.json"),
+            &wallet_config(self.settings.line(), sequencer),
+        )
     }
 
     /// The dev wallet of the chain's LEZ line.
@@ -712,7 +715,7 @@ impl Devnet {
             let mut unfunded = Vec::new();
             for account in &info.accounts {
                 if !rpc.account_in_use(&account.id)? {
-                    unfunded.push(&account.id);
+                    unfunded.push(account);
                 }
             }
             if unfunded.is_empty() {
@@ -724,8 +727,8 @@ impl Devnet {
                 unfunded.len(),
                 group.name
             );
-            for id in unfunded {
-                self.send(id, u128::from(info.amount))?;
+            for account in unfunded {
+                self.send(&account.id, account.key.as_deref(), u128::from(info.amount))?;
             }
         }
         Ok(())
@@ -775,7 +778,7 @@ impl Devnet {
         // Funding only needs the dev wallet: a daemon that won't start doesn't cost the
         // account its funds.
         let funded = if new_chain {
-            self.send(&info.account, info.funded).map(drop)
+            self.send(&info.account, None, info.funded).map(drop)
         } else {
             Ok(())
         };
@@ -855,23 +858,15 @@ impl Devnet {
         std::fs::create_dir_all(session.wallet_dir())?;
         write_json(
             &session.wallet_config(),
-            &wallet_config(&self.settings.sequencer_url()),
+            &wallet_config(self.settings.line(), &self.settings.sequencer_url()),
         )
     }
 
-    /// Sends `amount` lepta from the faucet to `to` and returns its new balance.
-    fn send(&self, to: &PublicId, amount: u128) -> Result<u128> {
-        let faucet = self.faucet()?;
-        self.wallet(vec![
-            "auth-transfer".into(),
-            "send".into(),
-            "--from".into(),
-            faucet.wallet_form().into(),
-            "--to".into(),
-            to.wallet_form().into(),
-            "--amount".into(),
-            amount.to_string().into(),
-        ])?;
+    /// Sends `amount` lepta from the faucet to `to`, whose public key is `key` when known, and
+    /// returns its new balance.
+    fn send(&self, to: &PublicId, key: Option<&str>, amount: u128) -> Result<u128> {
+        let args = transfer_args(self.settings.line(), self.faucet()?, to, key, amount);
+        self.wallet(args.into_iter().map(WalletArg::from).collect())?;
         self.rpc().balance(to)
     }
 
@@ -1085,12 +1080,22 @@ impl Devnet {
         })
     }
 
-    pub fn fund(&self, account: &str, amount: u128) -> Result<Balance> {
+    /// Sends `amount` lepta from the faucet to `account`. LEZ v0.4 pays an account it has
+    /// never seen only by its public key, `key`.
+    pub fn fund(&self, account: &str, amount: u128, key: Option<&str>) -> Result<Balance> {
         let to = PublicId::parse(account)?;
+        if let Some(key) = key
+            && PublicId::of_key(key)? != to
+        {
+            bail!(
+                "that public key names another account than {}",
+                to.wallet_form()
+            );
+        }
         // Fails before any work when there is no faucet yet.
         self.faucet()?;
         self.require_running()?;
-        let balance = self.send(&to, amount)?;
+        let balance = self.send(&to, key, amount)?;
         Ok(Balance {
             account: to.wallet_form(),
             balance: Some(balance),
@@ -1260,7 +1265,7 @@ impl Devnet {
             funded: amount,
         };
         session.save_info(&info)?;
-        self.send(&info.account, amount)?;
+        self.send(&info.account, None, amount)?;
         // The session is made and funded either way: the next `up` joins it again.
         if let Err(e) = self.join_hub(&ctl) {
             eprintln!("session {}: {e:#}", session.name);
@@ -1662,7 +1667,10 @@ impl Devnet {
             }
         }
         std::fs::create_dir_all(dir)?;
-        write_json(&path, &wallet_config(&self.settings.sequencer_url()))?;
+        write_json(
+            &path,
+            &wallet_config(self.settings.line(), &self.settings.sequencer_url()),
+        )?;
         Ok(WalletConfig { path })
     }
 }
@@ -1899,9 +1907,8 @@ fn remove_if_present(path: &Path, remove: fn(&Path) -> std::io::Result<()>) -> R
 /// A wallet config in the shape `lez_core` 0.5.1 writes. It reads `sequencer.sequencer_addr`;
 /// the top-level `sequencer_addr` and `sequencers` are set too, so a build that reads those
 /// finds the devnet as well.
-fn wallet_config(sequencer: &str) -> Value {
-    json!({
-        "gas_limit": 200_000,
+fn wallet_config(line: LezLine, sequencer: &str) -> Value {
+    let mut config = json!({
         "multi_sequencer_client_config": { "calibration_limit": 3, "distribution_limit": 1 },
         "seq_block_poll_max_amount": 100,
         "seq_poll_max_retries": 10,
@@ -1910,7 +1917,33 @@ fn wallet_config(sequencer: &str) -> Value {
         "sequencer": { "sequencer_addr": sequencer },
         "sequencer_addr": sequencer,
         "sequencers": [{ "sequencer_addr": sequencer }]
-    })
+    });
+    // v0.3 declares this much gas on each transaction. v0.4 measures it, and without a
+    // `gas_limit` budgets up to the block's cap, which a 96 KiB program segment needs.
+    if line == LezLine::V03 {
+        config["gas_limit"] = json!(200_000);
+    }
+    config
+}
+
+/// The wallet's arguments that send `amount` lepta from `from` to `to`. LEZ v0.4 takes an
+/// account it has never seen only when the payment names its public key (`key`), and then
+/// refuses `--to` beside it.
+fn transfer_args(
+    line: LezLine,
+    from: &PublicId,
+    to: &PublicId,
+    key: Option<&str>,
+    amount: u128,
+) -> Vec<String> {
+    let mut args: Vec<String> = vec!["auth-transfer".into(), "send".into(), "--from".into()];
+    args.push(from.wallet_form());
+    match (line, key) {
+        (LezLine::V04, Some(key)) => args.extend(["--to-pk".into(), key.to_owned()]),
+        _ => args.extend(["--to".into(), to.wallet_form()]),
+    }
+    args.extend(["--amount".into(), amount.to_string()]);
+    args
 }
 
 /// The account `wallet account list` shows with `[label]`.
@@ -2533,7 +2566,7 @@ mod tests {
 
     #[test]
     fn wallet_configs_point_every_address_field_at_the_devnet() {
-        let config = wallet_config("http://127.0.0.1:3040");
+        let config = wallet_config(LezLine::V03, "http://127.0.0.1:3040");
         assert_eq!(
             config["sequencer"]["sequencer_addr"],
             "http://127.0.0.1:3040"
@@ -2545,6 +2578,42 @@ mod tests {
         );
         assert_eq!(config["gas_limit"], 200_000);
         assert_eq!(config["seq_poll_timeout"], "2s");
+        // A v0.4 wallet budgets each transaction up to the block's cap when it sets none.
+        let config = wallet_config(LezLine::V04, "http://127.0.0.1:3040");
+        assert!(config.get("gas_limit").is_none());
+        assert_eq!(config["sequencer_addr"], "http://127.0.0.1:3040");
+    }
+
+    #[test]
+    fn pays_an_account_by_its_key_on_v0_4() {
+        let faucet = PublicId::parse(ID).unwrap();
+        let to = PublicId::parse("6YvesSEDWW25kpi8SSki2c8o5m3uACsigvGnNQ6wMruh").unwrap();
+        let args = |line, key| transfer_args(line, &faucet, &to, key, 5);
+        let to_id = format!("Public/{}", to.as_str());
+        assert!(
+            args(LezLine::V03, Some("ab")).contains(&to_id),
+            "v0.3 pays by id"
+        );
+        // v0.4 admits an account it has never seen only when the payment names its key.
+        let by_key = args(LezLine::V04, Some("ab"));
+        assert!(
+            by_key.windows(2).any(|w| w == ["--to-pk", "ab"]),
+            "{by_key:?}"
+        );
+        assert!(
+            !by_key.contains(&"--to".to_owned()),
+            "--to and --to-pk conflict"
+        );
+        assert!(args(LezLine::V04, None).contains(&to_id));
+    }
+
+    #[test]
+    fn funds_by_key_only_the_account_the_key_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let devnet = devnet_in(&dir.path().join("home"));
+        let key = crate::account::public_key_of(&"01".repeat(32)).unwrap();
+        let err = devnet.fund(ID, 5, Some(&key)).unwrap_err();
+        assert!(err.to_string().contains("names another account"), "{err}");
     }
 
     #[test]
@@ -2970,7 +3039,7 @@ mod tests {
     fn fund_and_deploy_refuse_before_up() {
         let dir = tempfile::tempdir().unwrap();
         let devnet = devnet_in(dir.path());
-        let err = devnet.fund(ID, 1).unwrap_err();
+        let err = devnet.fund(ID, 1, None).unwrap_err();
         assert!(err.to_string().contains("logos-devnet up"), "{err}");
         let elf = dir.path().join("program.bin");
         std::fs::write(&elf, [0u8; 8]).unwrap();
