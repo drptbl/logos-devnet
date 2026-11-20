@@ -7,6 +7,7 @@
 //! [devnet]                         # optional: the same settings as `up`'s flags
 //! block_time = "1s"
 //! max_txs_per_block = 100
+//! upstream_accounts = true         # also fund LEZ's own genesis accounts on a new chain
 //!
 //! [programs]                       # name = guest binary, relative to this file
 //! counter = "target/riscv32im-risc0-zkvm-elf/docker/counter.bin"
@@ -114,6 +115,10 @@ pub struct DevnetSection {
     pub max_txs_per_block: Option<u32>,
     pub dev_mode: Option<bool>,
     pub log_filter: Option<String>,
+    /// Keep LEZ's own genesis accounts, whose keys are published, funded too on a new chain:
+    /// LEZ's examples and tools fund themselves from them. Not a setting `up` keeps: only a
+    /// new chain's genesis reads it.
+    pub upstream_accounts: Option<bool>,
 }
 
 impl DevnetSection {
@@ -324,6 +329,15 @@ mod tests {
         assert!(project_in(dir.path(), "[messaging]\n").unwrap().messaging);
         assert!(!project_in(dir.path(), "").unwrap().messaging);
         assert!(project_in(dir.path(), "[messaging]\nport = 1\n").is_err());
+    }
+
+    #[test]
+    fn can_keep_upstreams_genesis_accounts() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = project_in(dir.path(), "[devnet]\nupstream_accounts = true\n").unwrap();
+        assert_eq!(project.devnet.upstream_accounts, Some(true));
+        let project = project_in(dir.path(), "").unwrap();
+        assert_eq!(project.devnet.upstream_accounts, None);
     }
 
     #[test]

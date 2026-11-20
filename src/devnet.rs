@@ -934,7 +934,11 @@ impl Devnet {
                 faucet: &faucet,
                 max_txs_per_block: self.settings.max_txs_per_block,
                 genesis_accounts: &genesis_accounts,
-                keep_upstream_accounts: false,
+                keep_upstream_accounts: self
+                    .project
+                    .as_ref()
+                    .and_then(|p| p.devnet.upstream_accounts)
+                    .unwrap_or(false),
             },
         )
     }
