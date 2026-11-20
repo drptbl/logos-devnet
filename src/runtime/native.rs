@@ -114,19 +114,16 @@ impl Runtime for Native {
                 .args(["build", "--release", "-p", package]);
             cmd
         };
-        // Two builds: in one, `prove` would reach the wallet too, which then links the prover
-        // kernels that RISC0_SKIP_BUILD_KERNELS leaves out.
-        run_building(
-            cargo("sequencer_service")
-                .env("RISC0_SKIP_BUILD_KERNELS", "1")
-                .args(["--features", SEQUENCER_FEATURES]),
-        )?;
+        // Two builds, so `prove` stays out of the wallet binary. risc0's CPU kernels are built
+        // too: from LEZ v0.4 the sequencer links the wallet, whose prover needs them.
+        run_building(cargo("sequencer_service").args(["--features", SEQUENCER_FEATURES]))?;
         run_building(&mut cargo("wallet"))
     }
 
     fn upstream_config(&self) -> Result<Value> {
         let path = find_debug_config(&self.src()).context(
-            "the LEZ checkout has no sequencer/service/configs/debug/sequencer_config.json",
+            "the LEZ checkout has no sequencer/service/configs/debug/sequencer_config.json \
+             or sequencer/service/networks/local.json",
         )?;
         let text = std::fs::read_to_string(&path)?;
         serde_json::from_str(&text).with_context(|| format!("{} is not JSON", path.display()))

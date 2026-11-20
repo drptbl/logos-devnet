@@ -6,8 +6,8 @@
 #   docker build --build-arg LEZ_TAG=v0.3.1 -t ghcr.io/drptbl/logos-devnet-sequencer:v0.3.1 - < docker/Dockerfile
 #
 # `standalone` replaces Bedrock with an in-process mock, and `prove` runs guests in-process, so
-# the image needs neither a Bedrock node nor r0vm. RISC0_SKIP_BUILD_KERNELS skips the GPU kernels
-# `prove` would otherwise compile; the sequencer only executes, it never proves.
+# the image needs neither a Bedrock node nor r0vm. risc0's CPU kernels are built too: from LEZ
+# v0.4 the sequencer links the wallet, whose prover needs them.
 
 FROM rust:1-slim-trixie AS build
 ARG LEZ_TAG
@@ -19,13 +19,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 RUN git clone --depth 1 --branch "$LEZ_TAG" https://github.com/logos-blockchain/logos-execution-zone.git /lez
 WORKDIR /lez
-# The tag's rust-toolchain.toml picks the compiler; rustup installs it on first use. Two builds:
-# in one, `prove` would reach the wallet too, which then links the kernels skipped here. The
-# target cache is locked, so a concurrent build of another tag can't swap binaries before the copy.
+# The tag's rust-toolchain.toml picks the compiler; rustup installs it on first use. Two builds,
+# so `prove` stays out of the wallet binary. The target cache is locked, so a concurrent build of
+# another tag can't swap binaries before the copy.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/lez/target,sharing=locked \
-    RISC0_SKIP_BUILD_KERNELS=1 cargo build --release --features "$FEATURES" -p sequencer_service \
+    cargo build --release --features "$FEATURES" -p sequencer_service \
     && cargo build --release -p wallet \
     && mkdir -p /out \
     && cp target/release/sequencer_service target/release/wallet /out/ \
