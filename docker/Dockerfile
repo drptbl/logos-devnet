@@ -30,9 +30,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && mkdir -p /out \
     && cp target/release/sequencer_service target/release/wallet /out/ \
     && strip /out/sequencer_service /out/wallet
-# Upstream's debug config for this tag; the CLI patches it rather than shipping its own.
+# Upstream's local config for this tag; the CLI patches it rather than shipping its own. LEZ
+# v0.3 keeps it in `configs/debug/`, v0.4 as `networks/local.json`.
 RUN mkdir -p /out/share \
-    && config="$(find . -path ./target -prune -o -path '*sequencer/service/configs/debug/sequencer_config.json' -print | head -1)" \
+    && config="$(find . -path ./target -prune -o \( -path '*sequencer/service/configs/debug/sequencer_config.json' -o -path '*sequencer/service/networks/local.json' \) -print | head -1)" \
     && test -n "$config" \
     && cp "$config" /out/share/sequencer_config.json
 
