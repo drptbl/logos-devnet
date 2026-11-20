@@ -114,14 +114,18 @@ impl Runtime for Native {
                 .args(["build", "--release", "-p", package]);
             cmd
         };
-        // Two builds, so `prove` stays out of the wallet binary. risc0's CPU kernels are built
-        // too: from LEZ v0.4 the sequencer links the wallet, whose prover needs them.
-        run_building(cargo("sequencer_service").args(["--features", SEQUENCER_FEATURES]))?;
+        // Two builds, so `prove` stays out of the wallet binary. v0.3 skips the prover kernels
+        // the sequencer never runs; from v0.4 it links the wallet, whose prover needs them.
+        let mut sequencer = cargo("sequencer_service");
+        if self.settings.line() == LezLine::V03 {
+            sequencer.env("RISC0_SKIP_BUILD_KERNELS", "1");
+        }
+        run_building(sequencer.args(["--features", SEQUENCER_FEATURES]))?;
         run_building(&mut cargo("wallet"))
     }
 
     fn upstream_config(&self) -> Result<Value> {
-        let path = find_debug_config(&self.src()).context(
+        let path = find_upstream_config(&self.src()).context(
             "the LEZ checkout has no sequencer/service/configs/debug/sequencer_config.json \
              or sequencer/service/networks/local.json",
         )?;
@@ -273,7 +277,7 @@ fn runs(command: &str, bin: &Path) -> bool {
 }
 
 /// Upstream's debug sequencer config, wherever this tag keeps it.
-fn find_debug_config(dir: &Path) -> Option<PathBuf> {
+fn find_upstream_config(dir: &Path) -> Option<PathBuf> {
     let mut stack = vec![(dir.to_path_buf(), 0)];
     while let Some((dir, depth)) = stack.pop() {
         // v0.3's debug config, or v0.4's local one.
@@ -344,7 +348,7 @@ mod tests {
             let debug = dir.path().join(layout).join("configs/debug");
             std::fs::create_dir_all(&debug).unwrap();
             std::fs::write(debug.join("sequencer_config.json"), "{}").unwrap();
-            let found = find_debug_config(dir.path()).unwrap();
+            let found = find_upstream_config(dir.path()).unwrap();
             assert_eq!(found, debug.join("sequencer_config.json"), "{layout}");
         }
     }
@@ -357,7 +361,7 @@ mod tests {
         std::fs::write(networks.join("testnet.json"), "{}").unwrap();
         std::fs::write(networks.join("local.json"), "{}").unwrap();
         assert_eq!(
-            find_debug_config(dir.path()).unwrap(),
+            find_upstream_config(dir.path()).unwrap(),
             networks.join("local.json")
         );
     }
@@ -368,6 +372,6 @@ mod tests {
         let debug = dir.path().join("target/sequencer/service/configs/debug");
         std::fs::create_dir_all(&debug).unwrap();
         std::fs::write(debug.join("sequencer_config.json"), "{}").unwrap();
-        assert!(find_debug_config(dir.path()).is_none());
+        assert!(find_upstream_config(dir.path()).is_none());
     }
 }

@@ -6,8 +6,9 @@
 #   docker build --build-arg LEZ_TAG=v0.3.1 -t ghcr.io/drptbl/logos-devnet-sequencer:v0.3.1 - < docker/Dockerfile
 #
 # `standalone` replaces Bedrock with an in-process mock, and `prove` runs guests in-process, so
-# the image needs neither a Bedrock node nor r0vm. risc0's CPU kernels are built too: from LEZ
-# v0.4 the sequencer links the wallet, whose prover needs them.
+# the image needs neither a Bedrock node nor r0vm. For v0.3, RISC0_SKIP_BUILD_KERNELS skips the
+# prover kernels the sequencer never runs. From LEZ v0.4 the sequencer links the wallet, whose
+# prover needs them, so they're built.
 
 FROM rust:1-slim-trixie AS build
 ARG LEZ_TAG
@@ -25,7 +26,8 @@ WORKDIR /lez
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/lez/target,sharing=locked \
-    cargo build --release --features "$FEATURES" -p sequencer_service \
+    case "$LEZ_TAG" in v0.3.*) export RISC0_SKIP_BUILD_KERNELS=1 ;; esac \
+    && cargo build --release --features "$FEATURES" -p sequencer_service \
     && cargo build --release -p wallet \
     && mkdir -p /out \
     && cp target/release/sequencer_service target/release/wallet /out/ \
