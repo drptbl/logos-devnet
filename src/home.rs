@@ -6,6 +6,7 @@
 //! env             export lines for projects (see envfile)
 //! chain/          the sequencer's home: its config, database and keys. `reset` deletes it.
 //! wallet/         the dev wallet: the faucet and each program's header key. Kept across resets.
+//!                 LEZ v0.4's is `wallet-v0.4/`, and its account groups `accounts-v0.4/`
 //! compose.yaml    the Docker runtime's compose file
 //! native/         the native runtime's checkout, build, log and pid file
 //! sessions/       throwaway logosctl sessions with devnet wallets (see session)
