@@ -1,26 +1,38 @@
-//! The sequencer config a devnet runs on: upstream's own debug config for the pinned LEZ tag,
-//! with our chain home, block interval and faucet. Patching upstream's file rather than shipping
-//! our own keeps every field a newer tag adds.
+//! The sequencer config a devnet runs on: upstream's own local config for the pinned LEZ tag
+//! (`configs/debug/sequencer_config.json` on v0.3, `networks/local.json` on v0.4), with our
+//! chain home, block interval and faucet. Patching upstream's file rather than shipping our own
+//! keeps every field a newer tag adds.
 
 use anyhow::{Context, Result, bail};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::account::PublicId;
+use crate::home::LezLine;
 
-/// What a devnet changes in upstream's debug config.
+/// What a devnet changes in upstream's config.
 pub struct ChainOptions<'a> {
     /// Where the sequencer keeps its database and keys, as the sequencer sees the path.
     pub home: &'a str,
     /// Block interval, in the sequencer's humantime format (`1s`, `500ms`).
     pub block_time: &'a str,
     /// The faucet, funded at genesis.
-    pub faucet: &'a PublicId,
-    /// The faucet's genesis balance in lepta.
-    pub faucet_balance: u64,
+    pub faucet: &'a Funded,
     /// The most user transactions a block takes.
     pub max_txs_per_block: u32,
-    /// More accounts to fund at genesis, with their balances.
-    pub genesis_accounts: &'a [(PublicId, u64)],
+    /// More accounts to fund at genesis.
+    pub genesis_accounts: &'a [Funded],
+    /// Keep upstream's own genesis accounts, whose keys are published, funded too: tools such
+    /// as LEZ's examples fund themselves from them.
+    pub keep_upstream_accounts: bool,
+}
+
+/// An account funded at genesis. v0.3 names it by id, v0.4 by its public key.
+pub struct Funded {
+    pub id: PublicId,
+    /// Its public key, as 64 hex digits: what a v0.4 genesis funds.
+    pub key: Option<String>,
+    /// Lepta.
+    pub balance: u64,
 }
 
 /// The bounds `max_txs_per_block` must fall in: upstream's mempool holds 1000 transactions.
@@ -37,10 +49,11 @@ pub fn check_max_txs_per_block(max: u32) -> Result<()> {
     Ok(())
 }
 
-/// Returns `debug` with `opts` applied. The faucet is the only funded account: upstream's
-/// supply accounts have published keys.
-pub fn patch(mut debug: Value, opts: &ChainOptions) -> Result<Value> {
-    let config = debug
+/// Returns upstream's config with `opts` applied, in `line`'s schema. Unless the options keep
+/// them, the faucet and the given accounts are the only ones funded: upstream's supply accounts
+/// have published keys.
+pub fn patch(line: LezLine, mut upstream: Value, opts: &ChainOptions) -> Result<Value> {
+    let config = upstream
         .as_object_mut()
         .context("the upstream sequencer config is not a JSON object")?;
     config.insert("home".into(), json!(opts.home));
@@ -48,29 +61,65 @@ pub fn patch(mut debug: Value, opts: &ChainOptions) -> Result<Value> {
     check_max_txs_per_block(opts.max_txs_per_block)?;
     config.insert("max_num_tx_in_block".into(), json!(opts.max_txs_per_block));
     // Both would listen on every interface: metrics on 9000 and gossip on a UDP port. A single
-    // devnet sequencer needs neither.
-    config.insert("metrics_address".into(), Value::Null);
+    // devnet sequencer needs neither. v0.4 refuses fields it doesn't know, and renamed one.
+    let metrics = match line {
+        LezLine::V03 => "metrics_address",
+        LezLine::V04 => "metrics_listen_address",
+    };
+    config.insert(metrics.into(), Value::Null);
     config.insert("gossip".into(), Value::Null);
 
-    let genesis = config
-        .entry("genesis")
-        .or_insert_with(|| json!([]))
-        .as_array_mut()
-        .context("the upstream config's `genesis` is not a list")?;
-    genesis.retain(|action| action.get("supply_account").is_none());
-    genesis.push(json!({
-        "supply_account": { "account_id": opts.faucet.as_str(), "balance": opts.faucet_balance }
-    }));
-    for (account, balance) in opts.genesis_accounts {
-        genesis.push(json!({
-            "supply_account": { "account_id": account.as_str(), "balance": balance }
-        }));
+    let funded = std::iter::once(opts.faucet).chain(opts.genesis_accounts);
+    let posting_timeout = match line {
+        LezLine::V03 => {
+            let genesis = config
+                .entry("genesis")
+                .or_insert_with(|| json!([]))
+                .as_array_mut()
+                .context("the upstream config's `genesis` is not a list")?;
+            if !opts.keep_upstream_accounts {
+                genesis.retain(|action| action.get("supply_account").is_none());
+            }
+            for account in funded {
+                genesis.push(json!({
+                    "supply_account": { "account_id": account.id.as_str(), "balance": account.balance }
+                }));
+            }
+            config.get("bedrock_config").map(|b| &b["channel_params"])
+        }
+        LezLine::V04 => {
+            let genesis = config
+                .get_mut("genesis")
+                .and_then(Value::as_object_mut)
+                .context("the upstream config's `genesis` is not an object")?;
+            let actions = actions(genesis)?;
+            if !opts.keep_upstream_accounts {
+                actions.retain(|action| {
+                    action.get("supply_account").is_none()
+                        && action.get("supply_private_account").is_none()
+                });
+            }
+            for account in funded {
+                let key = account.key.as_deref().with_context(|| {
+                    format!(
+                        "{} has no public key on record, and a LEZ v0.4 genesis funds by key",
+                        account.id.wallet_form()
+                    )
+                })?;
+                actions.push(json!({
+                    "supply_account": {
+                        "recipient": { "identified": { "key": key } },
+                        "balance": account.balance
+                    }
+                }));
+            }
+            config.get("genesis").map(|g| &g["channel_params"])
+        }
     }
+    .and_then(|params| params["posting_timeout"].as_u64());
 
     let block_secs = block_time_secs(opts.block_time)?;
-    if let Some(timeout) = config
-        .get("bedrock_config")
-        .and_then(|b| b["channel_params"]["posting_timeout"].as_u64())
+    if let Some(timeout) = posting_timeout
         && block_secs >= timeout as f64
     {
         bail!(
@@ -78,7 +127,16 @@ pub fn patch(mut debug: Value, opts: &ChainOptions) -> Result<Value> {
             opts.block_time
         );
     }
-    Ok(debug)
+    Ok(upstream)
+}
+
+/// A v0.4 genesis's `actions`.
+fn actions(genesis: &mut Map<String, Value>) -> Result<&mut Vec<Value>> {
+    genesis
+        .entry("actions")
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+        .context("the upstream config's `genesis.actions` is not a list")
 }
 
 /// Seconds in a `1s` / `500ms` / `2m` block time: the forms the sequencer's humantime config
@@ -106,6 +164,7 @@ pub fn block_time_secs(text: &str) -> Result<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::home::LezLine;
 
     fn upstream() -> Value {
         json!({
@@ -125,17 +184,26 @@ mod tests {
     const USER: &str = "6YvesSEDWW25kpi8SSki2c8o5m3uACsigvGnNQ6wMruh";
 
     fn patched_with(block_time: &str, max_txs_per_block: u32) -> Result<Value> {
-        let faucet = PublicId::parse(FAUCET).unwrap();
-        let users = [(PublicId::parse(USER).unwrap(), 7)];
+        let faucet = Funded {
+            id: PublicId::parse(FAUCET).unwrap(),
+            key: None,
+            balance: 1_000,
+        };
+        let users = [Funded {
+            id: PublicId::parse(USER).unwrap(),
+            key: None,
+            balance: 7,
+        }];
         patch(
+            LezLine::V03,
             upstream(),
             &ChainOptions {
                 home: "/devnet/chain",
                 block_time,
                 faucet: &faucet,
-                faucet_balance: 1_000,
                 max_txs_per_block,
                 genesis_accounts: &users,
+                keep_upstream_accounts: false,
             },
         )
     }
@@ -179,6 +247,110 @@ mod tests {
     fn refuses_a_block_time_at_or_over_the_posting_timeout() {
         assert!(patched("25s").is_err());
         assert!(patched("500ms").is_ok());
+    }
+
+    /// LEZ v0.4.0-rc3's `networks/local.json`, cut down.
+    fn upstream_v04() -> Value {
+        json!({
+            "home": ".",
+            "max_num_tx_in_block": 20,
+            "block_create_timeout": "15s",
+            "bedrock_config": { "channel_id": "0101", "node_url": "http://localhost:18080" },
+            "genesis": {
+                "channel_params": { "posting_timeout": 25, "exit_delay": 100 },
+                "actions": [
+                    { "supply_account": { "recipient": { "identified": { "key": "aa" } }, "balance": 1 } },
+                    { "supply_private_account": { "address": "Priv", "balance": 2 } },
+                    { "stake_sequencer": { "sequencer_key": "k" } }
+                ]
+            },
+            "gossip": { "listen_addr": "/ip4/0.0.0.0/udp/0/quic-v1", "bootstrap_peers": [] }
+        })
+    }
+
+    const FAUCET_KEY: &str = "6aa4c365699b89d963ef85a59868b9612b6001f90750b4970662a62776332e81";
+
+    fn patched_v04(user_key: Option<&str>, keep_upstream_accounts: bool) -> Result<Value> {
+        let faucet = Funded {
+            id: PublicId::parse(FAUCET).unwrap(),
+            key: Some(FAUCET_KEY.into()),
+            balance: 1_000,
+        };
+        let users = [Funded {
+            id: PublicId::parse(USER).unwrap(),
+            key: user_key.map(str::to_owned),
+            balance: 7,
+        }];
+        patch(
+            LezLine::V04,
+            upstream_v04(),
+            &ChainOptions {
+                home: "/devnet/chain",
+                block_time: "1s",
+                faucet: &faucet,
+                max_txs_per_block: 50,
+                genesis_accounts: &users,
+                keep_upstream_accounts,
+            },
+        )
+    }
+
+    #[test]
+    fn a_v0_4_config_runs_alone_and_keeps_the_tags_channel() {
+        let out = patched_v04(Some("bb"), false).unwrap();
+        assert_eq!(out["home"], "/devnet/chain");
+        assert_eq!(out["block_create_timeout"], "1s");
+        assert_eq!(out["max_num_tx_in_block"], 50);
+        // v0.4 refuses unknown fields: `metrics_address` would fail the whole config.
+        assert!(out["metrics_listen_address"].is_null());
+        assert!(out.get("metrics_address").is_none());
+        assert!(out["gossip"].is_null());
+        // rc3 needs `exit_delay`, later tags `finality_depth`: the tag's own params stay.
+        assert_eq!(out["genesis"]["channel_params"]["exit_delay"], 100);
+    }
+
+    #[test]
+    fn a_v0_4_genesis_funds_by_public_key() {
+        let out = patched_v04(Some("bb"), false).unwrap();
+        let funded = |key: &str, balance: u64| json!({ "supply_account": { "recipient": { "identified": { "key": key } }, "balance": balance } });
+        assert_eq!(
+            out["genesis"]["actions"].as_array().unwrap(),
+            &vec![
+                json!({ "stake_sequencer": { "sequencer_key": "k" } }),
+                funded(FAUCET_KEY, 1000),
+                funded("bb", 7),
+            ]
+        );
+        let err = patched_v04(None, false).unwrap_err();
+        assert!(format!("{err:#}").contains(USER), "{err:#}");
+    }
+
+    #[test]
+    fn a_v0_4_genesis_can_keep_upstreams_published_accounts() {
+        let out = patched_v04(Some("bb"), true).unwrap();
+        let actions = out["genesis"]["actions"].as_array().unwrap();
+        assert_eq!(actions.len(), 5, "{actions:?}");
+        assert!(actions[1].get("supply_private_account").is_some());
+    }
+
+    #[test]
+    fn a_v0_4_block_time_stays_under_the_posting_timeout() {
+        let mut upstream = upstream_v04();
+        upstream["genesis"]["channel_params"]["posting_timeout"] = json!(1);
+        let faucet = Funded {
+            id: PublicId::parse(FAUCET).unwrap(),
+            key: Some(FAUCET_KEY.into()),
+            balance: 1,
+        };
+        let opts = ChainOptions {
+            home: "/devnet/chain",
+            block_time: "1s",
+            faucet: &faucet,
+            max_txs_per_block: 20,
+            genesis_accounts: &[],
+            keep_upstream_accounts: false,
+        };
+        assert!(patch(LezLine::V04, upstream, &opts).is_err());
     }
 
     #[test]

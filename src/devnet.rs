@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use crate::account::{PublicId, first_public_id};
 use crate::binary;
-use crate::chain_config::{self, ChainOptions};
+use crate::chain_config::{self, ChainOptions, Funded};
 use crate::envfile::{self, Env};
 use crate::fetch;
 use crate::groups::{self, Group, GroupInfo};
@@ -360,7 +360,7 @@ impl Devnet {
         }
 
         next.runtime.prepare(opts.rebuild)?;
-        let faucet = next.dev_faucet()?;
+        let (faucet, faucet_key) = next.dev_faucet()?;
         if continuing && funds_another_faucet(self.settings.faucet.as_ref(), &faucet) {
             bail!(
                 "this chain's genesis funds another faucet than the dev wallet holds. \
@@ -368,6 +368,7 @@ impl Devnet {
             );
         }
         next.settings.faucet = Some(faucet);
+        next.settings.faucet_key = faucet_key;
         // Keys first, so a new chain funds every group at genesis.
         next.make_project_groups()?;
         let config = next.chain_config()?;
@@ -657,24 +658,39 @@ impl Devnet {
         // chunks, saving after each: a batch is one shell argument, and a long one fails.
         while info.accounts.len() < count {
             let missing = (count - info.accounts.len()).min(BATCH_CHUNK);
-            let runs = (0..missing)
-                .map(|_| {
-                    Ok(vec![
+            let secrets = (0..missing)
+                .map(|_| random_key())
+                .collect::<Result<Vec<String>>>()?;
+            let runs: Vec<Vec<String>> = secrets
+                .iter()
+                .map(|secret| {
+                    vec![
                         "account".into(),
                         "import".into(),
                         "public".into(),
                         "--private-key".into(),
-                        random_key()?,
-                    ])
+                        secret.clone(),
+                    ]
                 })
-                .collect::<Result<Vec<Vec<String>>>>()?;
-            let ids = self
-                .runtime
-                .wallet_batch(&wallet, &runs)?
+                .collect();
+            let outputs = self.runtime.wallet_batch(&wallet, &runs)?;
+            let accounts = secrets
                 .iter()
-                .map(|out| first_public_id(out).context("the wallet made no account"))
+                .zip(&outputs)
+                .map(|(secret, out)| {
+                    let id = first_public_id(out).context("the wallet made no account")?;
+                    let key = crate::account::public_key_of(secret)?;
+                    // A key that names another account would fund the wrong one at genesis.
+                    if PublicId::of_key(&key)? != id {
+                        bail!(
+                            "the wallet made {} from a key that names another",
+                            id.wallet_form()
+                        );
+                    }
+                    Ok((id, key))
+                })
                 .collect::<Result<Vec<_>>>()?;
-            info = Group::extended(info, ids);
+            info = Group::extended(info, accounts);
             group.save_info(&info)?;
         }
         group.save_info(&info)?;
@@ -715,11 +731,15 @@ impl Devnet {
     }
 
     /// Every account group's accounts with their genesis balance.
-    fn genesis_accounts(&self) -> Result<Vec<(PublicId, u64)>> {
+    fn genesis_accounts(&self) -> Result<Vec<Funded>> {
         let mut accounts = Vec::new();
         for group in groups::list(&self.groups_dir())? {
             let info = group.info()?;
-            accounts.extend(info.accounts.into_iter().map(|a| (a.id, info.amount)));
+            accounts.extend(info.accounts.into_iter().map(|a| Funded {
+                id: a.id,
+                key: a.key,
+                balance: info.amount,
+            }));
         }
         Ok(accounts)
     }
@@ -854,26 +874,41 @@ impl Devnet {
         self.rpc().balance(to)
     }
 
-    /// The dev wallet's faucet account, made on first use. Read from the wallet rather than
-    /// the settings, so a lost settings file finds the same faucet.
-    fn dev_faucet(&self) -> Result<PublicId> {
+    /// The dev wallet's faucet account, made on first use, with its public key when known.
+    /// Read from the wallet rather than the settings, so a lost settings file finds the same
+    /// faucet. The wallet prints the key only when it makes the account, so it's kept in the
+    /// settings, and used only while it still matches the faucet.
+    fn dev_faucet(&self) -> Result<(PublicId, Option<String>)> {
         match self.labelled_account(FAUCET_LABEL)? {
-            Some(faucet) => Ok(faucet),
-            None => self.new_account(Some(FAUCET_LABEL)),
+            Some(faucet) => {
+                let key = self
+                    .settings
+                    .faucet_key
+                    .clone()
+                    .filter(|key| PublicId::of_key(key).is_ok_and(|id| id == faucet));
+                Ok((faucet, key))
+            }
+            None => self.new_keyed_account(FAUCET_LABEL),
         }
     }
 
     fn chain_config(&self) -> Result<Value> {
         let genesis_accounts = self.genesis_accounts()?;
+        let faucet = Funded {
+            id: self.faucet()?.clone(),
+            key: self.settings.faucet_key.clone(),
+            balance: FAUCET_BALANCE,
+        };
         chain_config::patch(
+            self.settings.line(),
             self.runtime.upstream_config()?,
             &ChainOptions {
                 home: &self.runtime.chain_home(),
                 block_time: &self.settings.block_time,
-                faucet: self.faucet()?,
-                faucet_balance: FAUCET_BALANCE,
+                faucet: &faucet,
                 max_txs_per_block: self.settings.max_txs_per_block,
                 genesis_accounts: &genesis_accounts,
+                keep_upstream_accounts: false,
             },
         )
     }
@@ -1392,6 +1427,25 @@ impl Devnet {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
             Err(e) => Err(e).context("reading programs.json"),
         }
+    }
+
+    /// A new labelled account and its public key, as `account new public` prints it once.
+    fn new_keyed_account(&self, label: &str) -> Result<(PublicId, Option<String>)> {
+        let output = self.wallet(vec![
+            "account".into(),
+            "new".into(),
+            "public".into(),
+            "--label".into(),
+            label.into(),
+        ])?;
+        let id = first_public_id(&output)
+            .with_context(|| format!("the wallet made no account:\n{output}"))?;
+        let key = output
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("With pk "))
+            .map(|key| key.trim().to_owned())
+            .filter(|key| PublicId::of_key(key).is_ok_and(|of| of == id));
+        Ok((id, key))
     }
 
     fn new_account(&self, label: Option<&str>) -> Result<PublicId> {

@@ -65,6 +65,10 @@ pub struct GroupAccount {
     pub id: PublicId,
     /// Hex, the form `lez_core` takes.
     pub hex: String,
+    /// Its public key, in hex: what a LEZ v0.4 genesis funds, and `send --to-pk` pays. Groups
+    /// made before v0.10.0 have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -125,15 +129,21 @@ impl Group {
         write_json(&self.manifest(), &serde_json::to_value(info)?)
     }
 
-    /// `info` with `ids` appended, numbered after the accounts it has.
-    pub fn extended(mut info: GroupInfo, ids: Vec<PublicId>) -> GroupInfo {
+    /// `info` with `accounts` (each id with its public key) appended, numbered after the
+    /// accounts it has.
+    pub fn extended(mut info: GroupInfo, accounts: Vec<(PublicId, String)>) -> GroupInfo {
         let start = info.accounts.len();
-        info.accounts
-            .extend(ids.into_iter().enumerate().map(|(i, id)| GroupAccount {
-                index: start + i,
-                hex: id.hex(),
-                id,
-            }));
+        info.accounts.extend(
+            accounts
+                .into_iter()
+                .enumerate()
+                .map(|(i, (id, key))| GroupAccount {
+                    index: start + i,
+                    hex: id.hex(),
+                    id,
+                    key: Some(key),
+                }),
+        );
         info
     }
 }
@@ -161,8 +171,11 @@ mod tests {
 
     #[test]
     fn numbers_new_accounts_after_the_existing_ones() {
-        let one = Group::extended(GroupInfo::default(), vec![PublicId::parse(A).unwrap()]);
-        let two = Group::extended(one, vec![PublicId::parse(B).unwrap()]);
+        let one = Group::extended(
+            GroupInfo::default(),
+            vec![(PublicId::parse(A).unwrap(), "aa".to_owned())],
+        );
+        let two = Group::extended(one, vec![(PublicId::parse(B).unwrap(), "bb".to_owned())]);
         assert_eq!(two.accounts[0].index, 0);
         assert_eq!(two.accounts[1].index, 1);
         assert_eq!(two.accounts[1].id.as_str(), B);
@@ -179,7 +192,7 @@ mod tests {
                 amount: 5,
                 ..GroupInfo::default()
             },
-            vec![PublicId::parse(A).unwrap()],
+            vec![(PublicId::parse(A).unwrap(), "aa".to_owned())],
         );
         group.save_info(&info).unwrap();
         assert_eq!(group.info().unwrap(), info);

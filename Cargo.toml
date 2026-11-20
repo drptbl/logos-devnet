@@ -20,6 +20,7 @@ path = "src/main.rs"
 anyhow = "1.0.104"
 bs58 = "0.5.1"
 clap = { version = "4.6.7", features = ["derive", "env"] }
+k256 = { version = "0.13.4", default-features = false, features = ["arithmetic"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["raw_value"] }
 sha2 = "0.11.1"
