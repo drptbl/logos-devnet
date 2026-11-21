@@ -77,6 +77,12 @@ fn edit_member(
 /// not a guess.
 fn forget_chain(text: &str) -> Result<String> {
     let mut storage: RawObject = serde_json::from_str(text)?;
+    if storage.contains_key("ciphertext") {
+        anyhow::bail!(
+            "the wallet's storage is encrypted with a password, so its state from the old chain \
+             can't be cleared: make the wallet again without one"
+        );
+    }
     storage.insert(
         "last_synced_block".into(),
         RawValue::from_string("0".into())?,
@@ -355,6 +361,14 @@ pub(crate) mod tests {
             key("HpavNGFYxjyhLsy171aXsvv146yUeXmRWiho22uvT43d").unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn refuses_an_encrypted_storage() {
+        // A wallet with a password keeps its state inside the ciphertext, out of reach.
+        let sealed = r#"{"version":1,"kdf":{},"nonce":"aa","ciphertext":"bb"}"#;
+        let err = forget_chain(sealed).unwrap_err();
+        assert!(format!("{err:#}").contains("password"), "{err:#}");
     }
 
     #[test]
