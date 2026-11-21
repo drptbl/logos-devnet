@@ -1,5 +1,7 @@
 # Messaging
 
+> **This example waits for a `lez_core` built for LEZ v0.4.** logos-devnet runs LEZ v0.4 since v0.10.0, and the Logos catalog's `lez_core` 0.5.1 is built for v0.3, so sessions don't run yet. Until a v0.4 one ships, run this example with [logos-devnet v0.9.4](https://github.com/drptbl/logos-devnet/releases/tag/v0.9.4) and LEZ v0.3. It will be updated then.
+
 Two `logosctl` sessions, Alice and Bob, send a message and find each other's service through the devnet's messaging hub. Nothing goes through the public fleet: every node listens on `127.0.0.1`.
 
 `logos-devnet.toml` here gives the example a devnet of its own on a free port, the hub, and two sessions with `delivery_module` and `libp2p_module` installed.

@@ -1,5 +1,7 @@
 # lez_core through logosctl
 
+> These calls run in sessions, which wait for a `lez_core` built for LEZ v0.4: they describe sessions on logos-devnet v0.9.4 with LEZ v0.3, and will be updated when one ships.
+
 What `lez_core`, the LEZ module in a `logosctl` session, expects. A session's env (`source <(logos-devnet session env <name>)`) points `logosctl` at its daemon, where the wallet is open.
 
 - Account ids are hex. A session's `LOGOS_DEVNET_ACCOUNT_HEX` is its account in that form, a group's `accounts.json` has each account's `hex`, and `logos-devnet account <id>` prints any id in both forms.
