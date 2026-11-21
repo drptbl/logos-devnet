@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 mod account;
 mod binary;
@@ -24,7 +24,7 @@ mod storage;
 mod wallet_storage;
 
 use devnet::{DEFAULT_FUND, Devnet, UpOptions};
-use home::Home;
+use home::{DEFAULT_LEZ, Home};
 use project::Project;
 use report::emit;
 
@@ -206,7 +206,12 @@ impl Command {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    // The LEZ release it runs comes with the version, so which logos-devnet goes with which LEZ
+    // is one command away.
+    let version: &'static str =
+        Box::leak(format!("{} (LEZ {})", env!("CARGO_PKG_VERSION"), DEFAULT_LEZ).into_boxed_str());
+    let matches = Cli::command().version(version).get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     let json = cli.json;
     let project_file = match cli.config {
         Some(path) => Some(path),
