@@ -109,8 +109,16 @@ jobs:
             echo "tag $TAG moved to $tagged after $GITHUB_SHA was checked" >&2
             exit 1
           fi
+          # The notes open with the LEZ release this one runs, read from the tagged source.
+          lez=$(gh api "repos/$GITHUB_REPOSITORY/contents/src/home.rs?ref=$TAG" --jq .content \
+            | base64 -d | sed -n 's/^pub const DEFAULT_LEZ: &str = "\(.*\)";$/\1/p')
+          if [[ ! "$lez" =~ ^v[0-9]+(\.[0-9]+)*(-[A-Za-z0-9.]+)?$ ]]; then
+            echo "no LEZ tag in src/home.rs at $TAG: '$lez'" >&2
+            exit 1
+          fi
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
-            --title "$TAG" --generate-notes dist/*
+            --title "$TAG" --generate-notes dist/* \
+            --notes "Runs LEZ $lez. See [which version](https://github.com/$GITHUB_REPOSITORY#which-version) for every release's LEZ."
 
   crates-io:
     needs: github-release
