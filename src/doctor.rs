@@ -195,7 +195,7 @@ pub fn run(devnet: &Devnet, project_error: Option<&anyhow::Error>) -> Doctor {
         }
     }
 
-    if devnet.refuses_sessions() {
+    if devnet.refuses_sessions(settings.line()) {
         checks.push(fail(
             "sessions",
             "the project asks for sessions, which don't run on LEZ v0.4 yet",

@@ -491,7 +491,7 @@ impl Devnet {
                 self.runtime.check_wallet_file(&binary)?;
             }
         }
-        if self.refuses_sessions() {
+        if self.refuses_sessions(self.settings.line()) {
             bail!("{SESSIONS_ON_V04}");
         }
         if self.needs_logosctl() && !logosctl_on_path() {
@@ -505,9 +505,10 @@ impl Devnet {
         self.check_hub_ports()
     }
 
-    /// Whether the project asks for sessions on LEZ v0.4, which can't run them yet.
-    pub fn refuses_sessions(&self) -> bool {
-        self.settings.line() == LezLine::V04
+    /// Whether the project asks for sessions on `line`, when that's LEZ v0.4, which can't run
+    /// them yet.
+    pub fn refuses_sessions(&self, line: LezLine) -> bool {
+        line == LezLine::V04
             && self
                 .project
                 .as_ref()
@@ -1158,6 +1159,13 @@ impl Devnet {
     /// Makes account group `name` with `count` accounts (at least: a group never shrinks),
     /// each funded with `amount`, now when the devnet runs, else when it starts.
     pub fn accounts_new(&self, name: &str, count: usize, amount: u64) -> Result<GroupSummary> {
+        // Before the first chain, the project's `[devnet]` decides which LEZ line the group is
+        // for, as it decides what `up` starts.
+        let planned = self.settings_for_up();
+        if !self.home.has_chain() && planned.line() != self.settings.line() {
+            let devnet = Self::with(self.home.clone(), planned, self.project.clone());
+            return devnet.accounts_new(name, count, amount);
+        }
         groups::check_spec(count, amount)?;
         self.runtime.prepare(false)?;
         self.make_group(name, count, amount)?;
