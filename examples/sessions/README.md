@@ -1,5 +1,7 @@
 # Sessions
 
+> **This example waits for a `lez_core` built for LEZ v0.4.** logos-devnet runs LEZ v0.4 since v0.10.0, and the Logos catalog's `lez_core` 0.5.1 is built for v0.3, so sessions don't run yet. Until a v0.4 one ships, run this example with [logos-devnet v0.9.4](https://github.com/drptbl/logos-devnet/releases/tag/v0.9.4) and LEZ v0.3. It will be updated then.
+
 Two `logosctl` sessions, Alice and Bob, each with a funded wallet open in `lez_core`, the way an app or an agent talks to Logos. Alice pays Bob, then shields some of her funds into a private account. The devnet runs in dev mode, so the shielded transfer's proof takes a second instead of minutes.
 
 `logos-devnet.toml` here gives the example a devnet of its own on a free port, next to a shared one on 3040. `port = 0` takes a free port on the first `up` and keeps it, and `logos-devnet env` shows it.

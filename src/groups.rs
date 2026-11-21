@@ -65,6 +65,23 @@ pub struct GroupAccount {
     pub id: PublicId,
     /// Hex, the form `lez_core` takes.
     pub hex: String,
+    /// Its public key, in hex: what genesis funds, and `send --to-pk` pays.
+    pub key: String,
+}
+
+impl GroupAccount {
+    /// Its public key, once checked to name this account: genesis and payments by key would
+    /// otherwise fund another.
+    pub fn checked_key(&self) -> Result<&str> {
+        if PublicId::of_key(&self.key)? != self.id {
+            anyhow::bail!(
+                "{} has a public key in accounts.json that names another account: delete its \
+                 group, and `up` makes it again",
+                self.id.wallet_form()
+            );
+        }
+        Ok(&self.key)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -125,15 +142,21 @@ impl Group {
         write_json(&self.manifest(), &serde_json::to_value(info)?)
     }
 
-    /// `info` with `ids` appended, numbered after the accounts it has.
-    pub fn extended(mut info: GroupInfo, ids: Vec<PublicId>) -> GroupInfo {
+    /// `info` with `accounts` (each id with its public key) appended, numbered after the
+    /// accounts it has.
+    pub fn extended(mut info: GroupInfo, accounts: Vec<(PublicId, String)>) -> GroupInfo {
         let start = info.accounts.len();
-        info.accounts
-            .extend(ids.into_iter().enumerate().map(|(i, id)| GroupAccount {
-                index: start + i,
-                hex: id.hex(),
-                id,
-            }));
+        info.accounts.extend(
+            accounts
+                .into_iter()
+                .enumerate()
+                .map(|(i, (id, key))| GroupAccount {
+                    index: start + i,
+                    hex: id.hex(),
+                    id,
+                    key,
+                }),
+        );
         info
     }
 }
@@ -160,9 +183,26 @@ mod tests {
     const B: &str = "6YvesSEDWW25kpi8SSki2c8o5m3uACsigvGnNQ6wMruh";
 
     #[test]
+    fn trusts_a_recorded_key_only_when_it_names_its_account() {
+        let secret = "01".repeat(32);
+        let key = crate::account::public_key_of(&secret).unwrap();
+        let id = PublicId::of_key(&key).unwrap();
+        let info = Group::extended(GroupInfo::default(), vec![(id, key.clone())]);
+        assert_eq!(info.accounts[0].checked_key().unwrap(), key);
+        let wrong = Group::extended(
+            GroupInfo::default(),
+            vec![(PublicId::parse(A).unwrap(), key)],
+        );
+        assert!(wrong.accounts[0].checked_key().is_err());
+    }
+
+    #[test]
     fn numbers_new_accounts_after_the_existing_ones() {
-        let one = Group::extended(GroupInfo::default(), vec![PublicId::parse(A).unwrap()]);
-        let two = Group::extended(one, vec![PublicId::parse(B).unwrap()]);
+        let one = Group::extended(
+            GroupInfo::default(),
+            vec![(PublicId::parse(A).unwrap(), "aa".to_owned())],
+        );
+        let two = Group::extended(one, vec![(PublicId::parse(B).unwrap(), "bb".to_owned())]);
         assert_eq!(two.accounts[0].index, 0);
         assert_eq!(two.accounts[1].index, 1);
         assert_eq!(two.accounts[1].id.as_str(), B);
@@ -179,7 +219,7 @@ mod tests {
                 amount: 5,
                 ..GroupInfo::default()
             },
-            vec![PublicId::parse(A).unwrap()],
+            vec![(PublicId::parse(A).unwrap(), "aa".to_owned())],
         );
         group.save_info(&info).unwrap();
         assert_eq!(group.info().unwrap(), info);

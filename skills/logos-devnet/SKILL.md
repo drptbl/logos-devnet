@@ -9,7 +9,7 @@ description: logos-devnet runs a local LEZ (Logos Execution Zone) chain. Use whe
 
 ## Before you start
 
-- **logos-devnet 0.9.0 or newer**: `logos-devnet --version`. Install it with `cargo install --locked logos-devnet`, or a binary from https://github.com/drptbl/logos-devnet/releases/latest (macOS and Linux).
+- **logos-devnet 0.10.0 or newer**: `logos-devnet --version`. Install it with `cargo install --locked logos-devnet`, or a binary from https://github.com/drptbl/logos-devnet/releases/latest (macOS and Linux).
 - **Docker**: OrbStack, Docker Desktop or Colima, running. `logos-devnet doctor` says when it isn't.
 - **`logosctl`**, the Logos Core CLI, on `PATH`, only for sessions, `[messaging]` and `[storage]`: a release from https://github.com/logos-co/logos-logoscore-cli/releases.
 - **LEZ programs** you deploy are built with `cargo risczero build`, which makes the `.bin` the devnet takes.
@@ -52,13 +52,14 @@ Pass `--json` to every command: on success stdout holds one JSON document, and n
 ## Choices
 
 - **Home.** Without `home`, every project on the machine shares `~/.logos-devnet` on port 3040, and `up` refuses settings that disagree with what other projects run there. Tests, worktrees and parallel agents get `home = ".logos-devnet"` and `[devnet] port = 0`, a free port of their own.
+- **LEZ.** logos-devnet runs LEZ v0.4 (default `v0.4.0-rc3`); programs must be built for it. For LEZ v0.3, use logos-devnet v0.9.4. A home that ran v0.3: `reset` moves its v0.3 wallets aside and starts v0.4. Genesis and payments name accounts by public key, which `accounts.json` records as each account's `key`. `upstream_accounts = true` keeps LEZ's own published genesis accounts funded for its examples.
 - **Dev mode.** `dev_mode = true` makes private calls prove in about 1 s instead of about 2 min, with fake proofs. A chain keeps its dev mode for life: switching it takes `reset`. Use a chain without dev mode to check that real proofs verify.
 - **Programs.** A program can be a path, or a release: `{ url = "...", sha256 = "..." }`, downloaded once and deployed only if its SHA-256 matches. Programs deploy immutable, which undisclosed private calls require. While iterating on one, give it `{ path = "...", mutable = true }`: a rebuild then updates it in place with the same id on the next `up`. Its mutability is fixed per chain, so changing it takes `reset`. `.logos-devnet/programs.json` records each deployed program's binary SHA-256 and mutability: compare it with `shasum -a 256 <bin>` to show which build runs.
-- **Funding.** Groups that exist when a chain starts are funded at genesis, at once. A group added to a running chain is funded one transfer at a time, about 2.4 s per account. Every call holds about 1.6M lepta of fees up front, so an account that sends needs more than that. `logos-devnet fund Public/<id> [lepta]` tops one account up.
+- **Funding.** Groups that exist when a chain starts are funded at genesis, at once. A group added to a running chain is funded one transfer at a time, about 2.4 s per account. `logos-devnet fund Public/<id> [lepta]` tops one account up; an account never used takes `--key <hex>` too, unless it's one of the devnet's own.
 - **Messaging.** An empty `[messaging]` table runs a local hub: a delivery node and a discovery bootstrap on `127.0.0.1`, so messages and service lookups skip the public fleet. Sessions with `delivery_module` or `libp2p_module` loaded (`chat_module` loads the first) get nodes on the hub from `up`; outside a session, create the app's nodes from `LOGOS_DEVNET_DELIVERY_CONFIG` and `LOGOS_DEVNET_DISCOVERY_CONFIG` first in its daemon: the first `createNode` picks the network. `chat_module` still reaches a public key registry. `status --json` shows whether each hub node runs, in `.messaging.delivery_node` and `.messaging.discovery_node`, and `messaging rm` deletes the hub: a project that asks for one gets a new hub, with new addresses, on its next `up`.
 - **Storage.** Each session runs a storage node of its own, on `127.0.0.1` and in no network. An empty `[storage]` table connects the sessions through a node in the hub, so one session downloads by CID what another uploaded. Sessions need nothing passed in.
 - **Calling the modules.** To send or receive messages, advertise or look up a service, or upload and download a file from a session, read [modules.md](modules.md): `delivery_module`, `libp2p_module` and `storage_module` take arguments in an order and form their errors don't explain.
-- **Sessions** need `logosctl` on `PATH`. `logos-devnet session restart <name>...` gives each a fresh daemon in seconds, keeping its wallet: use it where a module keeps state while loaded (libp2p_module 1.1.0 advertises one service per load) instead of `logosctl module reload`. They suit apps that talk to Logos through `logosctl` and `lez_core`. Before calling `lez_core` yourself, read [lez_core.md](lez_core.md): it takes ids and amounts in forms its errors don't explain.
+- **Sessions** don't run yet: they wait for a `lez_core` built for LEZ v0.4 in the Logos catalog, and `up` refuses `[sessions]` until then (the session notes below, and lez_core.md and modules.md, describe them on logos-devnet v0.9.4 with LEZ v0.3). Sessions need `logosctl` on `PATH`. `logos-devnet session restart <name>...` gives each a fresh daemon in seconds, keeping its wallet: use it where a module keeps state while loaded (libp2p_module 1.1.0 advertises one service per load) instead of `logosctl module reload`. They suit apps that talk to Logos through `logosctl` and `lez_core`. Before calling `lez_core` yourself, read [lez_core.md](lez_core.md): it takes ids and amounts in forms its errors don't explain.
 
 ## Reset
 
@@ -74,7 +75,10 @@ Each refusal changes nothing. `up` prefixes a program's refusal with `program <n
 | `<name> is deployed mutable, asked for immutable` (or the reverse) | Put `mutable` back as deployed, or `reset`. |
 | `this chain runs in dev mode` / `this chain checks proofs` | Match the chain's dev mode, or `reset --dev-mode` / `reset --dev-mode false`. |
 | `this chain runs LEZ <tag>` | `reset --lez <tag>`. |
-| `logos-devnet runs LEZ v0.3 tags` | Use a v0.3 tag, e.g. `--lez v0.3.1`. LEZ v0.4 isn't supported yet. |
+| `logos-devnet runs LEZ v0.4 tags` / `is a LEZ v0.3 tag` | Use a v0.4 tag, e.g. `v0.4.0-rc3`, or logos-devnet v0.9.4 for LEZ v0.3. |
+| `this home runs LEZ v0.3` | `reset` moves its v0.3 wallets aside and starts v0.4, or use logos-devnet v0.9.4 for it. |
+| `sessions don't run yet` | Drop `[sessions]` for now: no `lez_core` for LEZ v0.4 is published. |
+| `<account> has never been used, and LEZ pays such an account only by its public key` | `fund <account> --key <hex>`, with the key `wallet account new public` printed. |
 | `the shared devnet runs with ..., but <file> asks for ...` | Other projects use that devnet. Give this project its own `home` and port. |
 | `port <n> on 127.0.0.1 is taken` | `up --port <free port>`, remembered unless the file sets a fixed `port`. A new project home with `[devnet] port = 0` takes a free one on its first `up`. |
 | `sessions and the messaging hub need logosctl` | Install the Logos Core CLI, or remove the sessions and `[messaging]`. |

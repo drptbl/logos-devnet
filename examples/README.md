@@ -1,5 +1,7 @@
 # Examples
 
+`hello-world`, `sessions`, `messaging` and `storage` run with [logos-devnet v0.9.4](https://github.com/drptbl/logos-devnet/releases/tag/v0.9.4) and LEZ v0.3 for now: sessions wait for a `lez_core` built for LEZ v0.4, and LEZ's tutorial for a v0.4 tag. They'll be updated when those ship.
+
 | Example | |
 | --- | --- |
 | [`hello-world`](hello-world) | LEZ's tutorial on a devnet: build a program, deploy it and call it, paid by a funded test account |

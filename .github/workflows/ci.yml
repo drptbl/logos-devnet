@@ -81,8 +81,10 @@ jobs:
           logos-devnet --config .github/ci/logos-devnet.toml doctor
 
   # The action with a session: it installs logosctl, which runners don't have, and the session
-  # comes up with a funded wallet.
+  # comes up with a funded wallet. Off until sessions run again: they wait for a lez_core built
+  # for LEZ v0.4 in the Logos catalog (see SESSIONS_READY in src/devnet.rs).
   action-sessions:
+    if: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

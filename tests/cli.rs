@@ -19,3 +19,23 @@ fn up_says_docker_is_unreachable_instead_of_building() {
     assert!(stderr.contains("no Docker daemon answers"), "{stderr}");
     assert!(!stderr.contains("Building"), "{stderr}");
 }
+
+#[test]
+fn the_version_names_the_lez_release_it_runs() {
+    let out = Command::new(env!("CARGO_BIN_EXE_logos-devnet"))
+        .arg("--version")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let home =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/home.rs")).unwrap();
+    let lez = home
+        .lines()
+        .find_map(|l| l.strip_prefix("pub const DEFAULT_LEZ: &str = \""))
+        .and_then(|l| l.strip_suffix("\";"))
+        .unwrap();
+    assert_eq!(
+        stdout.trim(),
+        format!("logos-devnet {} (LEZ {lez})", env!("CARGO_PKG_VERSION"))
+    );
+}

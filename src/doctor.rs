@@ -195,6 +195,15 @@ pub fn run(devnet: &Devnet, project_error: Option<&anyhow::Error>) -> Doctor {
         }
     }
 
+    if devnet.refuses_sessions() {
+        checks.push(Check {
+            name: "sessions".into(),
+            ok: false,
+            detail: crate::devnet::SESSIONS_WAIT.into(),
+            fix: None,
+        });
+    }
+
     if devnet.wants_hub() {
         checks.push(match devnet.check_hub_ports() {
             Ok(()) => pass("hub ports", "free, or held by the running hub"),

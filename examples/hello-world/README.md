@@ -1,5 +1,7 @@
 # Hello world
 
+> **This example follows LEZ's v0.3 tutorial.** logos-devnet runs LEZ v0.4 since v0.10.0. Until LEZ tags a v0.4 release with a working tutorial, run this example with [logos-devnet v0.9.4](https://github.com/drptbl/logos-devnet/releases/tag/v0.9.4). It will be updated then.
+
 LEZ's own program deployment tutorial on a devnet: you build its `hello_world` program, then deploy it and call it, paid by a funded test account. Once everything is built, a run takes about 15 s.
 
 `logos-devnet.toml` here gives the example a devnet of its own on a free port, next to a shared one on 3040, with a group of two funded accounts. The first pays for the deploy and the call, and the second gets the greeting.

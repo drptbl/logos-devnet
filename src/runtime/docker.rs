@@ -212,6 +212,26 @@ impl Runtime for Docker {
         stdout_of(self.compose().args(["up", "--detach", "sequencer"])).map(drop)
     }
 
+    fn setup_chain(&self) -> Result<()> {
+        self.write_compose_file()?;
+        let template = format!("{CHAIN_MOUNT}/{}", file_name(&self.home.setup_template()));
+        stdout_of(
+            self.compose()
+                .args([
+                    "run",
+                    "--rm",
+                    "--no-deps",
+                    "-T",
+                    "--interactive=false",
+                    "sequencer",
+                ])
+                .arg("sequencer_service")
+                .args(super::setup_args(CHAIN_MOUNT, &template)),
+        )
+        .map(drop)
+        .context("setting the chain up")
+    }
+
     /// Takes the project down whatever state its containers are in (running, paused,
     /// restarting). Only an unreachable Docker counts as nothing to stop.
     fn stop(&self) -> Result<()> {
@@ -280,6 +300,13 @@ impl Runtime for Docker {
         cmd.args(["logs", "--tail", "1", "--no-log-prefix", "sequencer"]);
         stdout_within(&mut cmd, Duration::from_secs(10)).ok()
     }
+}
+
+/// The last part of `path`.
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// `logos-devnet` for the default home, and a name derived from the path for any other, so
@@ -370,17 +397,20 @@ struct ComposeInputs<'a> {
 
 /// The compose file. The RPC is published on loopback only: it has no caller auth.
 fn compose_spec(i: &ComposeInputs) -> Value {
+    let command = json!([
+        "sequencer_service",
+        "start",
+        CHAIN_MOUNT,
+        "--rpc-listen-address",
+        format!("0.0.0.0:{CONTAINER_PORT}")
+    ]);
     json!({
         "name": i.project,
         "services": {
             "sequencer": {
                 "image": i.image,
                 "user": i.user,
-                "command": [
-                    "sequencer_service",
-                    format!("{CHAIN_MOUNT}/sequencer_config.json"),
-                    "--port", CONTAINER_PORT.to_string()
-                ],
+                "command": command,
                 "ports": [format!("127.0.0.1:{}:{CONTAINER_PORT}", i.port)],
                 // The long form takes any path, `:` included.
                 "volumes": [{
@@ -399,7 +429,9 @@ fn compose_spec(i: &ComposeInputs) -> Value {
                 "user": i.user,
                 "profiles": ["tools"],
                 "entrypoint": ["wallet"],
-                "environment": { "LEE_WALLET_HOME_DIR": WALLET_MOUNT }
+                // The wallet asks for a password on the terminal unless this is set, and an
+                // empty one keeps its storage unencrypted.
+                "environment": { "LEE_WALLET_HOME_DIR": WALLET_MOUNT, "LEE_WALLET_PASSWORD": "" }
             }
         }
     })
@@ -412,13 +444,33 @@ mod tests {
     fn inputs() -> ComposeInputs<'static> {
         ComposeInputs {
             project: "logos-devnet",
-            image: "ghcr.io/drptbl/logos-devnet-sequencer:v0.3.1",
+            image: "ghcr.io/drptbl/logos-devnet-sequencer:v0.4.0-rc3",
             port: 3040,
             user: "501:20",
             chain_dir: "/Users/me/My Devnet/chain",
             dev_mode: false,
             log_filter: "info,kameo=warn",
         }
+    }
+
+    #[test]
+    fn the_sequencer_starts_from_its_home() {
+        let spec = compose_spec(&inputs());
+        assert_eq!(
+            spec["services"]["sequencer"]["command"],
+            json!([
+                "sequencer_service",
+                "start",
+                "/devnet/chain",
+                "--rpc-listen-address",
+                "0.0.0.0:3040"
+            ])
+        );
+        // The wallet asks for a password on the terminal unless this is set; empty is none.
+        assert_eq!(
+            spec["services"]["wallet"]["environment"]["LEE_WALLET_PASSWORD"],
+            ""
+        );
     }
 
     #[test]
@@ -513,7 +565,6 @@ mod tests {
                 "target": "/devnet/chain"
             }])
         );
-        assert_eq!(seq["command"][1], "/devnet/chain/sequencer_config.json");
         let wallet = &spec["services"]["wallet"];
         assert_eq!(wallet["user"], "501:20");
         assert_eq!(
