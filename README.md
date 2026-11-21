@@ -4,7 +4,7 @@ A local LEZ chain for Logos development. One command starts a sequencer on your 
 
 Keep the public testnet for final checks. Messages, service discovery and storage can stay local too: a project that asks for them gets a hub on `127.0.0.1` instead of the Logos fleets.
 
-It runs LEZ v0.4, currently `v0.4.0-rc3`. For LEZ v0.3, use [v0.9.4](https://github.com/drptbl/logos-devnet/releases/tag/v0.9.4), the last release that runs it: `cargo install --locked logos-devnet --version 0.9.4`. Sessions wait for a `lez_core` built for v0.4, see [Sessions](#sessions).
+It runs LEZ v0.4, currently `v0.4.0-rc3`. For LEZ v0.3, use [v0.9.4](https://github.com/drptbl/logos-devnet/releases/tag/v0.9.4), the last release that runs it: `cargo install --locked logos-devnet --version 0.9.4`. [Which version](#which-version) lists every release's LEZ. Sessions wait for a `lez_core` built for v0.4, see [Sessions](#sessions).
 
 ## Install
 
@@ -25,6 +25,17 @@ shasum -a 256 -c logos-devnet-$v-$t.tar.gz.sha256 \
 Put `~/.local/bin` on your `PATH` if it isn't. `cargo install --locked --git https://github.com/drptbl/logos-devnet` builds the latest `main`.
 
 It runs on macOS and Linux, and needs Docker (OrbStack, Docker Desktop or Colima). There's no Windows build. With `--native` you need git, a Rust toolchain and LEZ's build dependencies instead: clang, pkg-config and OpenSSL (`brew install pkg-config openssl` on macOS), plus `libpcsclite-dev` on Linux. The first native build takes a few minutes.
+
+## Which version
+
+Each logos-devnet release runs one LEZ line, and a new LEZ line gets a new minor release: pick the newest release in the row for the LEZ you build on.
+
+| logos-devnet | LEZ | Default `--lez` |
+| --- | --- | --- |
+| 0.10.x | v0.4 | `v0.4.0-rc3` |
+| 0.1.0 to [0.9.4](https://github.com/drptbl/logos-devnet/releases/tag/v0.9.4) | v0.3 | `v0.3.1` |
+
+`logos-devnet --version` names the LEZ tag it runs, e.g. `logos-devnet 0.10.0 (LEZ v0.4.0-rc3)`, and each release's notes open with it.
 
 ## Use it
 
