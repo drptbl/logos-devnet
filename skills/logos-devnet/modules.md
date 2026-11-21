@@ -1,5 +1,7 @@
 # Messaging, discovery and storage through logosctl
 
+> These calls run in sessions, which wait for a `lez_core` built for LEZ v0.4: they describe sessions on logos-devnet v0.9.4 with LEZ v0.3, and will be updated when one ships.
+
 What `delivery_module`, `libp2p_module` and `storage_module` expect when a session calls them. `source <(logos-devnet session env <name>)` points `logosctl` at a session's daemon; `logos-devnet exec --session <name> -- <command>` does the same for one command.
 
 - Calls answer `{"success": ..., "value": ..., "error": ...}` in the reply's `result`: `logosctl --json call <module> <method> <args> | tail -1 | jq .result`. A call can succeed at the logosctl level and still carry `success: false`.

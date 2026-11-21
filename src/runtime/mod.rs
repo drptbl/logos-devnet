@@ -66,6 +66,9 @@ pub trait Runtime {
     /// Starts the sequencer on the config in the chain directory. Returns once it is launched,
     /// not once it serves.
     fn start(&self) -> Result<()>;
+    /// Sets a new chain's home up from the config at `Home::setup_template` (see `setup_args`):
+    /// its config, channel signing key and funding key file.
+    fn setup_chain(&self) -> Result<()>;
     /// Stops the sequencer if it runs.
     fn stop(&self) -> Result<()>;
     /// Whether the sequencer runs. False when the runtime can't be asked (Docker is down).
@@ -92,6 +95,26 @@ pub trait Runtime {
     /// The sequencer's last log line, empty while it has logged nothing, to tell one still
     /// working from one that went quiet or repeats itself. `None` when it can't be read.
     fn last_log_line(&self) -> Option<String>;
+}
+
+/// The Bedrock funding public key `setup` takes: the one LEZ's own local recipes use. A standalone
+/// sequencer has no Bedrock node, so nothing ever pays with it.
+pub const FUNDING_KEY: &str = "2e03b2eff5a45478e7e79668d2a146cf2c5c7925bce927f2b1c67f2ab4fc0d26";
+
+/// `sequencer_service`'s arguments that set a chain `home` up from `template`, with the
+/// template's genesis, so the first `start` creates the channel.
+pub(crate) fn setup_args(home: &str, template: &str) -> Vec<String> {
+    [
+        "setup",
+        home,
+        "--config",
+        template,
+        "--funding-public-key",
+        FUNDING_KEY,
+        "--create-channel",
+    ]
+    .map(str::to_owned)
+    .to_vec()
 }
 
 /// A sequencer log line without the time it starts with, `[2026-11-15T18:45:51Z INFO ...`, so
@@ -359,6 +382,22 @@ fn combined(output: &Output) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sets_a_v0_4_chain_up_from_a_template() {
+        assert_eq!(
+            setup_args("/devnet/chain", "/devnet/chain/setup-template.json"),
+            [
+                "setup",
+                "/devnet/chain",
+                "--config",
+                "/devnet/chain/setup-template.json",
+                "--funding-public-key",
+                FUNDING_KEY,
+                "--create-channel",
+            ]
+        );
+    }
 
     #[test]
     fn a_log_line_without_its_time() {

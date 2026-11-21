@@ -69,6 +69,10 @@ enum Command {
         /// Lepta to send.
         #[arg(default_value_t = u128::from(DEFAULT_FUND))]
         amount: u128,
+        /// The account's public key, in hex: LEZ v0.4 pays an account it has never seen only
+        /// by its key.
+        #[arg(long)]
+        key: Option<String>,
     },
     /// Deploy a program binary, and add `LOGOS_PROGRAM_<NAME>` to the env file.
     Deploy {
@@ -242,7 +246,11 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Fund { account, amount } => emit(&devnet.fund(&account, amount)?, json),
+        Command::Fund {
+            account,
+            amount,
+            key,
+        } => emit(&devnet.fund(&account, amount, key.as_deref())?, json),
         Command::Deploy { name, elf, mutable } => emit(&devnet.deploy(&name, &elf, mutable)?, json),
         Command::Accounts(command) => match command {
             AccountsCommand::New {

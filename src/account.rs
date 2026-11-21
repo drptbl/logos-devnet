@@ -1,7 +1,7 @@
 //! Public account ids as the LEZ wallet prints and takes them: 32 bytes in base58, optionally
 //! prefixed `Public/`.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 /// A public account id, validated as 32 bytes of base58. Stored as bare base58.
@@ -40,19 +40,26 @@ impl PublicId {
 
     /// From 64 hex characters, the form `lez_core` returns.
     pub fn from_hex(hex: &str) -> Result<Self> {
-        let bytes = (0..hex.len())
-            .step_by(2)
-            .map(|i| {
-                hex.get(i..i + 2)
-                    .and_then(|b| u8::from_str_radix(b, 16).ok())
-            })
-            .collect::<Option<Vec<u8>>>();
-        match bytes {
-            Some(bytes) if bytes.len() == 32 && hex.len() == 64 => {
-                Ok(Self(bs58::encode(bytes).into_string()))
-            }
-            _ => bail!("{hex} is not an account id (64 hex characters)"),
+        match hex32(hex) {
+            Some(bytes) => Ok(Self(bs58::encode(bytes).into_string())),
+            None => bail!("{hex} is not an account id (64 hex characters)"),
         }
+    }
+
+    /// The public account `key` (64 hex digits, as `public_key_of` gives it) controls: the
+    /// SHA-256 of LEZ's public account prefix and the key, the same on v0.3 and v0.4.
+    pub fn of_key(key: &str) -> Result<Self> {
+        use sha2::{Digest, Sha256};
+        const PREFIX: &[u8; 32] = b"/LEE/v0.3/AccountId/Public/\x00\x00\x00\x00\x00";
+        let Some(key) = hex32(key) else {
+            bail!("{key} is not a public key (64 hex characters)");
+        };
+        let id: [u8; 32] = Sha256::new()
+            .chain_update(PREFIX)
+            .chain_update(key)
+            .finalize()
+            .into();
+        Ok(Self(bs58::encode(id).into_string()))
     }
 
     /// The bare base58 id.
@@ -74,6 +81,31 @@ impl PublicId {
     }
 }
 
+/// The public key of `secret` (64 hex digits) as LEZ writes it: the x coordinate of its
+/// secp256k1 public key, in hex. What a LEZ v0.4 genesis and `send --to-pk` take.
+pub fn public_key_of(secret: &str) -> Result<String> {
+    use k256::elliptic_curve::sec1::ToEncodedPoint;
+    let bytes = hex32(secret).context("a private key is 64 hex characters")?;
+    let secret = k256::SecretKey::from_bytes(&bytes.into())
+        .ok()
+        .context("not a valid private key")?;
+    let point = secret.public_key().to_encoded_point(false);
+    let x = point.x().context("the public key has no x coordinate")?;
+    Ok(x.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// 32 bytes from 64 hex characters.
+fn hex32(text: &str) -> Option<[u8; 32]> {
+    if text.len() != 64 {
+        return None;
+    }
+    let bytes = (0..64)
+        .step_by(2)
+        .map(|i| u8::from_str_radix(text.get(i..i + 2)?, 16).ok())
+        .collect::<Option<Vec<u8>>>()?;
+    bytes.try_into().ok()
+}
+
 /// The first `Public/<id>` in wallet output, e.g. from
 /// `Generated new account with account_id Public/<id> at path /0`.
 pub fn first_public_id(output: &str) -> Option<PublicId> {
@@ -86,6 +118,25 @@ pub fn first_public_id(output: &str) -> Option<PublicId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn derives_a_public_key_and_its_account_id_as_the_wallet_does() {
+        // From LEZ v0.3.1's wallet: `account import public --private-key 0101…01`, and
+        // `account new public`, which prints the key it made.
+        let secret = "01".repeat(32);
+        let key = public_key_of(&secret).unwrap();
+        assert_eq!(
+            PublicId::of_key(&key).unwrap().as_str(),
+            "B1UN3hPgxacgHKBRoThcAmsPajGcUf6YXUhgB36x4DAd"
+        );
+        let made = "4afc5da3b6acabc4892dddb1e49226599326ae3a6a700828e395b5bc9a4b30ba";
+        assert_eq!(
+            PublicId::of_key(made).unwrap().as_str(),
+            "23cbN9uZbLU1zhcuiZ1qu1eneL8ed8HeHzDEF1br6rEd"
+        );
+        assert!(public_key_of("zz").is_err());
+        assert!(PublicId::of_key("abc").is_err());
+    }
 
     // A real account id from the LEZ testnet, in base58 and in hex.
     const SAMPLE_ID: &str = "HpavNGFYxjyhLsy171aXsvv146yUeXmRWiho22uvT43d";

@@ -40,7 +40,7 @@ type RawObject = BTreeMap<String, Raw>;
 /// The LEZ wallet's state of a fresh account: what every account holds on a new chain.
 fn fresh_account() -> Result<Raw> {
     Ok(RawValue::from_string(
-        r#"{"nonce":0,"data":{"shards":{}}}"#.into(),
+        r#"{"nonce":0,"data":{"actor_states":{}}}"#.into(),
     )?)
 }
 
@@ -68,10 +68,23 @@ fn edit_member(
 /// not a guess.
 fn forget_chain(text: &str) -> Result<String> {
     let mut storage: RawObject = serde_json::from_str(text)?;
+    if storage.contains_key("ciphertext") {
+        anyhow::bail!(
+            "the wallet's storage is encrypted with a password, so its state from the old chain \
+             can't be cleared: make the wallet again without one"
+        );
+    }
     storage.insert(
         "last_synced_block".into(),
         RawValue::from_string("0".into())?,
     );
+    // The block its sync started from, too.
+    if storage.contains_key("synced_from_block") {
+        storage.insert(
+            "synced_from_block".into(),
+            RawValue::from_string("0".into())?,
+        );
+    }
     edit_member(&mut storage, "key_chain", |key_chain| {
         edit_object(key_chain, |key_chain| {
             edit_member(key_chain, "accounts", |accounts| {
@@ -135,7 +148,47 @@ pub fn forget_chain_in(storage: &Path) -> Result<()> {
         )
     })?;
     replace_file(storage, forgotten.as_bytes())
-        .with_context(|| format!("replacing {}", storage.display()))
+        .with_context(|| format!("replacing {}", storage.display()))?;
+    // The wallet caches the nullifiers it saw spent next to the storage: the old chain's.
+    let nullifiers = storage.with_extension("nullifiers");
+    match std::fs::remove_file(&nullifiers) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(e).with_context(|| format!("deleting {}", nullifiers.display()))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The public key, in hex, of the public account `id` in the wallet whose storage is at
+/// `storage`: as written for an account the wallet made, or derived from an imported one's
+/// private key. Only a key that names `id` counts. `None` when the wallet holds no such account.
+pub fn public_key(storage: &Path, id: &crate::account::PublicId) -> Result<Option<String>> {
+    use crate::account::{PublicId, public_key_of};
+    let text = match std::fs::read_to_string(storage) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", storage.display())),
+    };
+    let wallet: serde_json::Value = serde_json::from_str(&text)
+        .with_context(|| format!("{} is not a LEZ wallet storage", storage.display()))?;
+    let accounts = wallet["key_chain"]["accounts"]
+        .as_array()
+        .into_iter()
+        .flatten();
+    for account in accounts {
+        let key = if account["Public"]["account_id"] == id.as_str() {
+            account["Public"]["data"]["pk"].as_str().map(str::to_owned)
+        } else if account["ImportedPublic"]["account_id"] == id.as_str() {
+            account["ImportedPublic"]["pub_sign_key"]
+                .as_str()
+                .map(public_key_of)
+                .transpose()?
+        } else {
+            continue;
+        };
+        return Ok(key.filter(|key| PublicId::of_key(key).is_ok_and(|of| &of == id)));
+    }
+    Ok(None)
 }
 
 /// Replaces `path` with `contents` in one step, keeping its permissions: it never holds half of
@@ -172,17 +225,17 @@ pub(crate) mod tests {
     use super::*;
     use serde_json::Value;
 
-    /// A session's `storage.json` after a chain ran, as the LEZ wallet writes it: synced to
-    /// block 42, a private account and a shared one holding notes, and an account imported from
-    /// genesis data whose nonce only fits a u128.
+    /// A wallet's `storage.json` after a chain ran, in the layout LEZ v0.4.0-rc3's wallet
+    /// writes: synced to block 42 from block 40, a private account and a shared one holding
+    /// notes, and an account imported from genesis data whose nonce only fits a u128.
     pub(crate) const SYNCED_STORAGE: &str = r#"{
   "key_chain": {
     "accounts": [
       { "Public": { "account_id": "P", "chain_index": "/0", "data": { "k": [1, 2] } } },
       { "Private": { "account_id": "Q", "chain_index": "/0", "data": {
         "value": [ { "keys": 2 }, [
-          [ { "Regular": "111" }, { "nonce": 7, "data": { "shards": { "T": [1, 2] } } } ],
-          [ { "Regular": "222" }, { "nonce": 3, "data": { "shards": {} } } ]
+          [ "Regular", { "nonce": 7, "data": { "actor_states": { "T": [1, 2] } } } ],
+          [ "Regular", { "nonce": 3, "data": { "actor_states": {} } } ]
         ] ],
         "ccc": [0], "cci": 0 } } },
       { "ImportedPrivate": { "account": { "nonce": 340282366920938463463374607431768211455 } } }
@@ -191,10 +244,11 @@ pub(crate) mod tests {
     "shared_private_accounts": {
       "S": { "group_label": "g", "identifier": "1", "pda_seed": null,
              "authority_program_id": null,
-             "account": { "nonce": 5, "data": { "shards": { "T": [9] } } } }
+             "account": { "nonce": 5, "data": { "actor_states": { "T": [9] } } } }
     }
   },
   "last_synced_block": 42,
+  "synced_from_block": 40,
   "labels": { "main": { "Public": "P" } }
 }"#;
 
@@ -207,11 +261,12 @@ pub(crate) mod tests {
             "{text}"
         );
         let storage: Value = serde_json::from_str(&text).unwrap();
-        let fresh = serde_json::json!({ "nonce": 0, "data": { "shards": {} } });
+        let fresh = serde_json::json!({ "nonce": 0, "data": { "actor_states": {} } });
         assert_eq!(storage["last_synced_block"], 0);
+        assert_eq!(storage["synced_from_block"], 0);
         let private = &storage["key_chain"]["accounts"][1]["Private"]["data"]["value"];
         assert_eq!(private[0], serde_json::json!({ "keys": 2 }), "keys stay");
-        assert_eq!(private[1][0][0], serde_json::json!({ "Regular": "111" }));
+        assert_eq!(private[1][0][0], "Regular");
         assert_eq!(private[1][0][1], fresh);
         assert_eq!(private[1][1][1], fresh);
         let shared = &storage["key_chain"]["shared_private_accounts"]["S"];
@@ -220,9 +275,62 @@ pub(crate) mod tests {
         // Everything else is as it was.
         let mut expected: Value = serde_json::from_str(SYNCED_STORAGE).unwrap();
         expected["last_synced_block"] = 0.into();
+        expected["synced_from_block"] = 0.into();
         expected["key_chain"]["accounts"][1] = storage["key_chain"]["accounts"][1].clone();
         expected["key_chain"]["shared_private_accounts"]["S"]["account"] = fresh;
         assert_eq!(storage, expected);
+    }
+
+    #[test]
+    fn drops_the_spent_nullifiers_the_wallet_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dir.path().join(STORAGE_FILE);
+        std::fs::write(&storage, SYNCED_STORAGE).unwrap();
+        let nullifiers = dir.path().join("storage.nullifiers");
+        std::fs::write(&nullifiers, "old chain").unwrap();
+        forget_chain_in(&storage).unwrap();
+        assert!(!nullifiers.exists());
+    }
+
+    #[test]
+    fn reads_an_accounts_public_key_from_the_wallet() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dir.path().join(STORAGE_FILE);
+        // As LEZ's wallet writes them: a generated account keeps its key as `pk`, an imported
+        // one its private key as `pub_sign_key`.
+        let made = "4afc5da3b6acabc4892dddb1e49226599326ae3a6a700828e395b5bc9a4b30ba";
+        let text = format!(
+            r#"{{"key_chain":{{"accounts":[
+              {{"Public":{{"account_id":"23cbN9uZbLU1zhcuiZ1qu1eneL8ed8HeHzDEF1br6rEd","chain_index":[0],"data":{{"sk":"x","pk":"{made}"}}}}}},
+              {{"ImportedPublic":{{"account_id":"B1UN3hPgxacgHKBRoThcAmsPajGcUf6YXUhgB36x4DAd","pub_sign_key":"{}"}}}}
+            ]}},"last_synced_block":1}}"#,
+            "01".repeat(32)
+        );
+        std::fs::write(&storage, text).unwrap();
+        let key = |id: &str| public_key(&storage, &crate::account::PublicId::parse(id).unwrap());
+        assert_eq!(
+            key("23cbN9uZbLU1zhcuiZ1qu1eneL8ed8HeHzDEF1br6rEd")
+                .unwrap()
+                .as_deref(),
+            Some(made)
+        );
+        let imported = key("B1UN3hPgxacgHKBRoThcAmsPajGcUf6YXUhgB36x4DAd").unwrap();
+        assert_eq!(
+            imported,
+            Some(crate::account::public_key_of(&"01".repeat(32)).unwrap())
+        );
+        assert_eq!(
+            key("HpavNGFYxjyhLsy171aXsvv146yUeXmRWiho22uvT43d").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn refuses_an_encrypted_storage() {
+        // A wallet with a password keeps its state inside the ciphertext, out of reach.
+        let sealed = r#"{"version":1,"kdf":{},"nonce":"aa","ciphertext":"bb"}"#;
+        let err = forget_chain(sealed).unwrap_err();
+        assert!(format!("{err:#}").contains("password"), "{err:#}");
     }
 
     #[test]

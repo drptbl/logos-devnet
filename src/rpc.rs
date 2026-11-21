@@ -71,7 +71,8 @@ impl Rpc {
             .with_context(|| format!("getTransaction returned {value}"))
     }
 
-    /// An account's state: its `nonce` and its `data` shards, by program id.
+    /// An account's state: its `nonce` and its `data.actor_states` by program id, or null for an
+    /// account never used.
     pub fn account(&self, account: &PublicId) -> Result<Value> {
         self.call("getAccount", json!([account.as_str()]))
     }
@@ -87,11 +88,13 @@ fn result_of(reply: Value, method: &str) -> Result<Value> {
         .with_context(|| format!("{method} returned no result: {reply}"))
 }
 
+/// Whether `getAccount`'s answer is an account in use: it sent something, or a program keeps
+/// data in it, its balance included. It answers null for an account never used.
 pub(crate) fn in_use(account: &Value) -> bool {
     let nonce = account["nonce"].as_u64().unwrap_or(0);
-    let has_data = account["data"]["shards"]
+    let has_data = account["data"]["actor_states"]
         .as_object()
-        .is_some_and(|shards| !shards.is_empty());
+        .is_some_and(|data| !data.is_empty());
     nonce > 0 || has_data
 }
 
@@ -137,10 +140,12 @@ mod tests {
 
     #[test]
     fn tells_a_deployed_header_from_a_fresh_account() {
-        // As the sequencer answered getAccount for a header and an unused account.
-        let header = json!({ "nonce": 1, "data": { "shards": { "JAQ5": [29, 100] } } });
-        let fresh = json!({ "nonce": 0, "data": { "shards": {} } });
-        assert!(in_use(&header));
+        // As the sequencer answers getAccount for a header, a funded account and unused ones.
+        let header = json!({ "nonce": 1, "data": { "actor_states": { "JAQ5": [29, 100] } } });
+        let funded = json!({ "nonce": 0, "data": { "actor_states": { "P": [1] } } });
+        let fresh = json!({ "nonce": 0, "data": { "actor_states": {} } });
+        assert!(in_use(&header) && in_use(&funded));
         assert!(!in_use(&fresh));
+        assert!(!in_use(&Value::Null), "an account never used");
     }
 }

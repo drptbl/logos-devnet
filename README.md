@@ -4,6 +4,8 @@ A local LEZ chain for Logos development. One command starts a sequencer on your 
 
 Keep the public testnet for final checks. Messages, service discovery and storage can stay local too: a project that asks for them gets a hub on `127.0.0.1` instead of the Logos fleets.
 
+It runs LEZ v0.4, currently `v0.4.0-rc3`. For LEZ v0.3, use [v0.9.4](https://github.com/drptbl/logos-devnet/releases/tag/v0.9.4), the last release that runs it: `cargo install --locked logos-devnet --version 0.9.4`. Sessions wait for a `lez_core` built for v0.4, see [Sessions](#sessions).
+
 ## Install
 
 ```bash
@@ -13,7 +15,7 @@ cargo install --locked logos-devnet
 Or take a binary from the [latest release](https://github.com/drptbl/logos-devnet/releases/latest), built for macOS (`aarch64-apple-darwin`, `x86_64-apple-darwin`) and Linux (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, static, so any distribution), and check it against its `.sha256`:
 
 ```bash
-v=v0.9.4 t=aarch64-apple-darwin
+v=v0.10.0 t=aarch64-apple-darwin
 curl -fsSL --remote-name-all https://github.com/drptbl/logos-devnet/releases/download/$v/logos-devnet-$v-$t.tar.gz{,.sha256}
 shasum -a 256 -c logos-devnet-$v-$t.tar.gz.sha256 \
   && tar -xzf logos-devnet-$v-$t.tar.gz \
@@ -37,12 +39,12 @@ source ~/.logos-devnet/env                         # LOGOS_DEVNET_SEQUENCER, LOG
 
 | Command | What it does |
 | --- | --- |
-| `up` | Starts the devnet, or resumes it, and makes it match your `logos-devnet.toml`. Takes `--docker` or `--native`, `--lez <tag>` (a v0.3 tag), `--port`, `--block-time`, `--max-txs-per-block`, `--dev-mode` and `--log-filter`, and remembers them. `--rebuild` builds the image or binaries again. |
+| `up` | Starts the devnet, or resumes it, and makes it match your `logos-devnet.toml`. Takes `--docker` or `--native`, `--lez <tag>` (a v0.4 tag), `--port`, `--block-time`, `--max-txs-per-block`, `--dev-mode` and `--log-filter`, and remembers them. `--rebuild` builds the image or binaries again. |
 | `down` | Stops it. The chain is kept. |
 | `reset` | Deletes the chain and starts a new one, every account group funded at genesis. Takes the same options as `up`. |
 | `status` | What runs, the chain head, the faucet, programs, account groups, sessions (and which stopped while the chain runs), the messaging hub and local storage. |
 | `doctor` | Checks the project file, Docker and the image (or git and cargo with `--native`), whether the chain takes the project's settings, the `[programs]` files, the port, the hub's ports, the faucet, the hub's nodes and sessions that stopped while the chain runs, `curl` for programs from a release and, when sessions or the hub need it, `logosctl`, and says how to fix what fails. |
-| `fund <account> [amount]` | Sends lepta from the faucet to a public account, 10B by default. |
+| `fund <account> [amount] [--key <hex>]` | Sends lepta from the faucet to a public account, 10B by default. An account that was never used is paid by its public key: `--key`, unless it's one of the devnet's own. |
 | `deploy <name> <bin> [--mutable]` | Deploys a program, from its `.bin` (what `cargo risczero build` makes, not the bare ELF), and adds `LOGOS_PROGRAM_<NAME>` and `LOGOS_PROGRAM_<NAME>_HEX` to the env file. Names are lower-case letters, digits and `-`. With `--mutable`, a new build updates it in place. |
 | `wallet-config <dir>` | Writes a `wallet_config.json` pointing at the devnet into a new wallet directory. |
 | `env` | Prints the env file. |
@@ -83,6 +85,7 @@ block_time = "1s"
 max_txs_per_block = 100
 dev_mode = true          # fake proofs: private calls take a second
 log_filter = "info,sequencer_core=debug"   # the sequencer's RUST_LOG, for `logs`
+upstream_accounts = true # also fund LEZ's own genesis accounts on a new chain, for its examples
 
 [programs]               # name = guest binary, relative to this file
 counter = "target/riscv32im-risc0-zkvm-elf/docker/counter.bin"
@@ -119,7 +122,7 @@ Group names follow the rules for program names, and can't end in `-wallet`. A gr
 {
   "amount": 5000000000,
   "accounts": [
-    { "index": 0, "id": "CfcghzvosNM114Akg71vuQyDApHPYpPVC9p4uPFQygye", "hex": "ad54f9c3…" }
+    { "index": 0, "id": "CfcghzvosNM114Akg71vuQyDApHPYpPVC9p4uPFQygye", "hex": "ad54f9c3…", "key": "57f54786…" }
   ]
 }
 ```
@@ -148,6 +151,8 @@ For a wallet, give it its own directory. `wallet-config` refuses a directory tha
 
 ## Sessions
 
+> **Sessions wait for a `lez_core` built for LEZ v0.4.** The Logos catalog's newest, 0.5.1, is built for v0.3 and can't drive a v0.4 chain, so `up` refuses `[sessions]` and `session new` refuses to make one. This section, the [Messaging](#messaging) and [Storage](#storage) ones, and their examples describe how sessions work with [v0.9.4](https://github.com/drptbl/logos-devnet/releases/tag/v0.9.4) on LEZ v0.3. They'll be updated when a v0.4 `lez_core` ships.
+
 A session is a throwaway `logosctl` session wired to the devnet, for an app or an agent that talks to Logos through `logosctl`. You need `logosctl` on your `PATH`.
 
 ```bash
@@ -169,7 +174,7 @@ Each session runs its own daemon in `~/.logos-devnet/sessions/<name>`, with `lez
 
 Sessions follow the chain. `down` stops their daemons. `up` starts them again, loads their modules and opens their wallets, also after a `--port` change. `reset` funds each account again with what it was created with, and makes each wallet forget the old chain: its sync position and the state of its private accounts. Its keys and accounts stay. `session rm` deletes a session and its wallet.
 
-The catalog's `lez_core` 0.5.1 is built on LEZ `v0.3.1`, the default `--lez` tag, so sessions match it. They install that version even once the catalog has a newer one, which may be built for LEZ v0.4.
+Sessions install `lez_core` 0.5.1, built on LEZ v0.3, even once the catalog has a newer one: that's what waits for a v0.4 build.
 
 ## Messaging
 
@@ -212,7 +217,7 @@ Sessions need nothing passed in: logos-devnet configures their storage before it
 
 ## What runs
 
-LEZ's own `sequencer_service` runs, built with two features. `standalone` replaces Bedrock, the L1, with an in-process mock that accepts every block. `prove` runs programs in-process, so you don't need `r0vm`. The default is `v0.3.1`. `--lez` picks another `v0.3` tag, and a chain only runs one tag: `reset --lez <tag>` to switch. LEZ `v0.4` changes the sequencer's config and commands, and isn't supported yet.
+LEZ's own `sequencer_service` runs, built with two features. `standalone` replaces Bedrock, the L1, with an in-process mock that accepts every block. `prove` runs programs in-process, so you don't need `r0vm`. The default is `v0.4.0-rc3`: v0.4.0 isn't tagged yet. `--lez` picks another v0.4 tag, and a chain only runs one tag: `reset --lez <tag>` to switch. A new chain is set up with `sequencer_service setup`, as LEZ's own local recipe does, then started from its home. Programs must be built for LEZ v0.4.
 
 | | devnet | testnet |
 | --- | --- | --- |
@@ -222,9 +227,17 @@ LEZ's own `sequencer_service` runs, built with two features. `standalone` replac
 | Block timestamp | your clock | the sequencer's clock |
 | L1 finality, indexer | none | yes |
 
-Fees are the testnet's. Every call holds `gas_limit × base fee` up front, plus a little for its size, so about 1.6M lepta at a `gas_limit` of 200,000. The faucet makes that irrelevant.
+Fees are the testnet's: the wallet measures each call's gas and pays the base fee on it. The faucet makes that irrelevant.
+
+Genesis funds each account by its public key, which `accounts.json` records for every group account. Paying an account that was never used needs its public key too: `fund <account> --key <hex>`, with the key `wallet account new public` printed. The devnet's own accounts, its groups' and the dev wallet's, are paid by theirs. `upstream_accounts = true` under `[devnet]` also keeps LEZ's own genesis accounts funded, whose keys LEZ publishes for its examples and tools.
 
 Private calls still prove on your machine, so they take as long as on the testnet: a shielded transfer from a session took 118 s on an Apple M-series laptop. Dev mode skips that.
+
+## Coming from LEZ v0.3
+
+logos-devnet runs LEZ v0.4 since v0.10.0. [v0.9.4](https://github.com/drptbl/logos-devnet/releases/tag/v0.9.4) is the last release that runs v0.3, and a project file with `lez = "v0.3.1"` needs it.
+
+A home that ran v0.3, `~/.logos-devnet` included, keeps its chain until you move it on: `up` stops and says so. `logos-devnet reset` then starts a v0.4 chain there, with the v0.3 dev wallet, account groups and sessions moved aside to `wallet-v0.3/`, `accounts-v0.3/` and `sessions-v0.3/`, untouched. A v0.4 wallet can't read v0.3 storage, so the new chain gets a new faucet and new program ids, and groups are made again.
 
 ## Dev mode
 
@@ -248,6 +261,7 @@ Everything is in `~/.logos-devnet` (or `LOGOS_DEVNET_HOME`):
 | `native/` | the native runtime's LEZ checkout, build, log and pid file |
 | `sessions/` | one directory per session: its `logosctl` home, its daemon's `HOME` with its storage, wallet and `session.json` |
 | `accounts/` | one directory per account group: its wallet and `accounts.json` |
+| `*-v0.3/` | a home's LEZ v0.3 dev wallet, groups and sessions, moved aside by the `reset` that took it to v0.4 |
 | `programs.json` | the binary hash each program was deployed from |
 | `downloads/` | program binaries the project file names by URL, by SHA-256, and in `packages/` the module packages every daemon installs from, downloaded once and checked against the catalog's SHA-256. Every home uses the one in `~/.logos-devnet`, so a project's own home or a worktree's doesn't download them again. One left in another home from before v0.9.0 can be deleted |
 | `messaging/` | the hub, for `[messaging]` and `[storage]`: its `logosctl` home, its daemon's `HOME`, message store, ports and node keys in `hub.json` |
@@ -279,7 +293,7 @@ With `--json`, a command prints one JSON document and nothing else on stdout. No
 The repo is a GitHub Action. On a Linux runner it installs `logos-devnet`, starts the devnet from your project file and exports the env into the job:
 
 ```yaml
-- uses: drptbl/logos-devnet@v0.9.4
+- uses: drptbl/logos-devnet@v0.10.0
   with:
     args: --max-txs-per-block 100     # optional, more options for up
 - run: cargo test                     # LOGOS_DEVNET_SEQUENCER, LOGOS_PROGRAM_*, LOGOS_DEVNET_ACCOUNTS_*, RISC0_DEV_MODE are set
@@ -294,7 +308,7 @@ Inputs: `version` (default: the release tag you use the action at, or, pinned to
 `ghcr.io/drptbl/logos-devnet-sequencer:<lez tag>` holds the sequencer and the LEZ `wallet` for `linux/amd64` and `linux/arm64`. `up` pulls it, and builds it locally from [`docker/Dockerfile`](docker/Dockerfile) when no image is published for your tag. To build it yourself:
 
 ```bash
-docker build --build-arg LEZ_TAG=v0.3.1 -t ghcr.io/drptbl/logos-devnet-sequencer:v0.3.1 - < docker/Dockerfile
+docker build --build-arg LEZ_TAG=v0.4.0-rc3 -t ghcr.io/drptbl/logos-devnet-sequencer:v0.4.0-rc3 - < docker/Dockerfile
 ```
 
 ## License
