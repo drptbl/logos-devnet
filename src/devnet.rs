@@ -165,10 +165,14 @@ impl Devnet {
     }
 
     /// Refuses `settings` the chain here can't run on: another LEZ tag or dev mode. Its own
-    /// record of its dev mode counts, not settings.json's.
+    /// records of its tag and dev mode count, not settings.json's.
     fn check_chain_takes(&self, settings: &Settings) -> Result<()> {
         let chain = Settings {
             dev_mode: self.home.chain_dev_mode(),
+            lez: self
+                .home
+                .chain_lez()
+                .unwrap_or_else(|| self.settings.lez.clone()),
             ..self.settings.clone()
         };
         check_chain_keeps(&chain, settings)
@@ -395,6 +399,7 @@ impl Devnet {
         next.set_chain_up(&config)?;
         write_json(&next.home.chain_config(), &config)?;
         next.home.record_chain_dev_mode(next.settings.dev_mode)?;
+        next.home.record_chain_lez(&next.settings.lez)?;
         // Every one is tried, and a failure is reported once the chain runs.
         let marked = if continuing {
             Ok(())
@@ -2856,6 +2861,29 @@ mod tests {
             ..Settings::default()
         };
         assert!(devnet.check_chain_takes(&dev).is_ok());
+    }
+
+    #[test]
+    fn a_chain_keeps_its_own_lez_tag_without_settings() {
+        // A v0.4 chain whose settings.json was lost reads as the default v0.3.1: its own record
+        // must stop a v0.3 config being written over it.
+        let dir = tempfile::tempdir().unwrap();
+        let home = Home::locate(Some(dir.path().to_path_buf())).unwrap();
+        std::fs::create_dir_all(home.chain_dir()).unwrap();
+        home.record_chain_lez("v0.4.0-rc3").unwrap();
+        let devnet = Devnet::open(home, None).unwrap();
+        let err = devnet.check_chain_takes(&Settings::default()).unwrap_err();
+        assert!(err.to_string().contains("runs LEZ v0.4.0-rc3"), "{err}");
+    }
+
+    #[test]
+    fn doctor_refuses_sessions_on_the_line_the_project_asks_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = "home = \"home\"\n[devnet]\nlez = \"v0.4.0-rc3\"\n[sessions.alice]\n";
+        let devnet = devnet_with_file(dir.path(), file);
+        // No chain yet: the settings are still the default v0.3.1.
+        assert!(devnet.refuses_sessions(devnet.settings_for_up().line()));
+        assert!(!devnet.refuses_sessions(LezLine::V03));
     }
 
     #[test]

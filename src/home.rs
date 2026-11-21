@@ -258,6 +258,21 @@ impl Home {
         let value = crate::envfile::dev_mode_value(dev_mode);
         std::fs::write(&file, value).with_context(|| format!("writing {}", file.display()))
     }
+
+    /// The LEZ tag the chain here runs, kept with the chain like its dev mode: a lost or edited
+    /// settings file would read as the default tag, and v0.3 and v0.4 can't run each other's
+    /// chain. Chains from before v0.10.0 have none.
+    pub fn chain_lez(&self) -> Option<String> {
+        std::fs::read_to_string(self.chain_dir().join("lez"))
+            .ok()
+            .map(|tag| tag.trim().to_owned())
+            .filter(|tag| !tag.is_empty())
+    }
+
+    pub fn record_chain_lez(&self, tag: &str) -> Result<()> {
+        let file = self.chain_dir().join("lez");
+        std::fs::write(&file, tag).with_context(|| format!("writing {}", file.display()))
+    }
     /// The dev wallet: the faucet and each program's header key. A v0.4 wallet can't read
     /// v0.3 storage, so each LEZ line has its own, and its own program ids.
     pub fn wallet_dir(&self, line: LezLine) -> PathBuf {
