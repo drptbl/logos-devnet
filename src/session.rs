@@ -25,8 +25,9 @@ use crate::runtime::{stdout_of, stdout_within};
 use crate::wallet_storage;
 
 const LEZ_CORE: &str = "lez_core";
-/// The `lez_core` built on LEZ v0.3, the line logos-devnet runs. A later one may be built on
-/// LEZ v0.4, whose fees, transactions and built-in programs a v0.3 chain doesn't take.
+/// The `lez_core` sessions install. 0.5.1 is built on LEZ v0.3, which logos-devnet no longer
+/// runs, so sessions wait (see `devnet::SESSIONS_READY`): this becomes the first `lez_core`
+/// built on LEZ v0.4 that the Logos catalog publishes.
 const LEZ_CORE_VERSION: &str = "0.5.1";
 /// How long `stop` waits for a daemon to exit.
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);

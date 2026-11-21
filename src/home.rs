@@ -6,7 +6,6 @@
 //! env             export lines for projects (see envfile)
 //! chain/          the sequencer's home: its config, database and keys. `reset` deletes it.
 //! wallet/         the dev wallet: the faucet and each program's header key. Kept across resets.
-//!                 LEZ v0.4's is `wallet-v0.4/`, and its account groups `accounts-v0.4/`
 //! compose.yaml    the Docker runtime's compose file
 //! native/         the native runtime's checkout, build, log and pid file
 //! sessions/       throwaway logosctl sessions with devnet wallets (see session)
@@ -26,49 +25,45 @@ use serde_json::Value;
 
 use crate::account::PublicId;
 
-/// The LEZ release `lez_core` 0.5.1 is built on, which the public testnet runs. Bump with the
-/// testnet; the image workflow builds this tag when it changes.
-pub const DEFAULT_LEZ: &str = "v0.3.1";
+/// The LEZ release the devnet runs unless asked for another v0.4 tag. Bump with LEZ's releases;
+/// the image workflow builds this tag when it changes.
+pub const DEFAULT_LEZ: &str = "v0.4.0-rc3";
 const IMAGE_REPO: &str = "ghcr.io/drptbl/logos-devnet-sequencer";
 const DEFAULT_PORT: u16 = 3040;
 const DEFAULT_BLOCK_TIME: &str = "1s";
-/// Upstream's debug config allows 20 transactions per block.
+/// Upstream's local config allows 20 transactions per block.
 pub const DEFAULT_MAX_TXS_PER_BLOCK: u32 = 20;
 /// The sequencer's log filter (`RUST_LOG`): its own progress, without its actor framework's.
 pub const DEFAULT_LOG_FILTER: &str = "info,kameo=warn";
 
-/// The LEZ release line a tag belongs to. v0.4 changes how the sequencer starts, its config,
-/// the wallet's storage and how accounts are funded, so each line has its own code path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LezLine {
-    V03,
-    V04,
-}
-
-impl LezLine {
-    /// The line of `tag`, e.g. `v0.3.1` or `v0.4.0-rc3`.
-    pub fn of(tag: &str) -> Result<Self> {
-        let numbered = |prefix: &str| {
-            tag.strip_prefix(prefix)
-                .and_then(|patch| patch.split(['-', '.']).next())
-                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-        };
-        if numbered("v0.3.") {
-            Ok(Self::V03)
-        } else if numbered("v0.4.") {
-            Ok(Self::V04)
-        } else {
-            anyhow::bail!(
-                "logos-devnet runs LEZ v0.3 and v0.4 tags, and {tag} isn't one: use \
-                 `--lez {DEFAULT_LEZ}`, or a v0.4 tag such as `v0.4.0-rc3`"
-            )
-        }
-    }
-}
-
-/// A LEZ tag logos-devnet runs: one of the v0.3 or v0.4 line.
+/// A LEZ tag logos-devnet runs: one of the v0.4 line, e.g. `v0.4.0-rc3`.
 pub fn check_lez(tag: &str) -> Result<()> {
-    LezLine::of(tag).map(drop)
+    if is_v0_3(tag) {
+        anyhow::bail!("{tag} is a LEZ v0.3 tag. {V0_3_RELEASE}");
+    }
+    if !numbered(tag, "v0.4.") {
+        anyhow::bail!(
+            "logos-devnet runs LEZ v0.4 tags, and {tag} isn't one: use `--lez {DEFAULT_LEZ}`"
+        );
+    }
+    Ok(())
+}
+
+/// Where LEZ v0.3 lives on.
+pub const V0_3_RELEASE: &str = "logos-devnet runs LEZ v0.4 since v0.10.0, and v0.9.4 is the last \
+     release that runs v0.3: `cargo install --locked logos-devnet --version 0.9.4`, or \
+     https://github.com/drptbl/logos-devnet/releases/tag/v0.9.4";
+
+/// Whether `tag` is a LEZ v0.3 tag, which homes from before v0.10.0 ran.
+pub fn is_v0_3(tag: &str) -> bool {
+    numbered(tag, "v0.3.")
+}
+
+/// Whether `tag` is `prefix` and a patch number, with any suffix, e.g. `v0.4.` and `0-rc3`.
+fn numbered(tag: &str, prefix: &str) -> bool {
+    tag.strip_prefix(prefix)
+        .and_then(|patch| patch.split(['-', '.']).next())
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// A log filter the sequencer takes: `RUST_LOG` syntax, e.g. `debug` or
@@ -133,12 +128,6 @@ fn default_log_filter() -> String {
 }
 
 impl Settings {
-    /// The LEZ line the settings' tag belongs to. `up` checks the tag before it saves one, so
-    /// a tag from no line, in a hand-edited file, reads as v0.3.
-    pub fn line(&self) -> LezLine {
-        LezLine::of(&self.lez).unwrap_or(LezLine::V03)
-    }
-
     pub fn image(&self) -> String {
         format!("{IMAGE_REPO}:{}", self.lez)
     }
@@ -273,13 +262,8 @@ impl Home {
         let file = self.chain_dir().join("lez");
         std::fs::write(&file, tag).with_context(|| format!("writing {}", file.display()))
     }
-    /// The dev wallet: the faucet and each program's header key. A v0.4 wallet can't read
-    /// v0.3 storage, so each LEZ line has its own, and its own program ids.
-    pub fn wallet_dir(&self, line: LezLine) -> PathBuf {
-        self.root.join(match line {
-            LezLine::V03 => "wallet",
-            LezLine::V04 => "wallet-v0.4",
-        })
+    pub fn wallet_dir(&self) -> PathBuf {
+        self.root.join("wallet")
     }
     pub fn compose_file(&self) -> PathBuf {
         self.root.join("compose.yaml")
@@ -287,20 +271,57 @@ impl Home {
     pub fn native_dir(&self) -> PathBuf {
         self.root.join("native")
     }
-    /// Sessions, one set per LEZ line like the dev wallet: a v0.3 session's wallet and
-    /// `lez_core` can't work on v0.4, and stay as they were for a return to v0.3.
-    pub fn sessions_dir(&self, line: LezLine) -> PathBuf {
-        self.root.join(match line {
-            LezLine::V03 => "sessions",
-            LezLine::V04 => "sessions-v0.4",
-        })
+    pub fn sessions_dir(&self) -> PathBuf {
+        self.root.join("sessions")
     }
-    /// Account groups, each with a wallet: one set per LEZ line, like the dev wallet.
-    pub fn groups_dir(&self, line: LezLine) -> PathBuf {
-        self.root.join(match line {
-            LezLine::V03 => "accounts",
-            LezLine::V04 => "accounts-v0.4",
-        })
+
+    /// Whether the chain here ran LEZ v0.3: its own record says so, or it has none and either
+    /// the settings (`settings_lez`) say so or it was never set up the way v0.4 chains are.
+    pub fn runs_v0_3(&self, settings_lez: &str) -> bool {
+        match self.chain_lez() {
+            Some(tag) => is_v0_3(&tag),
+            None => is_v0_3(settings_lez) || (self.has_chain() && !self.chain_set_up()),
+        }
+    }
+
+    /// Moves a LEZ v0.3 home's wallets aside, to `<dir>-v0.3/`, so a v0.4 chain starts its own:
+    /// a v0.4 wallet can't read v0.3 storage. Nothing is deleted or overwritten, and a home moved
+    /// once isn't moved again, so a `reset` that fails later can run again. Returns the
+    /// directories moved.
+    pub fn move_v0_3_aside(&self) -> Result<Vec<String>> {
+        let done = self.root.join("moved-v0.3");
+        if done.exists() {
+            return Ok(Vec::new());
+        }
+        let dirs = ["wallet", "accounts", "sessions"]
+            .map(|dir| (self.root.join(dir), self.root.join(format!("{dir}-v0.3"))));
+        for (from, to) in &dirs {
+            if from.exists() && to.exists() {
+                anyhow::bail!(
+                    "{} and {} both exist: move one of them elsewhere, then `reset` again",
+                    from.display(),
+                    to.display()
+                );
+            }
+        }
+        let mut moved = Vec::new();
+        for (from, to) in &dirs {
+            if from.exists() {
+                std::fs::rename(from, to)
+                    .with_context(|| format!("moving {} to {}", from.display(), to.display()))?;
+                moved.push(
+                    to.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+        }
+        std::fs::write(&done, "").with_context(|| format!("writing {}", done.display()))?;
+        Ok(moved)
+    }
+    pub fn groups_dir(&self) -> PathBuf {
+        self.root.join("accounts")
     }
     /// Program binaries downloaded from a URL, named by their SHA-256.
     pub fn downloads_dir(&self) -> PathBuf {
@@ -427,17 +448,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn runs_lez_v0_3_and_v0_4_tags() {
-        for tag in ["v0.3.1", "v0.3.2", "v0.3.10", "v0.3.2-rc1"] {
-            assert_eq!(LezLine::of(tag).unwrap(), LezLine::V03, "{tag}");
-        }
+    fn runs_lez_v0_4_tags_and_points_v0_3_at_its_last_release() {
         for tag in ["v0.4.0-rc3", "v0.4.0", "v0.4.12"] {
-            assert_eq!(LezLine::of(tag).unwrap(), LezLine::V04, "{tag}");
+            assert!(check_lez(tag).is_ok(), "{tag}");
         }
-        for tag in ["v0.5.0", "v0.3", "v0.4.", "v0.3.x", "0.3.1", "main"] {
+        for tag in ["v0.3.1", "v0.3.2-rc1"] {
+            let err = check_lez(tag).unwrap_err().to_string();
+            assert!(err.contains("v0.9.4"), "{err}");
+        }
+        for tag in ["v0.5.0", "v0.4", "v0.4.", "v0.4.x", "0.4.0", "main"] {
             assert!(check_lez(tag).is_err(), "{tag}");
         }
-        assert_eq!(LezLine::of(DEFAULT_LEZ).unwrap(), LezLine::V03);
+        assert!(check_lez(DEFAULT_LEZ).is_ok());
     }
 
     #[test]
@@ -453,28 +475,51 @@ mod tests {
     }
 
     #[test]
-    fn each_lez_line_keeps_its_own_wallets() {
+    fn moves_a_v0_3_homes_wallets_aside_once() {
         let dir = tempfile::tempdir().unwrap();
         let home = Home::locate(Some(dir.path().to_path_buf())).unwrap();
-        // A v0.4 wallet can't read v0.3 storage, so a v0.4 chain starts its own.
-        assert_eq!(home.wallet_dir(LezLine::V03), home.root().join("wallet"));
-        assert_eq!(home.groups_dir(LezLine::V03), home.root().join("accounts"));
+        for d in ["wallet", "accounts", "sessions"] {
+            std::fs::create_dir_all(home.root().join(d)).unwrap();
+            std::fs::write(home.root().join(d).join("data"), "v0.3").unwrap();
+        }
         assert_eq!(
-            home.wallet_dir(LezLine::V04),
-            home.root().join("wallet-v0.4")
+            home.move_v0_3_aside().unwrap(),
+            ["wallet-v0.3", "accounts-v0.3", "sessions-v0.3"]
         );
-        assert_eq!(
-            home.groups_dir(LezLine::V04),
-            home.root().join("accounts-v0.4")
-        );
-        assert_eq!(
-            home.sessions_dir(LezLine::V03),
-            home.root().join("sessions")
-        );
-        assert_eq!(
-            home.sessions_dir(LezLine::V04),
-            home.root().join("sessions-v0.4")
-        );
+        let kept = home.root().join("accounts-v0.3/data");
+        assert_eq!(std::fs::read_to_string(&kept).unwrap(), "v0.3");
+        // A `reset` that failed after the move runs again: v0.4's own groups stay where they are.
+        std::fs::create_dir_all(home.groups_dir()).unwrap();
+        assert!(home.move_v0_3_aside().unwrap().is_empty());
+        assert!(home.groups_dir().exists());
+        assert_eq!(std::fs::read_to_string(kept).unwrap(), "v0.3");
+    }
+
+    #[test]
+    fn refuses_to_move_over_an_earlier_move() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Home::locate(Some(dir.path().to_path_buf())).unwrap();
+        for d in ["wallet", "wallet-v0.3"] {
+            std::fs::create_dir_all(home.root().join(d)).unwrap();
+        }
+        let err = home.move_v0_3_aside().unwrap_err().to_string();
+        assert!(err.contains("both exist"), "{err}");
+        assert!(home.wallet_dir().exists());
+    }
+
+    #[test]
+    fn tells_a_v0_3_chain_from_a_v0_4_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Home::locate(Some(dir.path().to_path_buf())).unwrap();
+        assert!(!home.runs_v0_3(DEFAULT_LEZ));
+        assert!(home.runs_v0_3("v0.3.1"), "the settings say so");
+        // A chain with neither a record nor v0.4's setup, its settings lost.
+        std::fs::create_dir_all(home.chain_dir().join("rocksdb-0101")).unwrap();
+        assert!(home.runs_v0_3(DEFAULT_LEZ));
+        std::fs::write(home.chain_dir().join("bedrock_funding_public_key"), "f").unwrap();
+        assert!(!home.runs_v0_3(DEFAULT_LEZ));
+        home.record_chain_lez("v0.3.1").unwrap();
+        assert!(home.runs_v0_3(DEFAULT_LEZ), "its own record wins");
     }
 
     #[test]
@@ -627,7 +672,7 @@ mod tests {
     fn names_the_image_by_lez_tag() {
         assert_eq!(
             Settings::default().image(),
-            "ghcr.io/drptbl/logos-devnet-sequencer:v0.3.1"
+            "ghcr.io/drptbl/logos-devnet-sequencer:v0.4.0-rc3"
         );
         assert_eq!(Settings::default().sequencer_url(), "http://127.0.0.1:3040");
     }

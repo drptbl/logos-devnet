@@ -15,7 +15,7 @@ use crate::chain_config::{self, ChainOptions, Funded};
 use crate::envfile::{self, Env};
 use crate::fetch;
 use crate::groups::{self, Group, GroupInfo};
-use crate::home::{Home, LezLine, RuntimeKind, Settings, write_json};
+use crate::home::{DEFAULT_LEZ, Home, RuntimeKind, Settings, V0_3_RELEASE, write_json};
 use crate::messaging::{Hub, Wants};
 use crate::project::{ProgramSource, ProgramSpec, Project};
 use crate::report::{
@@ -32,10 +32,16 @@ const FAUCET_BALANCE: u64 = 1_000_000_000_000_000_000;
 const FAUCET_LABEL: &str = "faucet";
 /// What `fund`, sessions and account groups send when no amount is given.
 pub const DEFAULT_FUND: u64 = 10_000_000_000;
-/// Why sessions don't run on LEZ v0.4 yet.
-const SESSIONS_ON_V04: &str = "sessions don't run on LEZ v0.4 yet: the Logos catalog has no \
-     lez_core for v0.4, and lez_core 0.5.1 can't drive a v0.4 chain. Drop [sessions] from the \
-     project file, or stay on v0.3, whose sessions wait as they were";
+/// Whether sessions run. They wait for a `lez_core` built for LEZ v0.4 in the Logos catalog: the
+/// newest, 0.5.1, is built for v0.3 and can't drive a v0.4 chain. Once one ships, pin it in
+/// `session::LEZ_CORE_VERSION`, open wallets with its `force_rpc` (it runs a sequencer of its own
+/// otherwise), and turn this on.
+const SESSIONS_READY: bool = false;
+
+/// Why sessions don't run yet.
+pub(crate) const SESSIONS_WAIT: &str = "sessions don't run yet: they need a lez_core built for LEZ v0.4, \
+     and the Logos catalog has only 0.5.1, built for v0.3. Drop [sessions] from the project \
+     file for now, or use logos-devnet v0.9.4 with LEZ v0.3";
 
 /// How `up` waits for a starting sequencer's first block. A long chain replays first, logging
 /// a different line for each block (186k blocks took 34 min), so `up` waits as long as the log
@@ -280,7 +286,7 @@ impl Devnet {
     /// Runs the LEZ wallet on the dev wallet. Its config is rewritten first: the wallet would
     /// otherwise create a default one pointing at the public testnet.
     fn wallet(&self, args: Vec<WalletArg>) -> Result<String> {
-        let home = self.wallet_dir();
+        let home = self.home.wallet_dir();
         self.point_wallet_at(&home, &self.runtime.wallet_sequencer_url())?;
         self.runtime.wallet(&home, args)
     }
@@ -289,25 +295,7 @@ impl Devnet {
     /// run: without one the wallet creates a default pointing at the public testnet.
     fn point_wallet_at(&self, home: &Path, sequencer: &str) -> Result<()> {
         std::fs::create_dir_all(home)?;
-        write_json(
-            &home.join("wallet_config.json"),
-            &wallet_config(self.settings.line(), sequencer),
-        )
-    }
-
-    /// The dev wallet of the chain's LEZ line.
-    fn wallet_dir(&self) -> PathBuf {
-        self.home.wallet_dir(self.settings.line())
-    }
-
-    /// The account groups of the chain's LEZ line.
-    fn groups_dir(&self) -> PathBuf {
-        self.home.groups_dir(self.settings.line())
-    }
-
-    /// The sessions of the chain's LEZ line.
-    fn sessions_dir(&self) -> PathBuf {
-        self.home.sessions_dir(self.settings.line())
+        write_json(&home.join("wallet_config.json"), &wallet_config(sequencer))
     }
 
     fn faucet(&self) -> Result<&PublicId> {
@@ -336,10 +324,34 @@ impl Devnet {
 
     /// Starts the devnet with `opts` applied, on a new chain when `wipe`. Everything that can
     /// fail runs before the running sequencer is stopped, the settings saved or the chain
-    /// deleted, so a bad option leaves the devnet as it was.
+    /// deleted, so a bad option leaves the devnet as it was. A home that ran LEZ v0.3 is the
+    /// exception: `reset` moves its wallets aside (see `move_v0_3_aside`) before the steps that
+    /// need the new ones, and a `reset` run again after a failure doesn't move them twice.
     fn launch(self, opts: &UpOptions, wipe: bool) -> Result<Status> {
+        // A tag asked for, by flag or project file, is checked before anything else says
+        // `reset` would apply it.
+        let asked = opts
+            .lez
+            .as_deref()
+            .or_else(|| self.project.as_ref().and_then(|p| p.devnet.lez.as_deref()));
+        if let Some(tag) = asked {
+            crate::home::check_lez(tag)?;
+        }
         let running = self.runtime.running();
-        let settings = opts.apply(self.with_project_settings(opts, running && !wipe)?);
+        let mut settings = opts.apply(self.with_project_settings(opts, running && !wipe)?);
+        let moves_v0_3 = self.home.runs_v0_3(&self.settings.lez);
+        if moves_v0_3 {
+            if !wipe {
+                bail!(
+                    "this home runs LEZ v0.3. `logos-devnet reset` starts it on LEZ v0.4, with \
+                     its v0.3 wallets, account groups and sessions moved aside, to \
+                     wallet-v0.3/, accounts-v0.3/ and sessions-v0.3/. {V0_3_RELEASE}"
+                );
+            }
+            if asked.is_none() {
+                settings.lez = DEFAULT_LEZ.into();
+            }
+        }
         crate::home::check_lez(&settings.lez)?;
         chain_config::block_time_secs(&settings.block_time)?;
         chain_config::check_max_txs_per_block(settings.max_txs_per_block)?;
@@ -377,6 +389,9 @@ impl Devnet {
         }
 
         next.runtime.prepare(opts.rebuild)?;
+        if moves_v0_3 {
+            self.move_v0_3_aside()?;
+        }
         let faucet = next.dev_faucet()?;
         if continuing && funds_another_faucet(self.settings.faucet.as_ref(), &faucet) {
             bail!(
@@ -461,6 +476,32 @@ impl Devnet {
         Ok(wanted)
     }
 
+    /// Moves a LEZ v0.3 home's wallets, account groups and sessions aside (see
+    /// `Home::move_v0_3_aside`), with each session's daemon stopped first.
+    fn move_v0_3_aside(&self) -> Result<()> {
+        // A daemon left running would keep a moved directory open, out of reach.
+        for session in session::list(&self.home.sessions_dir())? {
+            let ctl = session.logosctl();
+            ctl.stop()
+                .with_context(|| format!("stopping session {}", session.name))?;
+            if ctl.answers_within(SESSION_CHECK_TIMEOUT) {
+                bail!(
+                    "session {}'s daemon still answers after a stop: stop it with `logosctl \
+                     daemon stop` and its LOGOSCTL_CONFIG_DIR, then `reset` again",
+                    session.name
+                );
+            }
+        }
+        let moved = self.home.move_v0_3_aside()?;
+        if !moved.is_empty() {
+            eprintln!(
+                "This home ran LEZ v0.3: its {} are kept as they were, for logos-devnet v0.9.4.",
+                moved.join(", ")
+            );
+        }
+        Ok(())
+    }
+
     /// Where `program`'s binary is on this machine: its path, or its release, downloaded into
     /// the home once and checked against its SHA-256.
     fn program_binary(&self, program: &ProgramSpec) -> Result<PathBuf> {
@@ -491,8 +532,8 @@ impl Devnet {
                 self.runtime.check_wallet_file(&binary)?;
             }
         }
-        if self.refuses_sessions(self.settings.line()) {
-            bail!("{SESSIONS_ON_V04}");
+        if self.refuses_sessions() {
+            bail!("{SESSIONS_WAIT}");
         }
         if self.needs_logosctl() && !logosctl_on_path() {
             bail!(
@@ -505,10 +546,9 @@ impl Devnet {
         self.check_hub_ports()
     }
 
-    /// Whether the project asks for sessions on `line`, when that's LEZ v0.4, which can't run
-    /// them yet.
-    pub fn refuses_sessions(&self, line: LezLine) -> bool {
-        line == LezLine::V04
+    /// Whether the project asks for sessions, which don't run yet (see `SESSIONS_READY`).
+    pub fn refuses_sessions(&self) -> bool {
+        !SESSIONS_READY
             && self
                 .project
                 .as_ref()
@@ -547,7 +587,7 @@ impl Devnet {
     /// height. Keys and accounts stay. Every group is tried.
     fn forget_group_chains(&self) -> Result<()> {
         let mut failed = Vec::new();
-        for group in groups::list(&self.groups_dir())? {
+        for group in groups::list(&self.home.groups_dir())? {
             if let Err(e) = group.forget_old_chain() {
                 eprintln!("account group {}: {e:#}", group.name);
                 failed.push(group.name);
@@ -572,7 +612,7 @@ impl Devnet {
                 failed.push(format!("session {}", session.name));
             }
         }
-        for group in groups::list(&self.groups_dir())? {
+        for group in groups::list(&self.home.groups_dir())? {
             if let Err(e) = group.mark_new_chain() {
                 eprintln!("account group {}: {e:#}", group.name);
                 failed.push(format!("account group {}", group.name));
@@ -625,7 +665,7 @@ impl Devnet {
         }
         if let Some(project) = &self.project {
             for (name, spec) in &project.sessions {
-                let session = Session::new(&self.sessions_dir(), name)?;
+                let session = Session::new(&self.home.sessions_dir(), name)?;
                 if session.exists() {
                     match self.add_session_modules(&session, &spec.modules) {
                         Ok(added) if !added.is_empty() => {
@@ -655,7 +695,7 @@ impl Devnet {
     /// Group `name` with at least `count` accounts, each to be funded with `amount`. Missing
     /// keys are made in one wallet batch. A group never shrinks: its keys stay.
     fn make_group(&self, name: &str, count: usize, amount: u64) -> Result<GroupInfo> {
-        let group = Group::new(&self.groups_dir(), name)?;
+        let group = Group::new(&self.home.groups_dir(), name)?;
         if !group.wallet_dir().exists() {
             groups::check_group_name(name)?;
         }
@@ -733,7 +773,7 @@ impl Devnet {
     /// "Never funded" is read from the chain, so spent accounts aren't topped up.
     fn fund_groups(&self, only: Option<&str>) -> Result<()> {
         let rpc = self.rpc();
-        for group in groups::list(&self.groups_dir())? {
+        for group in groups::list(&self.home.groups_dir())? {
             if only.is_some_and(|name| name != group.name) {
                 continue;
             }
@@ -755,7 +795,11 @@ impl Devnet {
                 group.name
             );
             for account in unfunded {
-                self.send(&account.id, account.checked_key()?, u128::from(info.amount))?;
+                self.send(
+                    &account.id,
+                    Some(account.checked_key()?),
+                    u128::from(info.amount),
+                )?;
             }
         }
         Ok(())
@@ -764,12 +808,11 @@ impl Devnet {
     /// Every account group's accounts with their genesis balance.
     fn genesis_accounts(&self) -> Result<Vec<Funded>> {
         let mut accounts = Vec::new();
-        for group in groups::list(&self.groups_dir())? {
+        for group in groups::list(&self.home.groups_dir())? {
             let info = group.info()?;
             for account in &info.accounts {
                 accounts.push(Funded {
-                    key: account.checked_key()?.map(str::to_owned),
-                    id: account.id.clone(),
+                    key: account.checked_key()?.to_owned(),
                     balance: info.amount,
                 });
             }
@@ -876,7 +919,7 @@ impl Devnet {
 
     /// The sessions, or none (with a note) when their directory can't be read.
     fn sessions(&self) -> Vec<Session> {
-        session::list(&self.sessions_dir()).unwrap_or_else(|e| {
+        session::list(&self.home.sessions_dir()).unwrap_or_else(|e| {
             eprintln!("sessions: {e:#}");
             Vec::new()
         })
@@ -887,14 +930,14 @@ impl Devnet {
         std::fs::create_dir_all(session.wallet_dir())?;
         write_json(
             &session.wallet_config(),
-            &wallet_config(self.settings.line(), &self.settings.sequencer_url()),
+            &wallet_config(&self.settings.sequencer_url()),
         )
     }
 
     /// Sends `amount` lepta from the faucet to `to`, whose public key is `key` when known, and
     /// returns its new balance.
     fn send(&self, to: &PublicId, key: Option<&str>, amount: u128) -> Result<u128> {
-        let args = transfer_args(self.settings.line(), self.faucet()?, to, key, amount);
+        let args = transfer_args(self.faucet()?, to, key, amount);
         self.wallet(args.into_iter().map(WalletArg::from).collect())?;
         self.rpc().balance(to)
     }
@@ -911,20 +954,23 @@ impl Devnet {
     /// The public key of `id` when logos-devnet holds it: a group account's, or one in the dev
     /// wallet, such as the faucet. Read where the key lives, so it can't drift from it.
     fn known_key(&self, id: &PublicId) -> Result<Option<String>> {
-        for group in groups::list(&self.groups_dir())? {
+        for group in groups::list(&self.home.groups_dir())? {
             if let Some(account) = group.info()?.accounts.iter().find(|a| &a.id == id) {
-                return Ok(account.checked_key()?.map(str::to_owned));
+                return Ok(Some(account.checked_key()?.to_owned()));
             }
         }
-        let storage = self.wallet_dir().join(crate::wallet_storage::STORAGE_FILE);
+        let storage = self
+            .home
+            .wallet_dir()
+            .join(crate::wallet_storage::STORAGE_FILE);
         crate::wallet_storage::public_key(&storage, id)
     }
 
-    /// Sets a new LEZ v0.4 chain up from `config`: `setup` writes its channel signing key and
-    /// funding key file beside a copy of the config, which `up` then keeps up to date. A chain
-    /// set up before, and every v0.3 chain, has nothing to do.
+    /// Sets a new chain up from `config`: `setup` writes its channel signing key and funding key
+    /// file beside a copy of the config, which `up` then keeps up to date. A chain set up before
+    /// has nothing to do.
     fn set_chain_up(&self, config: &Value) -> Result<()> {
-        if self.settings.line() == LezLine::V03 || self.home.chain_set_up() {
+        if self.home.chain_set_up() {
             return Ok(());
         }
         // `setup` refuses a home that has a config, e.g. from one that stopped halfway.
@@ -940,12 +986,17 @@ impl Devnet {
         let genesis_accounts = self.genesis_accounts()?;
         let faucet = self.faucet()?;
         let faucet = Funded {
-            key: self.known_key(faucet)?,
-            id: faucet.clone(),
+            key: self.known_key(faucet)?.with_context(|| {
+                format!(
+                    "the dev wallet holds no key for the faucet {}: move {} aside, and `up` \
+                     makes a new faucet, with new program ids",
+                    faucet.wallet_form(),
+                    self.home.wallet_dir().display()
+                )
+            })?,
             balance: FAUCET_BALANCE,
         };
         chain_config::patch(
-            self.settings.line(),
             self.runtime.upstream_config()?,
             &ChainOptions {
                 home: &self.runtime.chain_home(),
@@ -984,7 +1035,7 @@ impl Devnet {
             messaging: self.hub().addresses(),
             sessions: BTreeMap::new(),
         };
-        for group in groups::list(&self.groups_dir())? {
+        for group in groups::list(&self.home.groups_dir())? {
             env.groups.insert(group.name.clone(), group.manifest());
         }
         // A session still being made has no account yet: it joins the next env file.
@@ -1132,18 +1183,13 @@ impl Devnet {
         // Fails before any work when there is no faucet yet.
         self.faucet()?;
         self.require_running()?;
-        // v0.3 pays by id: only v0.4 needs the key.
         let key = match key {
             Some(key) => Some(key.to_owned()),
-            None if self.settings.line() == LezLine::V04 => self.known_key(&to)?,
-            None => None,
+            None => self.known_key(&to)?,
         };
-        if self.settings.line() == LezLine::V04
-            && key.is_none()
-            && !self.rpc().account_in_use(&to)?
-        {
+        if key.is_none() && !self.rpc().account_in_use(&to)? {
             bail!(
-                "{} has never been used, and LEZ v0.4 pays such an account only by its public \
+                "{} has never been used, and LEZ pays such an account only by its public \
                  key: pass it with `--key <hex>`, as `wallet account new public` printed it or \
                  `wallet account get --keys` prints it",
                 to.wallet_form()
@@ -1159,13 +1205,6 @@ impl Devnet {
     /// Makes account group `name` with `count` accounts (at least: a group never shrinks),
     /// each funded with `amount`, now when the devnet runs, else when it starts.
     pub fn accounts_new(&self, name: &str, count: usize, amount: u64) -> Result<GroupSummary> {
-        // Before the first chain, the project's `[devnet]` decides which LEZ line the group is
-        // for, as it decides what `up` starts.
-        let planned = self.settings_for_up();
-        if !self.home.has_chain() && planned.line() != self.settings.line() {
-            let devnet = Self::with(self.home.clone(), planned, self.project.clone());
-            return devnet.accounts_new(name, count, amount);
-        }
         groups::check_spec(count, amount)?;
         self.runtime.prepare(false)?;
         self.make_group(name, count, amount)?;
@@ -1189,7 +1228,7 @@ impl Devnet {
     }
 
     fn group_summaries(&self) -> Result<Vec<GroupSummary>> {
-        groups::list(&self.groups_dir())?
+        groups::list(&self.home.groups_dir())?
             .into_iter()
             .map(|group| {
                 let info = group.info()?;
@@ -1209,12 +1248,12 @@ impl Devnet {
     /// from the catalog, a devnet wallet opened in it, and a public account funded with
     /// `amount`. A failed attempt leaves nothing behind.
     pub fn session_new(&self, name: &str, extra: &[String], amount: u128) -> Result<SessionMade> {
-        let session = Session::new(&self.sessions_dir(), name)?;
+        let session = Session::new(&self.home.sessions_dir(), name)?;
         if session.exists() {
             bail!("session {name} exists. `logos-devnet session rm {name}` first");
         }
-        if self.settings.line() == LezLine::V04 {
-            bail!("{SESSIONS_ON_V04}");
+        if !SESSIONS_READY {
+            bail!("{SESSIONS_WAIT}");
         }
         let modules = session::modules_with(extra)?;
         // Fails before any work when there is no faucet yet.
@@ -1339,7 +1378,7 @@ impl Devnet {
 
     pub fn session_list(&self) -> Result<Sessions> {
         let chain_up = self.runtime.running();
-        let rows = session::list(&self.sessions_dir())?
+        let rows = session::list(&self.home.sessions_dir())?
             .into_iter()
             .map(|session| {
                 let running = session.logosctl().answers_within(SESSION_CHECK_TIMEOUT);
@@ -1427,7 +1466,7 @@ impl Devnet {
     }
 
     fn existing_session(&self, name: &str) -> Result<Session> {
-        let session = Session::new(&self.sessions_dir(), name)?;
+        let session = Session::new(&self.home.sessions_dir(), name)?;
         if !session.exists() {
             bail!("no session {name}. `logos-devnet session ls` lists them");
         }
@@ -1569,12 +1608,11 @@ impl Devnet {
         let id = self.account_id(account)?;
         let rpc = self.rpc();
         let state = rpc.account(&id)?;
-        // Each program's bytes: `shards` on LEZ v0.3, `actor_states` on v0.4.
-        let shards: BTreeMap<String, Vec<u8>> = state["data"]["shards"]
+        // Each program's bytes.
+        let states: BTreeMap<String, Vec<u8>> = state["data"]["actor_states"]
             .as_object()
-            .or_else(|| state["data"]["actor_states"].as_object())
-            .map(|shards| {
-                shards
+            .map(|states| {
+                states
                     .iter()
                     .map(|(program, bytes)| {
                         let bytes = bytes.as_array().into_iter().flatten();
@@ -1584,11 +1622,11 @@ impl Devnet {
                     .collect()
             })
             .unwrap_or_default();
-        let data = shards
+        let data = states
             .iter()
             .map(|(p, bytes)| (p.clone(), bytes.len()))
             .collect();
-        let data_hex = shards
+        let data_hex = states
             .iter()
             .map(|(p, bytes)| {
                 (
@@ -1712,10 +1750,7 @@ impl Devnet {
             }
         }
         std::fs::create_dir_all(dir)?;
-        write_json(
-            &path,
-            &wallet_config(self.settings.line(), &self.settings.sequencer_url()),
-        )?;
+        write_json(&path, &wallet_config(&self.settings.sequencer_url()))?;
         Ok(WalletConfig { path })
     }
 }
@@ -1949,43 +1984,28 @@ fn remove_if_present(path: &Path, remove: fn(&Path) -> std::io::Result<()>) -> R
     }
 }
 
-/// A wallet config in the shape `lez_core` 0.5.1 writes. It reads `sequencer.sequencer_addr`;
-/// the top-level `sequencer_addr` and `sequencers` are set too, so a build that reads those
-/// finds the devnet as well.
-fn wallet_config(line: LezLine, sequencer: &str) -> Value {
-    let mut config = json!({
-        "multi_sequencer_client_config": { "calibration_limit": 3, "distribution_limit": 1 },
+/// The LEZ wallet's config, pointing at `sequencer`. It sets no `gas_limit`: the wallet
+/// measures each transaction's gas within its default budget (2M at rc3), which leaves room for
+/// a 96 KiB program segment.
+fn wallet_config(sequencer: &str) -> Value {
+    json!({
         "seq_block_poll_max_amount": 100,
         "seq_poll_max_retries": 10,
         "seq_poll_timeout": WALLET_POLL_TIMEOUT,
         "seq_tx_poll_max_blocks": 15,
-        "sequencer": { "sequencer_addr": sequencer },
-        "sequencer_addr": sequencer,
-        "sequencers": [{ "sequencer_addr": sequencer }]
-    });
-    // v0.3 declares this much gas on each transaction. v0.4 measures it within the
-    // `gas_limit` budget, whose default (2M at rc3) leaves room for a 96 KiB program segment.
-    if line == LezLine::V03 {
-        config["gas_limit"] = json!(200_000);
-    }
-    config
+        "sequencer": { "sequencer_addr": sequencer }
+    })
 }
 
-/// The wallet's arguments that send `amount` lepta from `from` to `to`. LEZ v0.4 takes an
-/// account it has never seen only when the payment names its public key (`key`), and then
-/// refuses `--to` beside it.
-fn transfer_args(
-    line: LezLine,
-    from: &PublicId,
-    to: &PublicId,
-    key: Option<&str>,
-    amount: u128,
-) -> Vec<String> {
+/// The wallet's arguments that send `amount` lepta from `from` to `to`. LEZ takes an account
+/// it has never seen only when the payment names its public key (`key`), and then refuses `--to`
+/// beside it.
+fn transfer_args(from: &PublicId, to: &PublicId, key: Option<&str>, amount: u128) -> Vec<String> {
     let mut args: Vec<String> = vec!["auth-transfer".into(), "send".into(), "--from".into()];
     args.push(from.wallet_form());
-    match (line, key) {
-        (LezLine::V04, Some(key)) => args.extend(["--to-pk".into(), key.to_owned()]),
-        _ => args.extend(["--to".into(), to.wallet_form()]),
+    match key {
+        Some(key) => args.extend(["--to-pk".into(), key.to_owned()]),
+        None => args.extend(["--to".into(), to.wallet_form()]),
     }
     args.extend(["--amount".into(), amount.to_string()]);
     args
@@ -2173,14 +2193,14 @@ mod tests {
         let devnet = devnet_in(&dir.path().join("home"));
         let err = devnet.session_restart(&["nobody".into()]).unwrap_err();
         assert!(err.to_string().contains("no session nobody"), "{err}");
-        let alice = devnet.sessions_dir().join("alice");
+        let alice = devnet.home.sessions_dir().join("alice");
         std::fs::create_dir_all(&alice).unwrap();
         let info = format!(r#"{{"modules":["lez_core"],"account":"{ID}","funded":1}}"#);
         std::fs::write(alice.join("session.json"), info).unwrap();
         let err = devnet.session_restart(&["alice".into()]).unwrap_err();
         assert!(err.to_string().contains("not running"), "{err}");
         // A session that couldn't come back is found before any restarts.
-        std::fs::create_dir_all(devnet.sessions_dir().join("bob")).unwrap();
+        std::fs::create_dir_all(devnet.home.sessions_dir().join("bob")).unwrap();
         let err = devnet
             .session_restart(&["alice".into(), "bob".into()])
             .unwrap_err();
@@ -2269,7 +2289,7 @@ mod tests {
         let devnet = devnet_in(&dir.path().join("home"));
         assert!(devnet.sessions_not_running().is_empty());
         for name in ["bob", "alice"] {
-            std::fs::create_dir_all(devnet.sessions_dir().join(name)).unwrap();
+            std::fs::create_dir_all(devnet.home.sessions_dir().join(name)).unwrap();
         }
         assert_eq!(devnet.sessions_not_running(), ["alice", "bob"]);
         // After `down`, a stopped daemon is no news.
@@ -2282,7 +2302,7 @@ mod tests {
         let devnet = devnet_in(&dir.path().join("home"));
         assert!(devnet.daemon_logs().is_empty());
         for name in ["bob", "alice"] {
-            std::fs::create_dir_all(devnet.sessions_dir().join(name)).unwrap();
+            std::fs::create_dir_all(devnet.home.sessions_dir().join(name)).unwrap();
         }
         std::fs::create_dir_all(devnet.home.messaging_dir()).unwrap();
         let logs = devnet.daemon_logs();
@@ -2388,7 +2408,7 @@ mod tests {
         assert!(err.to_string().contains("no hub"), "{err}");
         let err = devnet.logs(false, Some("alice"), false).unwrap_err();
         assert!(err.to_string().contains("no session alice"), "{err}");
-        std::fs::create_dir_all(devnet.sessions_dir().join("alice")).unwrap();
+        std::fs::create_dir_all(devnet.home.sessions_dir().join("alice")).unwrap();
         let err = devnet.logs(false, Some("alice"), false).unwrap_err();
         assert!(err.to_string().contains("hasn't started"), "{err}");
     }
@@ -2563,7 +2583,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let home = Home::locate(Some(dir.path().to_path_buf())).unwrap();
         // No project file: the session was made with `session new`.
-        std::fs::create_dir_all(home.sessions_dir(LezLine::V03).join("alice")).unwrap();
+        std::fs::create_dir_all(home.sessions_dir().join("alice")).unwrap();
         let devnet = Devnet::open(home, None).unwrap();
         let err = devnet.check_needs(|| false).unwrap_err();
         assert!(format!("{err:#}").contains("logosctl"), "{err:#}");
@@ -2610,37 +2630,24 @@ mod tests {
     }
 
     #[test]
-    fn wallet_configs_point_every_address_field_at_the_devnet() {
-        let config = wallet_config(LezLine::V03, "http://127.0.0.1:3040");
+    fn wallet_configs_point_at_the_devnet() {
+        let config = wallet_config("http://127.0.0.1:3040");
         assert_eq!(
             config["sequencer"]["sequencer_addr"],
             "http://127.0.0.1:3040"
         );
-        assert_eq!(config["sequencer_addr"], "http://127.0.0.1:3040");
-        assert_eq!(
-            config["sequencers"][0]["sequencer_addr"],
-            "http://127.0.0.1:3040"
-        );
-        assert_eq!(config["gas_limit"], 200_000);
         assert_eq!(config["seq_poll_timeout"], "2s");
-        // A v0.4 wallet budgets each transaction up to the block's cap when it sets none.
-        let config = wallet_config(LezLine::V04, "http://127.0.0.1:3040");
+        // The wallet measures each transaction's gas within its own default budget.
         assert!(config.get("gas_limit").is_none());
-        assert_eq!(config["sequencer_addr"], "http://127.0.0.1:3040");
     }
 
     #[test]
-    fn pays_an_account_by_its_key_on_v0_4() {
+    fn pays_an_account_by_its_key_when_known() {
         let faucet = PublicId::parse(ID).unwrap();
         let to = PublicId::parse("6YvesSEDWW25kpi8SSki2c8o5m3uACsigvGnNQ6wMruh").unwrap();
-        let args = |line, key| transfer_args(line, &faucet, &to, key, 5);
         let to_id = format!("Public/{}", to.as_str());
-        assert!(
-            args(LezLine::V03, Some("ab")).contains(&to_id),
-            "v0.3 pays by id"
-        );
-        // v0.4 admits an account it has never seen only when the payment names its key.
-        let by_key = args(LezLine::V04, Some("ab"));
+        // LEZ admits an account it has never seen only when the payment names its key.
+        let by_key = transfer_args(&faucet, &to, Some("ab"), 5);
         assert!(
             by_key.windows(2).any(|w| w == ["--to-pk", "ab"]),
             "{by_key:?}"
@@ -2649,25 +2656,17 @@ mod tests {
             !by_key.contains(&"--to".to_owned()),
             "--to and --to-pk conflict"
         );
-        assert!(args(LezLine::V04, None).contains(&to_id));
+        assert!(transfer_args(&faucet, &to, None, 5).contains(&to_id));
     }
 
     #[test]
-    fn refuses_sessions_on_lez_v0_4() {
+    fn refuses_sessions_until_a_lez_core_for_v0_4_ships() {
         let dir = tempfile::tempdir().unwrap();
-        let file = "home = \"home\"\n[devnet]\nlez = \"v0.4.0-rc3\"\n[sessions.alice]\n";
-        let devnet = devnet_with_file(dir.path(), file);
-        let next = Devnet::with(
-            devnet.home.clone(),
-            devnet.settings_for_up(),
-            devnet.project.clone(),
-        );
-        let err = next.check_needs(|| true).unwrap_err();
+        let devnet = devnet_with_file(dir.path(), "home = \"home\"\n[sessions.alice]\n");
+        assert!(devnet.refuses_sessions());
+        let err = devnet.check_needs(|| true).unwrap_err();
         assert!(err.to_string().contains("lez_core"), "{err}");
-        let mut v04 = devnet.settings.clone();
-        v04.lez = "v0.4.0-rc3".into();
-        let bare = Devnet::with(devnet.home.clone(), v04, None);
-        let err = bare.session_new("bob", &[], 1).unwrap_err();
+        let err = devnet.session_new("bob", &[], 1).unwrap_err();
         assert!(err.to_string().contains("lez_core"), "{err}");
     }
 
@@ -2763,7 +2762,7 @@ mod tests {
             ("admins", "not json"),
             ("users", crate::wallet_storage::tests::SYNCED_STORAGE),
         ] {
-            let group = Group::new(&home.groups_dir(crate::home::LezLine::V03), name).unwrap();
+            let group = Group::new(&home.groups_dir(), name).unwrap();
             std::fs::create_dir_all(group.wallet_dir()).unwrap();
             std::fs::write(group.wallet_storage(), storage).unwrap();
             group.mark_new_chain().unwrap();
@@ -2789,7 +2788,7 @@ mod tests {
     fn up_reports_what_it_deployed_and_updated() {
         let id = PublicId::parse(ID).unwrap();
         let mut status = Status {
-            lez: "v0.3.1".into(),
+            lez: "v0.4.0-rc3".into(),
             runtime: "docker".into(),
             sequencer: report::Sequencer {
                 url: "http://127.0.0.1:3040".into(),
@@ -2874,26 +2873,40 @@ mod tests {
     }
 
     #[test]
-    fn a_chain_keeps_its_own_lez_tag_without_settings() {
-        // A v0.4 chain whose settings.json was lost reads as the default v0.3.1: its own record
-        // must stop a v0.3 config being written over it.
+    fn a_v0_3_home_moves_on_only_by_reset() {
         let dir = tempfile::tempdir().unwrap();
-        let home = Home::locate(Some(dir.path().to_path_buf())).unwrap();
-        std::fs::create_dir_all(home.chain_dir()).unwrap();
-        home.record_chain_lez("v0.4.0-rc3").unwrap();
-        let devnet = Devnet::open(home, None).unwrap();
-        let err = devnet.check_chain_takes(&Settings::default()).unwrap_err();
-        assert!(err.to_string().contains("runs LEZ v0.4.0-rc3"), "{err}");
+        let home = Home::locate(Some(dir.path().into())).unwrap();
+        let v0_3 = Settings {
+            lez: "v0.3.1".into(),
+            ..Settings::default()
+        };
+        home.save_settings(&v0_3).unwrap();
+        for lez in [None, Some("v0.4.0-rc3".to_owned())] {
+            let opts = UpOptions {
+                lez,
+                ..UpOptions::default()
+            };
+            let err = Devnet::open(home.clone(), None)
+                .unwrap()
+                .up(&opts)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("reset") && err.contains("v0.9.4"), "{err}");
+        }
+        assert_eq!(home.load_settings().unwrap(), v0_3, "nothing changed");
     }
 
     #[test]
-    fn doctor_refuses_sessions_on_the_line_the_project_asks_for() {
+    fn a_chain_keeps_its_own_lez_tag_without_settings() {
+        // A chain whose settings.json was lost reads as the default tag: its own record must
+        // stop another tag's config being written over it.
         let dir = tempfile::tempdir().unwrap();
-        let file = "home = \"home\"\n[devnet]\nlez = \"v0.4.0-rc3\"\n[sessions.alice]\n";
-        let devnet = devnet_with_file(dir.path(), file);
-        // No chain yet: the settings are still the default v0.3.1.
-        assert!(devnet.refuses_sessions(devnet.settings_for_up().line()));
-        assert!(!devnet.refuses_sessions(LezLine::V03));
+        let home = Home::locate(Some(dir.path().to_path_buf())).unwrap();
+        std::fs::create_dir_all(home.chain_dir()).unwrap();
+        home.record_chain_lez("v0.4.7").unwrap();
+        let devnet = Devnet::open(home, None).unwrap();
+        let err = devnet.check_chain_takes(&Settings::default()).unwrap_err();
+        assert!(err.to_string().contains("runs LEZ v0.4.7"), "{err}");
     }
 
     #[test]
@@ -3118,7 +3131,10 @@ mod tests {
         let written = devnet.write_project_wallet_config(&target).unwrap();
         let config: Value =
             serde_json::from_str(&std::fs::read_to_string(&written.path).unwrap()).unwrap();
-        assert_eq!(config["sequencer_addr"], "http://127.0.0.1:3040");
+        assert_eq!(
+            config["sequencer"]["sequencer_addr"],
+            "http://127.0.0.1:3040"
+        );
         assert!(devnet.write_project_wallet_config(&target).is_err());
     }
 
@@ -3139,18 +3155,24 @@ mod tests {
     }
 
     #[test]
-    fn up_refuses_a_lez_tag_outside_v0_3_and_v0_4_before_saving_anything() {
+    fn up_refuses_a_lez_tag_outside_v0_4_before_saving_anything() {
         let dir = tempfile::tempdir().unwrap();
         let home = Home::locate(Some(dir.path().into())).unwrap();
-        let opts = UpOptions {
-            lez: Some("v0.5.0".into()),
-            ..UpOptions::default()
+        let up = |lez: &str| {
+            let opts = UpOptions {
+                lez: Some(lez.into()),
+                ..UpOptions::default()
+            };
+            Devnet::open(home.clone(), None)
+                .unwrap()
+                .up(&opts)
+                .unwrap_err()
+                .to_string()
         };
-        let err = Devnet::open(home.clone(), None)
-            .unwrap()
-            .up(&opts)
-            .unwrap_err();
-        assert!(err.to_string().contains("--lez v0.3.1"), "{err}");
+        let err = up("v0.5.0");
+        assert!(err.contains(&format!("--lez {DEFAULT_LEZ}")), "{err}");
+        let err = up("v0.3.1");
+        assert!(err.contains("v0.9.4"), "{err}");
         assert!(!home.settings_file().exists(), "nothing saved");
     }
 
@@ -3159,15 +3181,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let home = Home::locate(Some(dir.path().into())).unwrap();
         std::fs::create_dir_all(home.chain_dir().join("rocksdb-0101")).unwrap();
+        home.record_chain_lez(DEFAULT_LEZ).unwrap();
         let opts = UpOptions {
-            lez: Some("v0.3.9".into()),
+            lez: Some("v0.4.9".into()),
             ..UpOptions::default()
         };
         let err = Devnet::open(home.clone(), None)
             .unwrap()
             .up(&opts)
             .unwrap_err();
-        assert!(err.to_string().contains("reset --lez v0.3.9"), "{err}");
+        assert!(err.to_string().contains("reset --lez v0.4.9"), "{err}");
         assert!(!home.settings_file().exists(), "nothing saved");
     }
 

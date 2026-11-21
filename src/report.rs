@@ -404,7 +404,7 @@ mod tests {
     #[test]
     fn status_fields_are_stable() {
         let status = Status {
-            lez: "v0.3.1".into(),
+            lez: "v0.4.0-rc3".into(),
             runtime: "docker".into(),
             sequencer: Sequencer {
                 url: "http://127.0.0.1:3040".into(),
@@ -476,7 +476,7 @@ mod tests {
     #[test]
     fn a_runtime_that_didnt_answer_leaves_the_sequencer_unknown() {
         let status = Status {
-            lez: "v0.3.1".into(),
+            lez: "v0.4.0-rc3".into(),
             runtime: "docker".into(),
             sequencer: Sequencer {
                 url: "http://127.0.0.1:3040".into(),

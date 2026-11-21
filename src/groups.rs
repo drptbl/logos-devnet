@@ -65,24 +65,22 @@ pub struct GroupAccount {
     pub id: PublicId,
     /// Hex, the form `lez_core` takes.
     pub hex: String,
-    /// Its public key, in hex: what a LEZ v0.4 genesis funds, and `send --to-pk` pays. Groups
-    /// made before v0.10.0 have none.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub key: Option<String>,
+    /// Its public key, in hex: what genesis funds, and `send --to-pk` pays.
+    pub key: String,
 }
 
 impl GroupAccount {
     /// Its public key, once checked to name this account: genesis and payments by key would
-    /// otherwise fund another. `None` for an account from before keys were kept.
-    pub fn checked_key(&self) -> Result<Option<&str>> {
-        match &self.key {
-            Some(key) if PublicId::of_key(key)? != self.id => anyhow::bail!(
+    /// otherwise fund another.
+    pub fn checked_key(&self) -> Result<&str> {
+        if PublicId::of_key(&self.key)? != self.id {
+            anyhow::bail!(
                 "{} has a public key in accounts.json that names another account: delete its \
                  group, and `up` makes it again",
                 self.id.wallet_form()
-            ),
-            key => Ok(key.as_deref()),
+            );
         }
+        Ok(&self.key)
     }
 }
 
@@ -156,7 +154,7 @@ impl Group {
                     index: start + i,
                     hex: id.hex(),
                     id,
-                    key: Some(key),
+                    key,
                 }),
         );
         info
@@ -190,7 +188,7 @@ mod tests {
         let key = crate::account::public_key_of(&secret).unwrap();
         let id = PublicId::of_key(&key).unwrap();
         let info = Group::extended(GroupInfo::default(), vec![(id, key.clone())]);
-        assert_eq!(info.accounts[0].checked_key().unwrap(), Some(key.as_str()));
+        assert_eq!(info.accounts[0].checked_key().unwrap(), key);
         let wrong = Group::extended(
             GroupInfo::default(),
             vec![(PublicId::parse(A).unwrap(), key)],

@@ -14,7 +14,7 @@ use super::{
     Runtime, TimedOut, WalletArg, all_output_of, batch_script, redact_recovery_phrase, redacted,
     run_attached, sequencer_env, split_batch, stdout_of, stdout_within,
 };
-use crate::home::{Home, LezLine, Settings, write_json};
+use crate::home::{Home, Settings, write_json};
 
 /// The image's build recipe. Built from stdin, it needs no context: it clones LEZ itself.
 pub const DOCKERFILE: &str = include_str!("../../docker/Dockerfile");
@@ -74,7 +74,6 @@ impl Docker {
             chain_dir: &self.home.chain_dir().to_string_lossy(),
             dev_mode: self.settings.dev_mode,
             log_filter: &self.settings.log_filter,
-            line: self.settings.line(),
         });
         // JSON is YAML, and serde quotes every path correctly.
         write_json(&self.home.compose_file(), &spec)
@@ -394,26 +393,17 @@ struct ComposeInputs<'a> {
     chain_dir: &'a str,
     dev_mode: bool,
     log_filter: &'a str,
-    line: LezLine,
 }
 
 /// The compose file. The RPC is published on loopback only: it has no caller auth.
 fn compose_spec(i: &ComposeInputs) -> Value {
-    let command = match i.line {
-        LezLine::V03 => json!([
-            "sequencer_service",
-            format!("{CHAIN_MOUNT}/sequencer_config.json"),
-            "--port",
-            CONTAINER_PORT.to_string()
-        ]),
-        LezLine::V04 => json!([
-            "sequencer_service",
-            "start",
-            CHAIN_MOUNT,
-            "--rpc-listen-address",
-            format!("0.0.0.0:{CONTAINER_PORT}")
-        ]),
-    };
+    let command = json!([
+        "sequencer_service",
+        "start",
+        CHAIN_MOUNT,
+        "--rpc-listen-address",
+        format!("0.0.0.0:{CONTAINER_PORT}")
+    ]);
     json!({
         "name": i.project,
         "services": {
@@ -439,8 +429,8 @@ fn compose_spec(i: &ComposeInputs) -> Value {
                 "user": i.user,
                 "profiles": ["tools"],
                 "entrypoint": ["wallet"],
-                // From v0.4 the wallet asks for a password on the terminal unless this is set,
-                // and an empty one keeps its storage unencrypted.
+                // The wallet asks for a password on the terminal unless this is set, and an
+                // empty one keeps its storage unencrypted.
                 "environment": { "LEE_WALLET_HOME_DIR": WALLET_MOUNT, "LEE_WALLET_PASSWORD": "" }
             }
         }
@@ -454,22 +444,18 @@ mod tests {
     fn inputs() -> ComposeInputs<'static> {
         ComposeInputs {
             project: "logos-devnet",
-            image: "ghcr.io/drptbl/logos-devnet-sequencer:v0.3.1",
+            image: "ghcr.io/drptbl/logos-devnet-sequencer:v0.4.0-rc3",
             port: 3040,
             user: "501:20",
             chain_dir: "/Users/me/My Devnet/chain",
             dev_mode: false,
             log_filter: "info,kameo=warn",
-            line: LezLine::V03,
         }
     }
 
     #[test]
-    fn a_v0_4_sequencer_starts_from_its_home() {
-        let spec = compose_spec(&ComposeInputs {
-            line: LezLine::V04,
-            ..inputs()
-        });
+    fn the_sequencer_starts_from_its_home() {
+        let spec = compose_spec(&inputs());
         assert_eq!(
             spec["services"]["sequencer"]["command"],
             json!([
@@ -480,7 +466,7 @@ mod tests {
                 "0.0.0.0:3040"
             ])
         );
-        // A v0.4 wallet asks for a password on the terminal unless this is set; empty is none.
+        // The wallet asks for a password on the terminal unless this is set; empty is none.
         assert_eq!(
             spec["services"]["wallet"]["environment"]["LEE_WALLET_PASSWORD"],
             ""
@@ -579,7 +565,6 @@ mod tests {
                 "target": "/devnet/chain"
             }])
         );
-        assert_eq!(seq["command"][1], "/devnet/chain/sequencer_config.json");
         let wallet = &spec["services"]["wallet"];
         assert_eq!(wallet["user"], "501:20");
         assert_eq!(

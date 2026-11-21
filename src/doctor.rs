@@ -195,12 +195,13 @@ pub fn run(devnet: &Devnet, project_error: Option<&anyhow::Error>) -> Doctor {
         }
     }
 
-    if devnet.refuses_sessions(settings.line()) {
-        checks.push(fail(
-            "sessions",
-            "the project asks for sessions, which don't run on LEZ v0.4 yet",
-            "drop [sessions] from the project file, or stay on v0.3",
-        ));
+    if devnet.refuses_sessions() {
+        checks.push(Check {
+            name: "sessions".into(),
+            ok: false,
+            detail: crate::devnet::SESSIONS_WAIT.into(),
+            fix: None,
+        });
     }
 
     if devnet.wants_hub() {

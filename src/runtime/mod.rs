@@ -66,9 +66,8 @@ pub trait Runtime {
     /// Starts the sequencer on the config in the chain directory. Returns once it is launched,
     /// not once it serves.
     fn start(&self) -> Result<()>;
-    /// Sets a new LEZ v0.4 chain's home up from the config at `Home::setup_template` (see
-    /// `setup_args`): its config, channel signing key and funding key file. v0.3 chains have
-    /// nothing to set up.
+    /// Sets a new chain's home up from the config at `Home::setup_template` (see `setup_args`):
+    /// its config, channel signing key and funding key file.
     fn setup_chain(&self) -> Result<()>;
     /// Stops the sequencer if it runs.
     fn stop(&self) -> Result<()>;
@@ -102,7 +101,7 @@ pub trait Runtime {
 /// sequencer has no Bedrock node, so nothing ever pays with it.
 pub const FUNDING_KEY: &str = "2e03b2eff5a45478e7e79668d2a146cf2c5c7925bce927f2b1c67f2ab4fc0d26";
 
-/// `sequencer_service`'s arguments that set a v0.4 chain `home` up from `template`, with the
+/// `sequencer_service`'s arguments that set a chain `home` up from `template`, with the
 /// template's genesis, so the first `start` creates the channel.
 pub(crate) fn setup_args(home: &str, template: &str) -> Vec<String> {
     [

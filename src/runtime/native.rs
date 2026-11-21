@@ -17,7 +17,7 @@ use super::{
     redact_recovery_phrase, redacted, run_attached, run_building, sequencer_env, split_batch,
     stdout_of,
 };
-use crate::home::{Home, LezLine, Settings};
+use crate::home::{Home, Settings};
 
 pub struct Native {
     home: Home,
@@ -114,21 +114,15 @@ impl Runtime for Native {
                 .args(["build", "--release", "-p", package]);
             cmd
         };
-        // Two builds, so `prove` stays out of the wallet binary. v0.3 skips the prover kernels
-        // the sequencer never runs; from v0.4 it links the wallet, whose prover needs them.
-        let mut sequencer = cargo("sequencer_service");
-        if self.settings.line() == LezLine::V03 {
-            sequencer.env("RISC0_SKIP_BUILD_KERNELS", "1");
-        }
-        run_building(sequencer.args(["--features", SEQUENCER_FEATURES]))?;
+        // Two builds, so `prove` stays out of the wallet binary. The sequencer links the wallet,
+        // whose prover needs risc0's CPU kernels, so they're built.
+        run_building(cargo("sequencer_service").args(["--features", SEQUENCER_FEATURES]))?;
         run_building(&mut cargo("wallet"))
     }
 
     fn upstream_config(&self) -> Result<Value> {
-        let path = find_upstream_config(&self.src()).context(
-            "the LEZ checkout has no sequencer/service/configs/debug/sequencer_config.json \
-             or sequencer/service/networks/local.json",
-        )?;
+        let path = find_upstream_config(&self.src())
+            .context("the LEZ checkout has no sequencer/service/networks/local.json")?;
         let text = std::fs::read_to_string(&path)?;
         serde_json::from_str(&text).with_context(|| format!("{} is not JSON", path.display()))
     }
@@ -155,17 +149,10 @@ impl Runtime for Native {
             .append(true)
             .open(self.log_file())?;
         let mut cmd = Command::new(self.bin("sequencer_service"));
-        match self.settings.line() {
-            LezLine::V03 => cmd
-                .arg(self.home.chain_config())
-                .args(["--listen-address", "127.0.0.1", "--port"])
-                .arg(self.settings.port.to_string()),
-            LezLine::V04 => cmd
-                .arg("start")
-                .arg(self.home.chain_dir())
-                .arg("--rpc-listen-address")
-                .arg(format!("127.0.0.1:{}", self.settings.port)),
-        };
+        cmd.arg("start")
+            .arg(self.home.chain_dir())
+            .arg("--rpc-listen-address")
+            .arg(format!("127.0.0.1:{}", self.settings.port));
         let child = without_sequencer_vars(&mut cmd)
             .current_dir(self.home.chain_dir())
             .envs(sequencer_env(
@@ -257,8 +244,8 @@ impl Runtime for Native {
     }
 }
 
-/// `cmd` without the `SEQUENCER_*` variables this process has: a v0.4 sequencer reads each of
-/// its flags from one, and a stray one would change the devnet.
+/// `cmd` without the `SEQUENCER_*` variables this process has: the sequencer reads each of its
+/// flags from one, and a stray one would change the devnet.
 fn without_sequencer_vars(cmd: &mut Command) -> &mut Command {
     for (var, _) in std::env::vars_os() {
         if var.to_string_lossy().starts_with("SEQUENCER_") {
@@ -276,19 +263,14 @@ fn runs(command: &str, bin: &Path) -> bool {
         .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
 }
 
-/// Upstream's debug sequencer config, wherever this tag keeps it.
+/// Upstream's local sequencer config, `sequencer/service/networks/local.json`, wherever in the
+/// checkout this tag keeps it.
 fn find_upstream_config(dir: &Path) -> Option<PathBuf> {
     let mut stack = vec![(dir.to_path_buf(), 0)];
     while let Some((dir, depth)) = stack.pop() {
-        // v0.3's debug config, or v0.4's local one.
-        for (parent, name) in [
-            ("sequencer/service/configs/debug", "sequencer_config.json"),
-            ("sequencer/service/networks", "local.json"),
-        ] {
-            let file = dir.join(name);
-            if dir.ends_with(parent) && file.exists() {
-                return Some(file);
-            }
+        let file = dir.join("local.json");
+        if dir.ends_with("sequencer/service/networks") && file.exists() {
+            return Some(file);
         }
         if depth >= 6 {
             continue;
@@ -309,19 +291,19 @@ mod tests {
 
     #[test]
     fn recognises_only_the_sequencer_binary_itself() {
-        let bin = Path::new("/h/native/v0.3.1/target/release/sequencer_service");
+        let bin = Path::new("/h/native/v0.4.0-rc3/target/release/sequencer_service");
         assert!(runs(
-            "/h/native/v0.3.1/target/release/sequencer_service /h/chain/c.json --port 3040",
+            "/h/native/v0.4.0-rc3/target/release/sequencer_service /h/chain/c.json --port 3040",
             bin
         ));
         assert!(runs(
-            "/h/native/v0.3.1/target/release/sequencer_service",
+            "/h/native/v0.4.0-rc3/target/release/sequencer_service",
             bin
         ));
         for other in [
-            "lldb /h/native/v0.3.1/target/release/sequencer_service",
-            "vim /h/native/v0.3.1/target/release/sequencer_service.rs",
-            "/h/native/v0.3.1/target/release/sequencer_service_old --port 1",
+            "lldb /h/native/v0.4.0-rc3/target/release/sequencer_service",
+            "vim /h/native/v0.4.0-rc3/target/release/sequencer_service.rs",
+            "/h/native/v0.4.0-rc3/target/release/sequencer_service_old --port 1",
         ] {
             assert!(!runs(other, bin), "{other}");
         }
@@ -342,19 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn finds_the_debug_config_in_either_layout() {
-        for layout in ["lez/sequencer/service", "sequencer/service"] {
-            let dir = tempfile::tempdir().unwrap();
-            let debug = dir.path().join(layout).join("configs/debug");
-            std::fs::create_dir_all(&debug).unwrap();
-            std::fs::write(debug.join("sequencer_config.json"), "{}").unwrap();
-            let found = find_upstream_config(dir.path()).unwrap();
-            assert_eq!(found, debug.join("sequencer_config.json"), "{layout}");
-        }
-    }
-
-    #[test]
-    fn finds_the_v0_4_local_config() {
+    fn finds_the_local_config() {
         let dir = tempfile::tempdir().unwrap();
         let networks = dir.path().join("lez/sequencer/service/networks");
         std::fs::create_dir_all(&networks).unwrap();
@@ -369,9 +339,9 @@ mod tests {
     #[test]
     fn ignores_build_output() {
         let dir = tempfile::tempdir().unwrap();
-        let debug = dir.path().join("target/sequencer/service/configs/debug");
-        std::fs::create_dir_all(&debug).unwrap();
-        std::fs::write(debug.join("sequencer_config.json"), "{}").unwrap();
+        let networks = dir.path().join("target/sequencer/service/networks");
+        std::fs::create_dir_all(&networks).unwrap();
+        std::fs::write(networks.join("local.json"), "{}").unwrap();
         assert!(find_upstream_config(dir.path()).is_none());
     }
 }
