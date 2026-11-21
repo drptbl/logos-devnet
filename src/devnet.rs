@@ -1131,9 +1131,11 @@ impl Devnet {
         // Fails before any work when there is no faucet yet.
         self.faucet()?;
         self.require_running()?;
+        // v0.3 pays by id: only v0.4 needs the key.
         let key = match key {
             Some(key) => Some(key.to_owned()),
-            None => self.known_key(&to)?,
+            None if self.settings.line() == LezLine::V04 => self.known_key(&to)?,
+            None => None,
         };
         if self.settings.line() == LezLine::V04
             && key.is_none()
